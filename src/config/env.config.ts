@@ -98,6 +98,14 @@ class EnvironmentVariables {
 
   @IsOptional()
   @IsString()
+  OPENAI_EMBEDDING_MODEL?: string;
+
+  @IsOptional()
+  @IsNumber()
+  AI_SESSION_IDLE_MINUTES?: number;
+
+  @IsOptional()
+  @IsString()
   OPENAI_CHAT_MODEL?: string;
 
   @IsOptional()

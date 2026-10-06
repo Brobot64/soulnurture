@@ -468,9 +468,8 @@ POST /api/v1/conversations
 Save `conversationId = data.id`.
 
 **Request** `GET /api/v1/conversations` — assert `data.items` contains the new
-conversation (list endpoint; most recent first). There is intentionally **no
-conversation-close endpoint** — conversations stay open for the student to
-resume.
+conversation (list endpoint; most recent first). Conversations stay `ACTIVE`
+until the student closes one (§5.5) or the worker closes it as idle.
 
 ### 5.3 Send messages
 
@@ -536,6 +535,44 @@ attempt failed and the async lane took over — see Chapter 6).
 - last message `aiPayload.supportFlag.candidate === true` and
   `aiPayload.supportFlag.category === "SUICIDAL_IDEATION"`
 
+### 5.5 Close the conversation → session summary (memory)
+
+**Request** (as Jude):
+
+```http
+POST /api/v1/conversations/<conversationId>/close
+```
+
+**Expected** `200`. Assert `data.conversation.status === "CLOSED"` and
+`data.summaryQueued === true` (the conversation has messages and no summary
+yet). Closing is idempotent — repeat the call and assert `summaryQueued ===
+false` with no new job.
+
+The close queues a `SUMMARY` job (`kind = "SUMMARY"`, see §6.6) for the AI
+worker; within ~1 poll cycle it writes the session summary that feeds
+long-term memory recall. Verify:
+
+```sql
+SELECT summary, topics, "followUpHook", "emotionalTrend"
+FROM session_summary WHERE "conversationId" = '<conversationId>';
+```
+
+Assert `summary` is non-empty and `topics` ⊆ the canonical set (`exam`,
+`family`, `friendship`, `money`, `health`, `sleep`, `loneliness`, `bullying`,
+`identity`, `other`). Summaries pass a low-sensitivity guard before storage —
+diagnosis/medication/secrecy/crisis wording never persists; if the guard drops
+every sentence, fallback copy is stored instead.
+
+> The `embedding` column (pgvector) is best-effort: with `OPENAI_API_KEY`
+> unset it stays `NULL` and memory still works via recency. Recall for the
+> **next** conversation = last 2 summaries (30 days) + follow-up hooks (14
+> days) + top-2 vector-similar summaries when embeddings exist — carried into
+> the model context as `carriedContext`.
+
+> Idle close: any `ACTIVE` conversation with at least one message, untouched
+> for `AI_SESSION_IDLE_MINUTES` (default 120 min), is closed automatically by
+> the worker with a SUMMARY job — no endpoint call needed.
+
 ---
 
 ## 6. Async AI lane (worker retry)
@@ -577,6 +614,18 @@ Assert the target message flips to `aiPayload.asyncState === "COMPLETE"` and
 **6.5** Exhaustion probe: repeat with a fresh conversation/message and an insert
 that starts exhausted (`"attempts": 3`). Poll again — the placeholder must end
 at `aiPayload.asyncState === "FAILED"` (holding message kept).
+
+**6.6** SUMMARY jobs ride the same queue: `POST /close` (§5.5) and the idle
+scan enqueue jobs with `kind = "SUMMARY"` and a null
+`conversationMessageId`. The worker routes them to the summary writer instead
+of reply regeneration (no message rewrite); success flips the job to
+`SUCCEEDED`, and after exhausted retries it lands `FAILED` with an audit entry
+(`ai_generation.exhausted`, entity `SessionSummary`).
+
+```sql
+SELECT kind, status, attempts FROM ai_generation_job
+ORDER BY "createdAt" DESC LIMIT 5;
+```
 
 ---
 
@@ -786,8 +835,10 @@ Follow-up statuses: `PENDING | SCHEDULED | COMPLETED | CANCELLED`.
 - `data.intents` is an array containing `SUICIDAL_IDEATION`
 - serialized body contains **no secrets** (no `GROQ_API_KEY`, no `OPENAI_API_KEY`)
 - current blocks: `promptVersion`, `chain` (`{ "order": ["openai", "groq"] }`),
-  `chat`, `openai`, `pricing`, `budget`, `transcription`, `context`, `async`,
-  `safeguarding`, `intents`, `canonicalCategories`, `canonicalSeverities`,
+  `chat`, `openai`, `pricing`, `budget`, `transcription`, `embedding`
+  (model + timeout), `memory` (idle close, recall windows, max similar),
+  `summaries` (summary output cap), `context`, `async`, `safeguarding`,
+  `intents`, `canonicalCategories`, `canonicalSeverities`, `canonicalTopics`,
   `guardrails` (`input` caps + injection probes, `output` caps + banned claims,
   `rate` per-student limits — see §5.3)
 
@@ -867,6 +918,7 @@ For each persona (Jude, Grace, Ibrahim, Tunde), in order:
 | `SupportFlagSeverity` | `TIER_1_MODERATE`, `TIER_2_HIGH`, `TIER_3_ACUTE` |
 | `SupportFlagStatus` | `OPEN`, `IN_REVIEW`, `ACKNOWLEDGED`, `RESOLVED`, `ESCALATED` |
 | `SupportFlagSource` | `AI_CANDIDATE`, `SERVER_POLICY`, `PROFESSIONAL`, `SELF_REPORT` |
+| `AiJobKind` | `REPLY`, `SUMMARY`, `VERNACULAR` |
 | `FollowUpStatus` | `PENDING`, `SCHEDULED`, `COMPLETED`, `CANCELLED` |
 | `ResourceType` / `ResourceCategory` | see `prisma/schema.prisma` (seed data in `prisma/seed.ts`) |
 
@@ -890,3 +942,4 @@ For each persona (Jude, Grace, Ibrahim, Tunde), in order:
 | 2026-10-06 | Initial handbook (Phases A/B baseline + Phase C step 1: provider chain config blocks in §9.5, budget meter §9.7). |
 | 2026-10-06 | Synced against the live route map: full envelope fields (§0.2), verification resend + verify-first rule (§0.3, §4.2), auth utilities (§2.5), `verificationEmailSent` + enrolment-key negatives (§2.1), `imageUrl` (§2.3), `GET students/me` (§4.3), all privacy booleans (§4.4), disclosure acknowledge role guard (§4.5, §10), full `FeelingLabel` set + `GET check-ins/:id` (§5.1), conversation list + no-close note (§5.2), message 4000-char cap + full turn shape (§5.3), resource query params (§7.1), journal list + limits (§7.2), `URGENT_UNSAFE`→`ESCALATED` + `GET support-requests/:id` (§8.1), review-status constraint (§8.2), flag filters (§9.2), follow-up list roles (§9.3). |
 | 2026-10-06 | Phase C step 2: guardrails — message/reply caps + injection probes + per-student AI rate limits (429) in §5.3, guardrails config block in §9.5. |
+| 2026-10-06 | Phase C step 3: conversation close endpoint + session-summary memory — close flow §5.5, SUMMARY/idle-close worker notes §6.6, `embedding`/`memory`/`summaries` config blocks + `canonicalTopics` §9.5, `AiJobKind` in Appendix A. |

@@ -129,7 +129,7 @@ export class OpenAiProvider implements AiProvider {
         : {}),
       response_format: {
         type: 'json_schema',
-        json_schema: RESPONSE_JSON_SCHEMA,
+        json_schema: input.jsonSchema ?? RESPONSE_JSON_SCHEMA,
       },
       messages: [
         { role: 'system', content: input.systemPrompt },

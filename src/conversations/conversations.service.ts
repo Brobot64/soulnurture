@@ -43,6 +43,7 @@ function emptyContext(): AiContext {
     relevantReflection: null,
     relevantResources: [],
     currentJourneyStep: null,
+    carriedContext: null,
   };
 }
 
@@ -92,6 +93,53 @@ export class ConversationsService {
   async getOne(userId: string, id: string) {
     const { conversation } = await this.owned(userId, id);
     return conversation;
+  }
+
+  /**
+   * Student closes a conversation. Idempotent: an already CLOSED/ARCHIVED
+   * conversation returns without enqueueing anything. When the conversation
+   * has messages and no summary yet, a SUMMARY AiGenerationJob is queued —
+   * the AI worker writes the session summary that feeds memory recall.
+   */
+  async close(userId: string, id: string) {
+    const { student, conversation } = await this.owned(userId, id);
+    if (conversation.status !== 'ACTIVE') {
+      return { conversation, summaryQueued: false };
+    }
+
+    const closed = await this.prisma.conversation.update({
+      where: { id: conversation.id },
+      data: { status: 'CLOSED' },
+    });
+
+    let summaryQueued = false;
+    const existingSummary = await this.prisma.sessionSummary.findUnique({
+      where: { conversationId: conversation.id },
+      select: { id: true },
+    });
+    if (conversation.messages.length > 0 && !existingSummary) {
+      await this.prisma.aiGenerationJob.create({
+        data: {
+          kind: 'SUMMARY',
+          conversationMessageId: null,
+          input: {
+            studentId: student.id,
+            conversationId: conversation.id,
+          } as unknown as Prisma.InputJsonValue,
+        },
+      });
+      summaryQueued = true;
+    }
+
+    await this.auditService.log({
+      actorId: userId,
+      action: 'conversation.closed',
+      entity: 'Conversation',
+      entityId: conversation.id,
+      meta: { summaryQueued },
+    });
+
+    return { conversation: closed, summaryQueued };
   }
 
   async sendMessage(userId: string, id: string, dto: SendMessageDto) {

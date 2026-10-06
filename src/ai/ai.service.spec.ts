@@ -10,6 +10,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AI_PROVIDER } from './providers/ai-provider.interface.js';
 import { IntentEngineService } from './intents/intent-engine.service.js';
+import { MemoryRepository } from './memory/memory.repository.js';
 import type { AiGenerationResult } from './providers/ai-provider.interface.js';
 
 const aiConfigStub = {
@@ -43,6 +44,7 @@ const ctx = {
     { id: 'r1', title: 'Breath', type: 'SOMATIC_EXERCISE', category: 'GROUNDING', description: 'Breathing guide' },
   ],
   currentJourneyStep: 2,
+  carriedContext: null,
 };
 
 function validModelResult(overrides: Partial<AiGenerationResult> = {}): AiGenerationResult {
@@ -84,6 +86,10 @@ describe('AiService.generateAndApply', () => {
         { provide: AuditService, useValue: auditService },
         GuardrailService,
         { provide: AI_CONFIG, useValue: aiConfigStub },
+        {
+          provide: MemoryRepository,
+          useValue: { embedAndStore: vi.fn(), recall: vi.fn() },
+        },
       ],
     }).compile();
   }

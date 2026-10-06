@@ -121,6 +121,12 @@ enum AiJobStatus {
   FAILED
 }
 
+enum AiJobKind {
+  REPLY
+  SUMMARY
+  VERNACULAR
+}
+
 enum FollowUpStatus {
   PENDING
   SCHEDULED
@@ -215,6 +221,7 @@ model StudentProfile {
   toolboxItems      ToolboxItem[]
   consentRecords    ConsentRecord[]
   privacyPreference PrivacyPreference?
+  sessionSummaries  SessionSummary[]
 
   @@map("student_profile")
 }
@@ -298,6 +305,7 @@ model Conversation {
   messages        ConversationMessage[]
   supportRequests SupportRequest[]
   supportFlags    SupportFlag[]
+  summary         SessionSummary?
 
   @@index([studentId, createdAt])
   @@map("conversation")
@@ -479,7 +487,8 @@ model AuditLog {
 /// orchestration and updates the placeholder message in place.
 model AiGenerationJob {
   id                    String      @id @default(uuid()) @db.Uuid
-  conversationMessageId String      @unique @db.Uuid
+  conversationMessageId String?     @unique @db.Uuid
+  kind                  AiJobKind   @default(REPLY)
   input                 Json
   attempts              Int         @default(0)
   lastError             String?
@@ -487,9 +496,10 @@ model AiGenerationJob {
   status                AiJobStatus @default(PENDING)
   createdAt             DateTime    @default(now())
   updatedAt             DateTime    @updatedAt
-  message               ConversationMessage @relation(fields: [conversationMessageId], references: [id], onDelete: Cascade)
+  message               ConversationMessage? @relation(fields: [conversationMessageId], references: [id], onDelete: Cascade)
 
   @@index([status, nextRetryAt])
+  @@index([kind, status])
   @@map("ai_generation_job")
 }
 
@@ -509,4 +519,28 @@ model AiUsageDaily {
 
   @@unique([day, provider])
   @@map("ai_usage_daily")
+}
+
+/// AI-written digest of a closed conversation. One row per conversation
+/// (enforced by the worker, not a unique constraint — re-close is idempotent).
+/// `embedding` is pgvector-owned raw SQL (see src/ai/memory/memory.repository.ts);
+/// the schema marks it for typing only.
+model SessionSummary {
+  id                    String   @id @default(uuid()) @db.Uuid
+  studentId             String   @db.Uuid
+  conversationId        String   @unique @db.Uuid
+  summary               String   @db.VarChar(400)
+  topics                String[]
+  followUpHook          String?  @db.VarChar(140)
+  emotionalTrend        String?
+  summaryLocalized      String?
+  followUpHookLocalized String?
+  embedding             Unsupported("vector(1536)")?
+  createdAt             DateTime @default(now())
+
+  student      StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  conversation Conversation   @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([studentId, createdAt])
+  @@map("session_summary")
 }

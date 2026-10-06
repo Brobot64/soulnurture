@@ -4,6 +4,10 @@ export interface AiGenerationInput {
   systemPrompt: string;
   messages: { role: 'user' | 'assistant' | 'system'; content: string }[];
   language?: string;
+  /** Structured-output override (e.g. the session-summary schema). Members
+   * that support json_schema use it; others ignore it and the caller
+   * validates the raw JSON itself. */
+  jsonSchema?: { name: string; strict: boolean; schema: Record<string, unknown> };
 }
 
 export interface AiGenerationResult {

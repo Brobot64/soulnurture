@@ -87,6 +87,24 @@ export const CANONICAL_SEVERITIES = [
   'TIER_3_ACUTE',
 ] as const;
 
+/**
+ * Canonical topic vocabulary for session summaries (Phase C step 3). The
+ * summary writer must pick from this list only — keeps the memory/search
+ * surface uniform and reviewable.
+ */
+export const CANONICAL_TOPICS = [
+  'exam',
+  'family',
+  'friendship',
+  'money',
+  'health',
+  'sleep',
+  'loneliness',
+  'bullying',
+  'identity',
+  'other',
+] as const;
+
 export const INTENTS: IntentDefinition[] = [
   {
     id: 'SUICIDAL_IDEATION',

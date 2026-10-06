@@ -20,6 +20,7 @@ import type { AiConfig } from './config/ai.config.js';
 import {
   CANONICAL_CATEGORIES,
   CANONICAL_SEVERITIES,
+  CANONICAL_TOPICS,
   INTENTS,
 } from './intents/intents.config.js';
 
@@ -51,7 +52,7 @@ export class AiController {
   @ApiOperation({
     summary: 'Explain current AI configuration and safeguarding intents',
     description:
-      'Non-secret explanation surface for professionals and the clinical reviewer: chat/transcription models, context bounds, async pipeline settings, the guardrail configuration (input/output/rate), and every registered intent with its detection signals and actions. Secrets (API keys) are never included.',
+      'Non-secret explanation surface for professionals and the clinical reviewer: chat/transcription/embedding models, session-summary memory settings (idle close, recall windows), context bounds, async pipeline settings, the guardrail configuration (input/output/rate), and every registered intent with its detection signals and actions. Secrets (API keys) are never included.',
   })
   @ApiEnvelopeOk(Object)
   config() {
@@ -63,6 +64,9 @@ export class AiController {
       pricing: this.aiConfig.pricing,
       budget: this.aiConfig.budget,
       transcription: this.aiConfig.transcription,
+      embedding: this.aiConfig.embedding,
+      memory: this.aiConfig.memory,
+      summaries: this.aiConfig.summaries,
       context: this.aiConfig.context,
       async: this.aiConfig.async,
       safeguarding: this.aiConfig.safeguarding,
@@ -78,6 +82,7 @@ export class AiController {
       })),
       canonicalCategories: CANONICAL_CATEGORIES,
       canonicalSeverities: CANONICAL_SEVERITIES,
+      canonicalTopics: CANONICAL_TOPICS,
     };
   }
 

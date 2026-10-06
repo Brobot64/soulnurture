@@ -19,6 +19,8 @@ import {
 } from './providers/chain.provider.js';
 import { GroqAiProvider } from './providers/groq/groq.provider.js';
 import { OpenAiProvider } from './providers/openai/openai.provider.js';
+import { EmbeddingProvider } from './providers/embedding/embedding.provider.js';
+import { MemoryRepository } from './memory/memory.repository.js';
 import { AiUsageMeterService } from './providers/usage-meter.service.js';
 import { AI_CONFIG, buildAiConfig } from './config/ai.config.js';
 import type { AiConfig } from './config/ai.config.js';
@@ -36,6 +38,8 @@ import { IntentEngineService } from './intents/intent-engine.service.js';
     GuardrailService,
     GroqAiProvider,
     OpenAiProvider,
+    EmbeddingProvider,
+    MemoryRepository,
     AiUsageMeterService,
     {
       provide: AI_PROVIDER_CHAIN_MEMBERS,

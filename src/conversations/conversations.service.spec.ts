@@ -98,6 +98,7 @@ describe('ConversationsService', () => {
       },
       aiGenerationJob: { create: vi.fn() },
       supportFlag: { findFirst: vi.fn(), create: vi.fn() },
+      sessionSummary: { findUnique: vi.fn() },
     };
     ai = { generateAndApply: vi.fn() };
     guardrail = { assertMessageAllowed: vi.fn() };
@@ -320,5 +321,109 @@ describe('ConversationsService', () => {
       expect.objectContaining({ show: true }),
     );
     expect(result.assistantMessage.content).toContain('connect');
+  });
+
+  describe('close', () => {
+    it('closes an ACTIVE conversation and queues a SUMMARY job for the worker', async () => {
+      prisma.conversation.findUnique.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        status: 'ACTIVE',
+        messages: [{ id: 'msg-1' }, { id: 'msg-2' }],
+      });
+      prisma.conversation.update.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        status: 'CLOSED',
+      });
+      prisma.sessionSummary.findUnique.mockResolvedValue(null);
+      prisma.aiGenerationJob.create.mockResolvedValue({ id: 'job-1' });
+
+      const result = await service.close('user-1', 'conv-1');
+
+      expect(result.summaryQueued).toBe(true);
+      expect(result.conversation.status).toBe('CLOSED');
+      expect(prisma.conversation.update).toHaveBeenCalledWith({
+        where: { id: 'conv-1' },
+        data: { status: 'CLOSED' },
+      });
+      expect(prisma.aiGenerationJob.create).toHaveBeenCalledWith({
+        data: {
+          kind: 'SUMMARY',
+          conversationMessageId: null,
+          input: { studentId: student.id, conversationId: 'conv-1' },
+        },
+      });
+      expect(auditService.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          actorId: 'user-1',
+          action: 'conversation.closed',
+          entity: 'Conversation',
+          entityId: 'conv-1',
+          meta: { summaryQueued: true },
+        }),
+      );
+    });
+
+    it('is idempotent: an already CLOSED conversation queues nothing', async () => {
+      prisma.conversation.findUnique.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        status: 'CLOSED',
+        messages: [{ id: 'msg-1' }],
+      });
+
+      const result = await service.close('user-1', 'conv-1');
+
+      expect(result.summaryQueued).toBe(false);
+      expect(prisma.conversation.update).not.toHaveBeenCalled();
+      expect(prisma.sessionSummary.findUnique).not.toHaveBeenCalled();
+      expect(prisma.aiGenerationJob.create).not.toHaveBeenCalled();
+      expect(auditService.log).not.toHaveBeenCalled();
+    });
+
+    it('queues nothing for a conversation without messages', async () => {
+      prisma.conversation.findUnique.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        status: 'ACTIVE',
+        messages: [],
+      });
+      prisma.conversation.update.mockResolvedValue({
+        id: 'conv-1',
+        status: 'CLOSED',
+      });
+      prisma.sessionSummary.findUnique.mockResolvedValue(null);
+
+      const result = await service.close('user-1', 'conv-1');
+
+      expect(result.summaryQueued).toBe(false);
+      expect(prisma.aiGenerationJob.create).not.toHaveBeenCalled();
+      expect(auditService.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'conversation.closed',
+          meta: { summaryQueued: false },
+        }),
+      );
+    });
+
+    it('queues nothing when a summary already exists', async () => {
+      prisma.conversation.findUnique.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        status: 'ACTIVE',
+        messages: [{ id: 'msg-1' }],
+      });
+      prisma.conversation.update.mockResolvedValue({
+        id: 'conv-1',
+        status: 'CLOSED',
+      });
+      prisma.sessionSummary.findUnique.mockResolvedValue({ id: 'sum-1' });
+
+      const result = await service.close('user-1', 'conv-1');
+
+      expect(result.summaryQueued).toBe(false);
+      expect(prisma.aiGenerationJob.create).not.toHaveBeenCalled();
+    });
   });
 });

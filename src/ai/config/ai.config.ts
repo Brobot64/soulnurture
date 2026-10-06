@@ -45,6 +45,32 @@ export interface AiConfig {
   transcription: {
     model: string;
   };
+  /** OpenAI text embeddings — pgvector memory recall. Failure degrades the
+   * memory layer to recency-only, never throws (see memory.repository.ts). */
+  embedding: {
+    model: string;
+    timeoutMs: number;
+  };
+  /** Session-summary memory: idle close + recall windows (see
+   * src/ai/memory/memory.repository.ts). */
+  memory: {
+    /** ACTIVE conversation untouched for this long → worker closes it and
+     * queues a SUMMARY job. */
+    idleMinutes: number;
+    /** How far back recency recall + vector similarity look. */
+    recallDays: number;
+    /** Pending follow-up hooks stay eligible this long. */
+    hookDays: number;
+    maxRecents: number;
+    maxHooks: number;
+    maxSimilar: number;
+    /** Cosine similarity floor for vector recall. */
+    minSimilarity: number;
+  };
+  /** Session-summary generation budget (small JSON, see summarize.prompt.ts). */
+  summaries: {
+    maxOutputTokens: number;
+  };
   context: {
     /** Max recent messages replayed to the model. */
     messageLimit: number;
@@ -145,6 +171,24 @@ export function buildAiConfig(config: ConfigService): AiConfig {
       model:
         config.get<string>('GROQ_TRANSCRIPTION_MODEL') ??
         'whisper-large-v3-turbo',
+    },
+    embedding: {
+      model:
+        config.get<string>('OPENAI_EMBEDDING_MODEL') ??
+        'text-embedding-3-small',
+      timeoutMs: 10_000,
+    },
+    memory: {
+      idleMinutes: Number(config.get<string>('AI_SESSION_IDLE_MINUTES') ?? 120),
+      recallDays: 30,
+      hookDays: 14,
+      maxRecents: 2,
+      maxHooks: 3,
+      maxSimilar: 2,
+      minSimilarity: 0.8,
+    },
+    summaries: {
+      maxOutputTokens: 200,
     },
     context: {
       messageLimit: Number(config.get<string>('AI_CONTEXT_MESSAGE_LIMIT') ?? 12),
