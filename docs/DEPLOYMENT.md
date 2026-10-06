@@ -90,7 +90,24 @@ sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd
 sshd -T | grep -Ei '^(port|permitrootlogin|passwordauthentication)'
 # want: port 2222 / permitrootlogin no / passwordauthentication no
 # if a .d/ file overrides them: fix or remove that file, re-run sshd -T
-systemctl restart ssh
+
+# Ubuntu 24.04 runs sshd socket-activated: ssh.socket owns the listening port
+# and the Port directive above is IGNORED — sshd stays on 22 and sshd -T
+# cannot catch that. Pin the socket to 2222 (the empty ListenStream= resets
+# the stock value before ours is added; "active" from: systemctl is-active ssh.socket):
+mkdir -p /etc/systemd/system/ssh.socket.d
+printf '[Socket]\nListenStream=\nListenStream=2222\n' > /etc/systemd/system/ssh.socket.d/override.conf
+systemctl daemon-reload
+systemctl restart ssh.socket
+systemctl restart ssh     # let sshd attach to the new socket
+
+# PROVE the port is really bound — "Connection refused" from your laptop means
+# nothing listens on 2222 yet, no matter what sshd -T printed:
+ss -tlnp | grep -w 2222   # must list sshd
+# not socket-activated (is-active says inactive) but still on 22? then the
+# daemon just wasn't restarted: systemctl restart ssh
+# no ssh.socket unit and restart fails? socket activation is off entirely;
+# plain `systemctl restart ssh` is all you need.
 
 # --- firewall: ssh on 2222 (rate-limited), web only
 ufw default deny incoming && ufw default allow outgoing
@@ -102,7 +119,7 @@ systemctl enable --now fail2ban
 dpkg-reconfigure -plow unattended-upgrades    # answer Yes when prompted
 ```
 
-**Keep this root session open** and prove the new door from a second terminal on your laptop: `ssh -p 2222 deploy@YOUR_VPS_IP`. Root login and password auth are dead now — catching a typo while this session is still open costs nothing; a lockout costs a VNC-console session. All further commands run as `deploy`: `ssh -p 2222 deploy@YOUR_VPS_IP` (with `sudo` where needed).
+**Keep this root session open** and prove the new door from a second terminal on your laptop: `ssh -p 2222 deploy@YOUR_VPS_IP`. **"Connection refused" means nothing is bound to 2222 — re-run the ssh.socket block above; don't close this session until the new door opens.** Root login and password auth are dead now — catching a typo while this session is still open costs nothing; a lockout costs a VNC-console session. All further commands run as `deploy`: `ssh -p 2222 deploy@YOUR_VPS_IP` (with `sudo` where needed).
 
 ---
 
