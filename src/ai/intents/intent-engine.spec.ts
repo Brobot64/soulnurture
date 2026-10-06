@@ -110,4 +110,44 @@ describe('IntentEngineService', () => {
     expect(verdict!.matchedBy).toBe('MODEL_CANDIDATE');
     expect(verdict!.category).toBe('NONE');
   });
+
+  it('vernacular keyword packs escalate Hausa suicidal language', () => {
+    const verdict = engine.evaluate({
+      userContent: 'Ina son in mutu',
+      aiResult: aiResult(),
+    });
+    expect(verdict).not.toBeNull();
+    expect(verdict!.intentId).toBe('SUICIDAL_IDEATION');
+    expect(verdict!.matchedBy).toBe('SERVER_KEYWORDS');
+    expect(verdict!.severity).toBe('TIER_3_ACUTE');
+    expect(verdict!.keywordEvidence).toContain('ina son in mutu');
+  });
+
+  it('vernacular Pidgin panic terms map to ACUTE_PANIC', () => {
+    const verdict = engine.evaluate({
+      userContent: 'i no fit breathe',
+      aiResult: aiResult(),
+    });
+    expect(verdict!.intentId).toBe('ACUTE_PANIC');
+    expect(verdict!.severity).toBe('TIER_2_HIGH');
+    expect(verdict!.keywordEvidence).toContain('i no fit breathe');
+  });
+
+  it('vernacular matching is case-insensitive like the English packs', () => {
+    const verdict = engine.evaluate({
+      userContent: 'I WAN DIE',
+      aiResult: aiResult(),
+    });
+    expect(verdict!.intentId).toBe('SUICIDAL_IDEATION');
+    expect(verdict!.keywordEvidence).toContain('i wan die');
+  });
+
+  it('benign vernacular chat does not trip the packs', () => {
+    expect(
+      engine.evaluate({
+        userContent: 'Mo ti rẹ̀ rẹ̀ lónìí',
+        aiResult: aiResult(),
+      }),
+    ).toBeNull();
+  });
 });

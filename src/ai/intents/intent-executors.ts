@@ -32,6 +32,9 @@ export interface IntentApplyContext {
   conversationId: string;
   userContent: string;
   relevantResources: AiContext['relevantResources'];
+  /** Overrides the derived flag source — the vernacular second pass flags on
+   * translated text (SERVER_KEYWORDS match) but must stay AI_CANDIDATE. */
+  flagSourceOverride?: 'SERVER_POLICY' | 'AI_CANDIDATE';
 }
 
 const logger = new Logger('IntentExecutors');
@@ -76,9 +79,10 @@ const SUPPORT_FLAG_EXECUTOR: IntentExecutor = {
         severity: verdict.severity,
         status: SupportFlagStatus.OPEN,
         source:
-          verdict.matchedBy === 'SERVER_KEYWORDS'
+          ctx.flagSourceOverride ??
+          (verdict.matchedBy === 'SERVER_KEYWORDS'
             ? 'SERVER_POLICY'
-            : 'AI_CANDIDATE',
+            : 'AI_CANDIDATE'),
         aiContextSummary: summary,
         autoActions: verdict.actions.map((a) => a.type),
         intentId: verdict.intentId,

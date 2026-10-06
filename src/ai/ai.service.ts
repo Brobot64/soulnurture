@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { AiContextService } from './context/ai-context.service.js';
 import { GuardrailService } from './guardrails/guardrail.service.js';
 import {
@@ -36,6 +37,12 @@ import {
   type AiGenerationResult,
   type AiTranscriptionResult,
 } from './providers/ai-provider.interface.js';
+import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js';
+import type { MessageUnderstanding } from './language/understanding.schema.js';
+import {
+  languagePromptDirective,
+  type SupportedLanguage,
+} from './language/language.config.js';
 
 /**
  * Full AI orchestration for one message: context → provider → schema
@@ -75,8 +82,72 @@ export interface SummarizeConversationOutcome {
   embedded: boolean;
 }
 
+export interface UnderstandMessageInput {
+  studentId: string;
+  conversationId: string;
+  /** The USER message the understanding is attached to. */
+  messageId: string;
+  content: string;
+  language: SupportedLanguage;
+  studentRef: string;
+  classLabel: string | null;
+  /** The synchronous first pass already flagged — skip the second sweep. */
+  firstPassFlagged: boolean;
+}
+
+export interface UnderstandMessageOutcome {
+  understanding: MessageUnderstanding;
+  /** True when the English translation tripped the server keyword floor. */
+  escalated: boolean;
+  notes: string[];
+}
+
+/** The subset of UnderstandMessageInput carried in the VERNACULAR job row;
+ * the worker fills messageId/content from the referenced message. */
+export type VernacularJobInput = Omit<
+  UnderstandMessageInput,
+  'messageId' | 'content'
+>;
+
 const SUMMARY_FALLBACK =
   'The student talked with Soul Nurture about their wellbeing.';
+
+/** Second-pass placeholder: a model that flagged nothing — only the server
+ * keyword layer can fire on the translated text. */
+function noFlagResult(): AiGenerationResult {
+  return {
+    message: '',
+    emotion: { detected: null, confidence: null },
+    reflection: { question: null, insight: null },
+    resource: { recommended: false, resourceId: null },
+    humanSupport: { recommended: false, type: null, reason: null },
+    supportFlag: { candidate: false, category: null, severity: null },
+    action: 'NONE',
+  };
+}
+
+/** USER messages sent in a Nigerian language summarize from their English
+ * understanding (when the VERNACULAR lane produced one) so the summary model
+ * reads meaning, not untranslated content. */
+function transcriptText(m: {
+  role: string;
+  content: string;
+  aiPayload: unknown;
+}): string {
+  if (m.role !== 'USER') return m.content;
+  const payload =
+    m.aiPayload && typeof m.aiPayload === 'object'
+      ? (m.aiPayload as Record<string, unknown>)
+      : null;
+  const understanding =
+    payload?.understanding && typeof payload.understanding === 'object'
+      ? (payload.understanding as Record<string, unknown>)
+      : null;
+  const translation = understanding?.englishTranslation;
+  return typeof translation === 'string' && translation.length > 0
+    ? translation
+    : m.content;
+}
 
 @Injectable()
 export class AiService {
@@ -88,6 +159,7 @@ export class AiService {
     private readonly auditService: AuditService,
     private readonly guardrail: GuardrailService,
     private readonly memory: MemoryRepository,
+    private readonly understandingProvider: NatlasTranslationProvider,
     @Inject(AI_CONFIG) private readonly aiConfig: AiConfig,
   ) {}
 
@@ -108,7 +180,9 @@ export class AiService {
     const systemPrompt = [
       SYSTEM_PROMPT,
       `Prompt version: ${REFLECTION_PROMPT_VERSION}`,
-      `Language: ${input.language ?? ctx.student.preferredLanguage ?? 'en'}`,
+      languagePromptDirective(
+        input.language ?? ctx.student.preferredLanguage ?? 'en',
+      ),
       `Valid supportFlag.category values: ${CANONICAL_CATEGORIES.join(', ')}`,
       `Valid supportFlag.severity values: ${CANONICAL_SEVERITIES.join(', ')}`,
       `Approved context JSON: ${JSON.stringify(ctx)}`,
@@ -217,15 +291,16 @@ export class AiService {
     const messages = await this.prisma.conversationMessage.findMany({
       where: { conversationId: input.conversationId },
       orderBy: { createdAt: 'asc' },
-      select: { role: true, content: true },
+      select: { role: true, content: true, aiPayload: true },
     });
     const charLimit = this.aiConfig.context.characterLimit;
     let used = 0;
     const transcript: string[] = [];
     for (const m of messages) {
-      if (used + m.content.length > charLimit) break;
-      transcript.push(`${m.role === 'USER' ? 'Student' : 'Soul Nurture'}: ${m.content}`);
-      used += m.content.length;
+      const text = transcriptText(m);
+      if (used + text.length > charLimit) break;
+      transcript.push(`${m.role === 'USER' ? 'Student' : 'Soul Nurture'}: ${text}`);
+      used += text.length;
     }
 
     const systemPrompt = [
@@ -277,6 +352,87 @@ export class AiService {
     );
 
     return { summaryId: row.id, notes, embedded };
+  }
+
+  /**
+   * Vernacular understanding (Phase C step 4). The worker's VERNACULAR lane
+   * calls this for every non-English USER message: the translation lane
+   * (local N-ATLaS → OpenAI fallback) produces a strict understanding, which
+   * is merged onto the message's aiPayload. When the synchronous first pass
+   * did not flag, the intent engine re-runs on the ENGLISH TRANSLATION as a
+   * second safety sweep — a crisis phrase invisible to the keyword floor in
+   * its original language becomes an AI_CANDIDATE flag (audit
+   * safety_flag.lang_refine).
+   */
+  async understandMessage(
+    input: UnderstandMessageInput,
+  ): Promise<UnderstandMessageOutcome> {
+    const { understanding } = await this.understandingProvider.understand({
+      text: input.content,
+      language: input.language,
+    });
+    const notes: string[] = [
+      `Understood ${input.language} message via ${understanding.via} (tone ${understanding.tone}).`,
+    ];
+
+    // Merge — never clobber — the synchronous payload the holding lane wrote.
+    const message = await this.prisma.conversationMessage.findUnique({
+      where: { id: input.messageId },
+      select: { aiPayload: true },
+    });
+    const payload =
+      message?.aiPayload && typeof message.aiPayload === 'object'
+        ? (message.aiPayload as Record<string, unknown>)
+        : {};
+    await this.prisma.conversationMessage.update({
+      where: { id: input.messageId },
+      data: {
+        aiPayload: { ...payload, understanding } as unknown as Prisma.InputJsonValue,
+      },
+    });
+
+    let escalated = false;
+    if (!input.firstPassFlagged) {
+      const secondPass = noFlagResult();
+      const verdict = this.intentEngine.evaluate({
+        userContent: understanding.englishTranslation,
+        aiResult: secondPass,
+      });
+      if (verdict) {
+        notes.push(
+          ...(await applyIntentVerdict(verdict, {
+            prisma: this.prisma,
+            auditService: this.auditService,
+            result: secondPass,
+            studentId: input.studentId,
+            studentRef: input.studentRef,
+            classLabel: input.classLabel,
+            conversationId: input.conversationId,
+            userContent: understanding.englishTranslation,
+            relevantResources: [],
+            flagSourceOverride: 'AI_CANDIDATE',
+          })),
+        );
+        escalated = true;
+        await this.auditService.log({
+          action: 'safety_flag.lang_refine',
+          entity: 'ConversationMessage',
+          entityId: input.messageId,
+          meta: {
+            conversationId: input.conversationId,
+            language: input.language,
+            via: understanding.via,
+            intentId: verdict.intentId,
+            severity: verdict.severity,
+          },
+        });
+        notes.push(
+          `Second-pass escalation: ${verdict.intentId ?? verdict.intentLabel} matched on the English translation.`,
+        );
+      }
+    }
+
+    return { understanding, escalated, notes };
   }
 
   async transcribe(file: {

@@ -11,6 +11,7 @@ import { SUMMARY_JSON_SCHEMA } from './memory/session-summary.schema.js';
 import { AuditService } from '../audit/audit.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AI_PROVIDER } from './providers/ai-provider.interface.js';
+import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js';
 
 const aiConfigStub = {
   context: { messageLimit: 12, characterLimit: 12_000 },
@@ -74,6 +75,10 @@ describe('AiService.summarizeConversation', () => {
         { provide: GuardrailService, useValue: {} },
         { provide: MemoryRepository, useValue: memory },
         { provide: AI_CONFIG, useValue: aiConfigStub },
+        {
+          provide: NatlasTranslationProvider,
+          useValue: { understand: vi.fn() },
+        },
       ],
     }).compile();
     return module.get(AiService);
@@ -258,5 +263,28 @@ describe('AiService.summarizeConversation', () => {
 
     expect(result.summaryId).toBe('sum-1');
     expect(result.embedded).toBe(false);
+  });
+
+  it('summarizes vernacular USER messages from their stored English understanding', async () => {
+    prisma.conversationMessage.findMany.mockResolvedValue([
+      {
+        role: 'USER',
+        content: 'ndu m agwula',
+        aiPayload: {
+          understanding: { englishTranslation: 'My life is finished' },
+        },
+      },
+      { role: 'ASSISTANT', content: 'I hear you.', aiPayload: null },
+    ]);
+    const service = await createService();
+
+    await service.summarizeConversation({
+      studentId: 's1',
+      conversationId: 'conv-1',
+    });
+
+    const sent = generateResponse.mock.calls[0][0] as { systemPrompt: string };
+    expect(sent.systemPrompt).toContain('Student: My life is finished');
+    expect(sent.systemPrompt).not.toContain('ndu m agwula');
   });
 });

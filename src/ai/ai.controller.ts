@@ -23,6 +23,10 @@ import {
   CANONICAL_TOPICS,
   INTENTS,
 } from './intents/intents.config.js';
+import {
+  VERNACULAR_KEYWORDS,
+  VERNACULAR_KEYWORD_REVIEW_STATUS,
+} from './intents/vernacular-keywords.js';
 
 const ALLOWED = new Set([
   'audio/webm',
@@ -52,7 +56,7 @@ export class AiController {
   @ApiOperation({
     summary: 'Explain current AI configuration and safeguarding intents',
     description:
-      'Non-secret explanation surface for professionals and the clinical reviewer: chat/transcription/embedding models, session-summary memory settings (idle close, recall windows), context bounds, async pipeline settings, the guardrail configuration (input/output/rate), and every registered intent with its detection signals and actions. Secrets (API keys) are never included.',
+      'Non-secret explanation surface for professionals and the clinical reviewer: chat/transcription/embedding models, session-summary memory settings (idle close, recall windows), context bounds, async pipeline settings, the guardrail configuration (input/output/rate), the language layer (supported languages, reply mode, detection-driven offer), every registered intent with its detection signals and actions, and the vernacular keyword packs with their clinical-review status. Secrets (API keys) are never included.',
   })
   @ApiEnvelopeOk(Object)
   config() {
@@ -71,6 +75,7 @@ export class AiController {
       async: this.aiConfig.async,
       safeguarding: this.aiConfig.safeguarding,
       guardrails: this.aiConfig.guardrails,
+      language: this.aiConfig.language,
       intents: INTENTS.map((intent) => ({
         id: intent.id,
         label: intent.label,
@@ -80,6 +85,8 @@ export class AiController {
         aiCategories: intent.serverSignals.aiCategories,
         actions: intent.actions.map((action) => action.type),
       })),
+      vernacularKeywords: VERNACULAR_KEYWORDS,
+      vernacularReviewStatus: VERNACULAR_KEYWORD_REVIEW_STATUS,
       canonicalCategories: CANONICAL_CATEGORIES,
       canonicalSeverities: CANONICAL_SEVERITIES,
       canonicalTopics: CANONICAL_TOPICS,

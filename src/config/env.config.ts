@@ -139,6 +139,22 @@ class EnvironmentVariables {
   @IsOptional()
   @IsNumber()
   GROQ_OUTPUT_USD_CENTS_PER_1M?: number;
+
+  @IsOptional()
+  @IsString()
+  AI_LANGUAGE_OFFER_ENABLED?: string;
+
+  @IsOptional()
+  @IsString()
+  AI_VERNACULAR_REPLY_MODE?: string;
+
+  @IsOptional()
+  @IsString()
+  NATLAS_LLM_BASE_URL?: string;
+
+  @IsOptional()
+  @IsString()
+  NATLAS_LLM_MODEL?: string;
 }
 
 export function validateEnv(config: Record<string, unknown>) {

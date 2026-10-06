@@ -6,6 +6,7 @@ import { AiGenerationError } from '../ai/ai.errors.js';
 import { AI_CONFIG } from '../ai/config/ai.config.js';
 import type { AiConfig } from '../ai/config/ai.config.js';
 import { IntentEngineService } from '../ai/intents/intent-engine.service.js';
+import { LanguageDetectorService } from '../ai/language/language-detector.service.js';
 import {
   GuardrailService,
   RateLimitExceededException,
@@ -30,6 +31,15 @@ const aiConfigStub = {
     holdingMessage: HOLDING_MESSAGE,
   },
   safeguarding: { persistModelCandidates: true },
+  language: {
+    offerEnabled: true,
+    supported: ['en', 'pcm', 'yo', 'ha', 'ig'],
+    vernacularReplyMode: 'openai-native',
+    natlasBaseUrl: null,
+    natlasModel: 'n-atlas',
+    understandingMaxOutputTokens: 120,
+    understandingTimeoutMs: 15_000,
+  },
 } as AiConfig;
 
 describe('ConversationsService', () => {
@@ -43,6 +53,7 @@ describe('ConversationsService', () => {
   let ai: { generateAndApply: ReturnType<typeof vi.fn> };
   let guardrail: { assertMessageAllowed: ReturnType<typeof vi.fn> };
   let auditService: { log: ReturnType<typeof vi.fn> };
+  let studentsService: { ensureProfile: ReturnType<typeof vi.fn> };
 
   const student = {
     id: 'student-1',
@@ -103,19 +114,18 @@ describe('ConversationsService', () => {
     ai = { generateAndApply: vi.fn() };
     guardrail = { assertMessageAllowed: vi.fn() };
     auditService = { log: vi.fn().mockResolvedValue({ id: 'audit-1' }) };
+    studentsService = {
+      ensureProfile: vi.fn().mockResolvedValue(student),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ConversationsService,
         { provide: PrismaService, useValue: prisma },
-        {
-          provide: StudentsService,
-          useValue: {
-            ensureProfile: vi.fn().mockResolvedValue(student),
-          },
-        },
+        { provide: StudentsService, useValue: studentsService },
         { provide: AiService, useValue: ai },
         IntentEngineService,
+        LanguageDetectorService,
         { provide: GuardrailService, useValue: guardrail },
         { provide: AuditService, useValue: auditService },
         { provide: AI_CONFIG, useValue: aiConfigStub },
@@ -321,6 +331,103 @@ describe('ConversationsService', () => {
       expect.objectContaining({ show: true }),
     );
     expect(result.assistantMessage.content).toContain('connect');
+  });
+
+  describe('language layer', () => {
+    function mockHappyPath(userMessageId: string, assistantMessageId: string) {
+      prisma.conversation.findUnique.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        checkInId: null,
+        messages: [],
+      });
+      prisma.conversationMessage.create
+        .mockImplementationOnce(
+          async (args: { data: Record<string, unknown> }) => ({
+            ...args.data,
+            id: userMessageId,
+          }),
+        )
+        .mockImplementationOnce(
+          async (args: { data: Record<string, unknown> }) => ({
+            ...args.data,
+            id: assistantMessageId,
+          }),
+        );
+      prisma.conversation.update.mockResolvedValue({ id: 'conv-1' });
+      ai.generateAndApply.mockResolvedValue(orchestratedOutcome);
+    }
+
+    it('detects Yoruba, offers the language switch and queues a VERNACULAR job', async () => {
+      mockHappyPath('user-msg-1', 'assistant-msg-1');
+
+      const result = await service.sendMessage('user-1', 'conv-1', {
+        content: 'Mo ti rẹ̀ rẹ̀ lónìí',
+      });
+
+      expect(result.languageOffer).toEqual({ detected: 'yo', current: 'en' });
+      expect(prisma.aiGenerationJob.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          kind: 'VERNACULAR',
+          conversationMessageId: 'user-msg-1',
+          input: expect.objectContaining({
+            studentId: student.id,
+            conversationId: 'conv-1',
+            language: 'yo',
+            firstPassFlagged: false,
+          }),
+        }),
+      });
+      expect(auditService.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'ai_understanding.queued',
+          entity: 'ConversationMessage',
+          entityId: 'user-msg-1',
+          meta: expect.objectContaining({
+            conversationId: 'conv-1',
+            language: 'yo',
+            detectedBy: 'diacritics',
+            confidence: 'high',
+            firstPassFlagged: false,
+          }),
+        }),
+      );
+    });
+
+    it('leaves English content without an offer or a VERNACULAR job', async () => {
+      mockHappyPath('user-msg-2', 'assistant-msg-2');
+
+      const result = await service.sendMessage('user-1', 'conv-1', {
+        content: 'I feel overwhelmed today because of my exams.',
+      });
+
+      expect(result.languageOffer).toBeNull();
+      expect(prisma.aiGenerationJob.create).not.toHaveBeenCalled();
+      expect(auditService.log).not.toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'ai_understanding.queued' }),
+      );
+    });
+
+    it('queues understanding without an offer when the preference is not English', async () => {
+      studentsService.ensureProfile.mockResolvedValue({
+        ...student,
+        preferredLanguage: 'yo',
+      });
+      mockHappyPath('user-msg-3', 'assistant-msg-3');
+
+      const result = await service.sendMessage('user-1', 'conv-1', {
+        content: 'Ina jin ɓacin rai sosai',
+      });
+
+      expect(result.languageOffer).toBeNull();
+      expect(prisma.aiGenerationJob.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          kind: 'VERNACULAR',
+          conversationMessageId: 'user-msg-3',
+          input: expect.objectContaining({ language: 'ha' }),
+        }),
+      });
+    });
   });
 
   describe('close', () => {

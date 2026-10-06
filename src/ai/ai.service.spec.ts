@@ -11,6 +11,8 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { AI_PROVIDER } from './providers/ai-provider.interface.js';
 import { IntentEngineService } from './intents/intent-engine.service.js';
 import { MemoryRepository } from './memory/memory.repository.js';
+import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js';
+import type { MessageUnderstanding } from './language/understanding.schema.js';
 import type { AiGenerationResult } from './providers/ai-provider.interface.js';
 
 const aiConfigStub = {
@@ -68,9 +70,26 @@ const orchestrationInput = {
   classLabel: null,
 };
 
+function understandingOutcome(
+  overrides: Partial<MessageUnderstanding> = {},
+): { understanding: MessageUnderstanding; via: 'openai' } {
+  return {
+    understanding: {
+      englishTranslation: 'I am fine today, just tired.',
+      tone: 'NEUTRAL',
+      keyFacts: [],
+      lang: 'yo',
+      via: 'openai',
+      ...overrides,
+    },
+    via: 'openai',
+  };
+}
+
 describe('AiService.generateAndApply', () => {
   let prisma: Record<string, Record<string, ReturnType<typeof vi.fn>>>;
   let auditService: { log: ReturnType<typeof vi.fn> };
+  let understandingProvider: { understand: ReturnType<typeof vi.fn> };
 
   function createModule(providerValue: {
     generateResponse: (...args: unknown[]) => Promise<unknown>;
@@ -90,6 +109,7 @@ describe('AiService.generateAndApply', () => {
           provide: MemoryRepository,
           useValue: { embedAndStore: vi.fn(), recall: vi.fn() },
         },
+        { provide: NatlasTranslationProvider, useValue: understandingProvider },
       ],
     }).compile();
   }
@@ -97,8 +117,12 @@ describe('AiService.generateAndApply', () => {
   beforeEach(() => {
     prisma = {
       supportFlag: { findFirst: vi.fn(), create: vi.fn() },
+      conversationMessage: { findUnique: vi.fn(), update: vi.fn() },
     };
     auditService = { log: vi.fn().mockResolvedValue({ id: 'audit-1' }) };
+    understandingProvider = {
+      understand: vi.fn().mockResolvedValue(understandingOutcome()),
+    };
   });
 
   it('strips unknown resource ids from provider output', async () => {
@@ -271,5 +295,146 @@ describe('AiService.generateAndApply', () => {
       mimeType: 'audio/webm',
     });
     expect(result.text).toBe('transcribed:audio.webm');
+  });
+
+  it('sends the vernacular language directive in the system prompt', async () => {
+    const generateResponse = vi.fn().mockResolvedValue(validModelResult());
+    const provider = {
+      generateResponse,
+      transcribeAudio: async () => ({ text: 'x' }),
+    };
+    const module = await createModule(provider);
+    const service = module.get(AiService);
+    await service.generateAndApply({ ...orchestrationInput, language: 'yo' });
+
+    const sent = generateResponse.mock.calls[0][0] as { systemPrompt: string };
+    expect(sent.systemPrompt).toContain('REPLY FULLY in Yoruba');
+    expect(sent.systemPrompt).toContain('culturally grounded Yoruba');
+  });
+
+  describe('understandMessage', () => {
+    const understandInput = {
+      studentId: 's1',
+      conversationId: 'c1',
+      messageId: 'msg-1',
+      content: 'Mo ti rẹ̀ rẹ̀',
+      language: 'yo' as const,
+      studentRef: 'Jude O.',
+      classLabel: null,
+      firstPassFlagged: false,
+    };
+
+    it('stores the understanding on the message and leaves a benign translation unflagged', async () => {
+      prisma.conversationMessage.findUnique.mockResolvedValue({
+        aiPayload: { asyncState: 'COMPLETE' },
+      });
+      const module = await createModule({
+        generateResponse: vi.fn(),
+        transcribeAudio: vi.fn(),
+      });
+      const service = module.get(AiService);
+
+      const outcome = await service.understandMessage(understandInput);
+
+      expect(understandingProvider.understand).toHaveBeenCalledWith({
+        text: 'Mo ti rẹ̀ rẹ̀',
+        language: 'yo',
+      });
+      expect(prisma.conversationMessage.update).toHaveBeenCalledWith({
+        where: { id: 'msg-1' },
+        data: {
+          aiPayload: {
+            asyncState: 'COMPLETE',
+            understanding: expect.objectContaining({
+              englishTranslation: 'I am fine today, just tired.',
+              lang: 'yo',
+              via: 'openai',
+            }),
+          },
+        },
+      });
+      expect(outcome.escalated).toBe(false);
+      expect(outcome.notes.join(' ')).toContain('tone NEUTRAL');
+      expect(prisma.supportFlag.create).not.toHaveBeenCalled();
+      expect(auditService.log).not.toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'safety_flag.lang_refine' }),
+      );
+    });
+
+    it('second pass: a crisis translation flags as AI_CANDIDATE with a lang_refine audit', async () => {
+      understandingProvider.understand.mockResolvedValue(
+        understandingOutcome({
+          englishTranslation: 'I want to kill myself and end it all',
+          tone: 'HOPELESS',
+        }),
+      );
+      prisma.conversationMessage.findUnique.mockResolvedValue({
+        aiPayload: {},
+      });
+      prisma.supportFlag.findFirst.mockResolvedValue(null);
+      prisma.supportFlag.create.mockResolvedValue({ id: 'flag-2' });
+      const module = await createModule({
+        generateResponse: vi.fn(),
+        transcribeAudio: vi.fn(),
+      });
+      const service = module.get(AiService);
+
+      const outcome = await service.understandMessage(understandInput);
+
+      expect(outcome.escalated).toBe(true);
+      expect(prisma.supportFlag.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            intentId: 'SUICIDAL_IDEATION',
+            severity: 'TIER_3_ACUTE',
+            source: 'AI_CANDIDATE',
+          }),
+        }),
+      );
+      expect(auditService.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'safety_flag.lang_refine',
+          entity: 'ConversationMessage',
+          entityId: 'msg-1',
+          meta: expect.objectContaining({
+            conversationId: 'c1',
+            language: 'yo',
+            via: 'openai',
+            intentId: 'SUICIDAL_IDEATION',
+          }),
+        }),
+      );
+      expect(outcome.notes.join(' ')).toContain('Second-pass escalation');
+    });
+
+    it('skips the second sweep when the synchronous pass already flagged', async () => {
+      understandingProvider.understand.mockResolvedValue(
+        understandingOutcome({
+          englishTranslation: 'I want to kill myself and end it all',
+          tone: 'HOPELESS',
+        }),
+      );
+      prisma.conversationMessage.findUnique.mockResolvedValue({
+        aiPayload: {},
+      });
+      const module = await createModule({
+        generateResponse: vi.fn(),
+        transcribeAudio: vi.fn(),
+      });
+      const service = module.get(AiService);
+
+      const outcome = await service.understandMessage({
+        ...understandInput,
+        firstPassFlagged: true,
+      });
+
+      expect(outcome.escalated).toBe(false);
+      expect(prisma.supportFlag.create).not.toHaveBeenCalled();
+      expect(auditService.log).not.toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'safety_flag.lang_refine' }),
+      );
+      // The understanding is still stored either way.
+      expect(prisma.conversationMessage.update).toHaveBeenCalled();
+    });
   });
 });

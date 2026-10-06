@@ -14,6 +14,7 @@ import { AiService } from './ai.service.js';
 import type {
   AiOrchestrationInput,
   SummarizeConversationInput,
+  VernacularJobInput,
 } from './ai.service.js';
 
 /**
@@ -194,6 +195,11 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    if (job.kind === 'VERNACULAR') {
+      await this.processVernacularJob(job);
+      return;
+    }
+
     const input = job.input as AiOrchestrationInput;
     try {
       const outcome = await this.aiService.generateAndApply(input);
@@ -270,6 +276,64 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
       } else {
         this.logger.warn(
           `AI job ${job.id} (SUMMARY) attempt ${moved.attempts} failed; retrying in ${moved.delay}s: ${moved.lastError}`,
+        );
+      }
+    }
+  }
+
+  /** VERNACULAR lane: understands (translates + classifies) a non-English
+   * USER message and runs the second-intent safety sweep. The message row is
+   * the source of truth for the raw content — a job whose message vanished
+   * fails like any other processing error (retry schedule → terminal). */
+  private async processVernacularJob(job: {
+    id: string;
+    conversationMessageId: string | null;
+    attempts: number;
+    input: unknown;
+  }) {
+    const input = job.input as VernacularJobInput;
+    try {
+      const message = await this.prisma.conversationMessage.findUnique({
+        where: { id: job.conversationMessageId ?? '' },
+        select: { content: true },
+      });
+      if (!message) {
+        throw new Error(
+          `VERNACULAR job ${job.id} references missing message ${job.conversationMessageId}`,
+        );
+      }
+      await this.aiService.understandMessage({
+        ...input,
+        messageId: job.conversationMessageId ?? '',
+        content: message.content,
+      });
+      await this.prisma.$executeRaw<number>`
+        UPDATE ai_generation_job
+        SET status = 'SUCCEEDED', attempts = attempts + 1, lastError = NULL, "nextRetryAt" = NULL
+        WHERE id = ${job.id}::uuid AND status = 'PROCESSING'`;
+      this.logger.log(`AI job ${job.id} (VERNACULAR) completed`);
+    } catch (error) {
+      const moved = await this.rescheduleAfterFailure(job.id, job.attempts, error);
+      if (!moved) return;
+
+      if (moved.terminal) {
+        await this.auditService.log({
+          action: 'ai_generation.exhausted',
+          entity: 'ConversationMessage',
+          entityId: job.conversationMessageId ?? '',
+          meta: {
+            kind: 'VERNACULAR',
+            conversationId: input.conversationId,
+            language: input.language,
+            lastError: moved.lastError,
+          },
+        });
+        this.logger.warn(
+          `AI job ${job.id} (VERNACULAR) failed permanently after ${moved.attempts} attempts`,
+        );
+      } else {
+        this.logger.warn(
+          `AI job ${job.id} (VERNACULAR) attempt ${moved.attempts} failed; retrying in ${moved.delay}s: ${moved.lastError}`,
         );
       }
     }

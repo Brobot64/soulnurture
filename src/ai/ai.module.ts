@@ -26,6 +26,9 @@ import { AI_CONFIG, buildAiConfig } from './config/ai.config.js';
 import type { AiConfig } from './config/ai.config.js';
 import { GuardrailService } from './guardrails/guardrail.service.js';
 import { IntentEngineService } from './intents/intent-engine.service.js';
+import { LanguageDetectorService } from './language/language-detector.service.js';
+import { NatlasLlmProvider } from './providers/natlas/natlas-llm.provider.js';
+import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js';
 
 @Module({
   imports: [PrismaModule, AuditModule, ConsentModule, ConfigModule],
@@ -41,6 +44,9 @@ import { IntentEngineService } from './intents/intent-engine.service.js';
     EmbeddingProvider,
     MemoryRepository,
     AiUsageMeterService,
+    LanguageDetectorService,
+    NatlasLlmProvider,
+    NatlasTranslationProvider,
     {
       provide: AI_PROVIDER_CHAIN_MEMBERS,
       useFactory: (
@@ -48,8 +54,10 @@ import { IntentEngineService } from './intents/intent-engine.service.js';
         openai: OpenAiProvider,
         groq: GroqAiProvider,
       ): ChainMember[] => {
-        // Registry of chainable members — 'n-atlas' joins here in Phase C
-        // step 4. Unknown names fail fast at boot, not mid-conversation.
+        // Registry of chainable members. Local N-ATLaS is deliberately NOT a
+        // chat member — its contract is translation/understanding, served by
+        // NatlasTranslationProvider (Phase C step 4). Unknown names fail fast
+        // at boot, not mid-conversation.
         const registry: Record<string, AiProvider> = {
           openai,
           groq,
@@ -84,6 +92,7 @@ import { IntentEngineService } from './intents/intent-engine.service.js';
     AiWorkerService,
     IntentEngineService,
     GuardrailService,
+    LanguageDetectorService,
     AI_CONFIG,
   ],
 })

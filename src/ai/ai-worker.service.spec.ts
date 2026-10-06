@@ -88,6 +88,7 @@ describe('AiWorkerService', () => {
   let aiService: {
     generateAndApply: ReturnType<typeof vi.fn>;
     summarizeConversation: ReturnType<typeof vi.fn>;
+    understandMessage: ReturnType<typeof vi.fn>;
   };
   let auditService: { log: ReturnType<typeof vi.fn> };
 
@@ -108,6 +109,11 @@ describe('AiWorkerService', () => {
         summaryId: 'sum-1',
         notes: [],
         embedded: true,
+      }),
+      understandMessage: vi.fn().mockResolvedValue({
+        understanding: {},
+        escalated: false,
+        notes: [],
       }),
     };
     auditService = { log: vi.fn().mockResolvedValue({ id: 'audit-1' }) };
@@ -302,5 +308,104 @@ describe('AiWorkerService', () => {
         entity: 'SessionSummary',
       }),
     );
+  });
+
+  describe('VERNACULAR lane', () => {
+    const vernacularInput = {
+      studentId: 'student-1',
+      conversationId: 'conv-1',
+      studentRef: 'Jude O.',
+      classLabel: null,
+      language: 'yo',
+      firstPassFlagged: false,
+    };
+
+    const claimedVernacularRow = (attempts = 0) => ({
+      id: 'job-v',
+      conversationMessageId: 'user-msg-1',
+      kind: 'VERNACULAR',
+      attempts,
+      input: vernacularInput,
+    });
+
+    it('understands the referenced USER message and completes the job', async () => {
+      prisma.$queryRaw
+        .mockResolvedValueOnce([]) // idle scan
+        .mockResolvedValueOnce([{ id: 'job-v' }]) // due
+        .mockResolvedValueOnce([claimedVernacularRow()]) // claim
+        .mockResolvedValue([{ status: 'SUCCEEDED' }]); // terminal update
+      prisma.conversationMessage.findUnique.mockResolvedValueOnce({
+        content: 'Mo ti rẹ̀ rẹ̀ lónìí',
+      });
+
+      await worker.scanOnce();
+
+      expect(prisma.conversationMessage.findUnique).toHaveBeenCalledWith({
+        where: { id: 'user-msg-1' },
+        select: { content: true },
+      });
+      expect(aiService.understandMessage).toHaveBeenCalledWith({
+        ...vernacularInput,
+        messageId: 'user-msg-1',
+        content: 'Mo ti rẹ̀ rẹ̀ lónìí',
+      });
+      expect(aiService.generateAndApply).not.toHaveBeenCalled();
+      expect(aiService.summarizeConversation).not.toHaveBeenCalled();
+      const successUpdate = prisma.$executeRaw.mock.calls.at(-1)?.[0] as unknown as string[];
+      expect((successUpdate as string[] | undefined)?.join('')).toContain(
+        "'SUCCEEDED'",
+      );
+    });
+
+    it('reschedules with the first delay when the referenced message vanished', async () => {
+      prisma.$queryRaw
+        .mockResolvedValueOnce([]) // idle scan
+        .mockResolvedValueOnce([{ id: 'job-v' }]) // due
+        .mockResolvedValueOnce([
+          { ...claimedVernacularRow(), conversationMessageId: 'gone-msg' },
+        ]) // claim
+        .mockResolvedValue([{ status: 'PENDING' }]); // reschedule outcome
+      prisma.conversationMessage.findUnique.mockResolvedValueOnce(null);
+
+      await worker.scanOnce();
+
+      const rescheduleCall = prisma.$queryRaw.mock.calls[3] as unknown as unknown[];
+      const nested = rescheduleCall![1] as { sql: string };
+      expect(String(nested?.sql ?? nested)).toContain("status = 'PENDING'");
+      expect(aiService.understandMessage).not.toHaveBeenCalled();
+    });
+
+    it('marks the job FAILED once retries are exhausted and audits the message', async () => {
+      prisma.$queryRaw
+        .mockResolvedValueOnce([]) // idle scan
+        .mockResolvedValueOnce([{ id: 'job-v' }]) // due
+        .mockResolvedValueOnce([claimedVernacularRow(3)]) // claim: attempts=3
+        .mockResolvedValue([{ status: 'FAILED' }]); // terminal FAILED move
+      prisma.conversationMessage.findUnique.mockResolvedValueOnce({
+        content: 'Mo ti rẹ̀ rẹ̀ lónìí',
+      });
+      aiService.understandMessage.mockRejectedValue(
+        new AiGenerationError('translation lanes down'),
+      );
+
+      await worker.scanOnce();
+
+      const terminalCall = prisma.$queryRaw.mock.calls[3] as unknown as unknown[];
+      const nestedTerminal = terminalCall![1] as { sql: string };
+      expect(String(nestedTerminal?.sql ?? nestedTerminal)).toContain(
+        "status = 'FAILED'",
+      );
+      expect(auditService.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'ai_generation.exhausted',
+          entity: 'ConversationMessage',
+          entityId: 'user-msg-1',
+          meta: expect.objectContaining({
+            kind: 'VERNACULAR',
+            language: 'yo',
+          }),
+        }),
+      );
+    });
   });
 });

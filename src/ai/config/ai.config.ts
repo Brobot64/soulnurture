@@ -3,6 +3,12 @@ import {
   GUARDRAILS_DEFAULTS,
   type GuardrailsConfig,
 } from '../guardrails/guardrails.config.js';
+import {
+  DEFAULT_VERNACULAR_REPLY_MODE,
+  SUPPORTED_LANGUAGES,
+  type SupportedLanguage,
+  type VernacularReplyMode,
+} from '../language/language.config.js';
 
 /**
  * ---------------------------------------------------------------------------
@@ -71,6 +77,27 @@ export interface AiConfig {
   summaries: {
     maxOutputTokens: number;
   };
+  /** Language layer (Phase C step 4): realtime detection, vernacular replies
+   * and the async understanding lane (see src/ai/language/). */
+  language: {
+    /** Canonical codes the product replies in. */
+    supported: SupportedLanguage[];
+    /** When true, a message detected as vernacular while the preference is
+     * still 'en' comes back with a languageOffer in the response. */
+    offerEnabled: boolean;
+    /** Reply lane for vernacular turns. 'openai-native' is the built
+     * default; 'n-atlas-translate' is pre-wired for the post-pilot local
+     * model and currently behaves as openai-native. */
+    vernacularReplyMode: VernacularReplyMode;
+    /** Local N-ATLaS (Ollama) endpoint for the async understanding lane;
+     * null → straight to the OpenAI translation fallback. */
+    natlasBaseUrl: string | null;
+    natlasModel: string;
+    /** Strict output budget for the understanding contract (small JSON). */
+    understandingMaxOutputTokens: number;
+    /** Per-attempt timeout for the understanding lane (ms). */
+    understandingTimeoutMs: number;
+  };
   context: {
     /** Max recent messages replayed to the model. */
     messageLimit: number;
@@ -114,6 +141,12 @@ export const AI_CONFIG_DEFAULTS = {
 const DEFAULT_MAX_OUTPUT_TOKENS = 1000;
 
 const DEFAULT_CHAIN = ['openai', 'groq'];
+
+function parseVernacularReplyMode(raw: string | undefined): VernacularReplyMode {
+  return raw?.trim().toLowerCase() === 'n-atlas-translate'
+    ? 'n-atlas-translate'
+    : DEFAULT_VERNACULAR_REPLY_MODE;
+}
 
 export function buildAiConfig(config: ConfigService): AiConfig {
   const configuredChain = (config.get<string>('AI_PROVIDER_CHAIN') ?? '')
@@ -189,6 +222,20 @@ export function buildAiConfig(config: ConfigService): AiConfig {
     },
     summaries: {
       maxOutputTokens: 200,
+    },
+    language: {
+      supported: [...SUPPORTED_LANGUAGES],
+      offerEnabled:
+        (config.get<string>('AI_LANGUAGE_OFFER_ENABLED') ?? 'true')
+          .trim()
+          .toLowerCase() !== 'false',
+      vernacularReplyMode: parseVernacularReplyMode(
+        config.get<string>('AI_VERNACULAR_REPLY_MODE'),
+      ),
+      natlasBaseUrl: config.get<string>('NATLAS_LLM_BASE_URL')?.trim() || null,
+      natlasModel: config.get<string>('NATLAS_LLM_MODEL') ?? 'n-atlas',
+      understandingMaxOutputTokens: 120,
+      understandingTimeoutMs: 15_000,
     },
     context: {
       messageLimit: Number(config.get<string>('AI_CONTEXT_MESSAGE_LIMIT') ?? 12),

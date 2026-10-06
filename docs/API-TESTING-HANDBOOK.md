@@ -366,6 +366,11 @@ PATCH /api/v1/students/me
 
 **Expected** `200`. Assert `data.displayName === "Jude M."`.
 
+`preferredLanguage` accepts only the canonical set `en | pcm | yo | ha | ig`
+(400 otherwise); the four vernacular codes are Yoruba, Hausa, Igbo and
+Nigerian Pidgin — the languages the AI is expected to reply in. Changing the
+preference is audited (`student.language_changed` with `from`/`to` in `meta`).
+
 **Request** `GET /api/v1/students/me/sanctuary` — assert `data.greeting` is a
 string and `data.sosAvailable === true`.
 
@@ -523,8 +528,51 @@ Message 3 — **crisis wording** (content: *"Honestly, some nights I feel there 
 The response envelope's `data` always carries the full turn:
 `userMessage`, `assistantMessage`, `humanCareRecommendation`,
 `recommendedResource` (null unless the AI recommends one), `activeIntent`
-(null unless the intent engine fired), and `aiPending` (true when the sync
-attempt failed and the async lane took over — see Chapter 6).
+(null unless the intent engine fired), `aiPending` (true when the sync
+attempt failed and the async lane took over — see Chapter 6), and
+`languageOffer` (null unless the message was detected as vernacular while the
+preference is still `"en"` — see below).
+
+**Vernacular messages (language layer).** Every message is language-detected
+synchronously with offline heuristics — marked letters (Yoruba ẹ/ọ/ṣ, Hausa
+ƙ/ɓ/ɗ, Igbo ị/ọ/ụ/ṅ), Pidgin marker words, then franc — no model call sits in
+the realtime path, so the reply is never delayed. Detection does three things:
+when the student's preference is still `"en"`, the response carries
+`languageOffer: { detected, current }`; the reply itself continues in
+`dto.language ?? preferredLanguage` (a detected Yoruba message still gets an
+English reply until the preference changes); and a `VERNACULAR` job (see §6.6)
+is queued to translate the message and run a **second safeguarding sweep** on
+the English translation.
+
+**Vernacular probe** (optional — run after §5.4 so the 6-message assertion
+above stays valid). Send (omit `language`):
+
+```json
+{ "content": "Mo ti rẹ̀ rẹ̀ lónìí" }
+```
+
+Assert:
+
+- `data.languageOffer === { "detected": "yo", "current": "en" }`
+- `data.activeIntent === null` (benign text; the keyword floor still ran on
+  the raw text synchronously)
+- the assistant reply is in English (preference unchanged)
+
+Then within ~1 worker poll cycle (translation requires `OPENAI_API_KEY` or
+`NATLAS_LLM_BASE_URL`; see §9.5):
+
+```sql
+SELECT kind, status, attempts FROM ai_generation_job
+WHERE kind = 'VERNACULAR' ORDER BY "createdAt" DESC LIMIT 3;
+```
+
+Assert the job flips `SUCCEEDED`; the probe USER message's `aiPayload` gains
+`understanding` (`englishTranslation`, `tone`, `keyFacts`, `via`) — fetch the
+conversation as in §5.4 to see it; and the audit trail contains
+`ai_understanding.queued` (§9.4). With no translation provider configured the
+job retries then lands `FAILED` (audit `ai_generation.exhausted`, entity
+`ConversationMessage`) — detection, the offer, and the synchronous keyword
+sweep are unaffected either way.
 
 ### 5.4 Inspect the persisted conversation
 
@@ -568,6 +616,10 @@ every sentence, fallback copy is stored instead.
 > **next** conversation = last 2 summaries (30 days) + follow-up hooks (14
 > days) + top-2 vector-similar summaries when embeddings exist — carried into
 > the model context as `carriedContext`.
+
+> Vernacular USER messages are summarized from their stored English
+> `understanding.englishTranslation` (written by the §5.3 worker lane) when
+> present, never from the untranslated raw text.
 
 > Idle close: any `ACTIVE` conversation with at least one message, untouched
 > for `AI_SESSION_IDLE_MINUTES` (default 120 min), is closed automatically by
@@ -621,6 +673,17 @@ scan enqueue jobs with `kind = "SUMMARY"` and a null
 of reply regeneration (no message rewrite); success flips the job to
 `SUCCEEDED`, and after exhausted retries it lands `FAILED` with an audit entry
 (`ai_generation.exhausted`, entity `SessionSummary`).
+
+**6.7** VERNACULAR jobs ride it too: each detected non-English USER message
+(§5.3) enqueues one with `kind = "VERNACULAR"` and
+`conversationMessageId` = that user message. The worker loads the raw message
+content, translates it (local N-ATLaS first when `NATLAS_LLM_BASE_URL` is
+set, OpenAI fallback, both lanes metered), stores the understanding onto the
+message's `aiPayload`, and — when the synchronous pass did not already flag —
+re-runs the intent engine on the **English translation** as a second safety
+sweep. A hit persists an `AI_CANDIDATE` support flag and audits
+`safety_flag.lang_refine` (entity `ConversationMessage`). Terminal failure
+audits `ai_generation.exhausted` with entity `ConversationMessage`.
 
 ```sql
 SELECT kind, status, attempts FROM ai_generation_job
@@ -779,7 +842,10 @@ Optional filters: `?severity=TIER_2_HIGH&status=OPEN`.
 **Request** `POST /api/v1/support-flags/<flagId>/in-review` — assert `201`/`200`.
 
 Flag severities: `TIER_1_MODERATE | TIER_2_HIGH | TIER_3_ACUTE` · sources:
-`AI_CANDIDATE | SERVER_POLICY | PROFESSIONAL | SELF_REPORT`.
+`AI_CANDIDATE | SERVER_POLICY | PROFESSIONAL | SELF_REPORT`. A keyword match
+found on a **translated** vernacular message is stamped `AI_CANDIDATE` (the
+term matched the English translation, not the raw text) and is traceable by
+its `safety_flag.lang_refine` audit entry.
 
 ### 9.3 Follow-ups
 
@@ -827,20 +893,30 @@ Follow-up statuses: `PENDING | SCHEDULED | COMPLETED | CANCELLED`.
 - `support_request.status_changed`
 - `follow_up.created`
 - `ai.disclosure_acknowledged`
+- `ai_understanding.queued` (from the §5.3 vernacular probe; the follow-up
+  `safety_flag.lang_refine` appears only when the second sweep escalates)
 
 ### 9.5 AI configuration explainability (as any professional role)
 
 **Request** `GET /api/v1/ai/config` — assert:
 
-- `data.intents` is an array containing `SUICIDAL_IDEATION`
+- `data.intents` is an array containing `SUICIDAL_IDEATION`; each entry's
+  `keywords` list includes the merged vernacular terms (yo/ha/ig/pcm)
 - serialized body contains **no secrets** (no `GROQ_API_KEY`, no `OPENAI_API_KEY`)
 - current blocks: `promptVersion`, `chain` (`{ "order": ["openai", "groq"] }`),
   `chat`, `openai`, `pricing`, `budget`, `transcription`, `embedding`
   (model + timeout), `memory` (idle close, recall windows, max similar),
   `summaries` (summary output cap), `context`, `async`, `safeguarding`,
-  `intents`, `canonicalCategories`, `canonicalSeverities`, `canonicalTopics`,
+  `language` (canonical `supported` codes, `offerEnabled` — `AI_LANGUAGE_OFFER_ENABLED`
+  — `vernacularReplyMode` — `AI_VERNACULAR_REPLY_MODE` — N-ATLaS
+  endpoint/model — `NATLAS_LLM_BASE_URL`/`NATLAS_LLM_MODEL` — and the
+  understanding output/timeout caps), `intents`, `canonicalCategories`,
+  `canonicalSeverities`, `canonicalTopics`,
   `guardrails` (`input` caps + injection probes, `output` caps + banned claims,
   `rate` per-student limits — see §5.3)
+- `data.vernacularKeywords` lists every vernacular term with its language and
+  English gloss, and `data.vernacularReviewStatus === "PENDING_CLINICAL_REVIEW"`
+  — the clinical reviewer signs off (or amends) these terms before go-live
 
 > With `OPENAI_API_KEY` empty in `.env`, the chain serves Groq; once a real
 > key is set, chat generations serve from OpenAI and each generation stamps
@@ -943,3 +1019,4 @@ For each persona (Jude, Grace, Ibrahim, Tunde), in order:
 | 2026-10-06 | Synced against the live route map: full envelope fields (§0.2), verification resend + verify-first rule (§0.3, §4.2), auth utilities (§2.5), `verificationEmailSent` + enrolment-key negatives (§2.1), `imageUrl` (§2.3), `GET students/me` (§4.3), all privacy booleans (§4.4), disclosure acknowledge role guard (§4.5, §10), full `FeelingLabel` set + `GET check-ins/:id` (§5.1), conversation list + no-close note (§5.2), message 4000-char cap + full turn shape (§5.3), resource query params (§7.1), journal list + limits (§7.2), `URGENT_UNSAFE`→`ESCALATED` + `GET support-requests/:id` (§8.1), review-status constraint (§8.2), flag filters (§9.2), follow-up list roles (§9.3). |
 | 2026-10-06 | Phase C step 2: guardrails — message/reply caps + injection probes + per-student AI rate limits (429) in §5.3, guardrails config block in §9.5. |
 | 2026-10-06 | Phase C step 3: conversation close endpoint + session-summary memory — close flow §5.5, SUMMARY/idle-close worker notes §6.6, `embedding`/`memory`/`summaries` config blocks + `canonicalTopics` §9.5, `AiJobKind` in Appendix A. |
+| 2026-10-06 | Phase C step 4: language layer — canonical `preferredLanguage` set + change audit (§4.3), vernacular detection + `languageOffer` + probe (§5.3), translation-based summaries (§5.5), VERNACULAR worker lane (§6.7), `AI_CANDIDATE` lang-refine note (§9.2), `ai_understanding.queued` audit (§9.4), `language`/`vernacularKeywords` config blocks + review status (§9.5). |

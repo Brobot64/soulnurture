@@ -1,4 +1,5 @@
 import { SupportFlagSeverity } from '@prisma/client';
+import { vernacularKeywordsFor } from './vernacular-keywords.js';
 
 /**
  * ---------------------------------------------------------------------------
@@ -21,6 +22,9 @@ import { SupportFlagSeverity } from '@prisma/client';
  *   2. When several intents match, the highest severity wins.
  *   3. Model-only candidates persist as AI_CANDIDATE flags (source of truth:
  *      the triage dashboard), unless persistModelCandidates is disabled.
+ *
+ * Server keywords include the vernacular starter packs (Yoruba/Hausa/Igbo/
+ * Nigerian Pidgin) from vernacular-keywords.ts — PENDING_CLINICAL_REVIEW.
  *
  * The flag rows produced by SUPPORT_FLAG carry `description + reason` so
  * professionals see why each student was referred (report requirement:
@@ -125,6 +129,8 @@ export const INTENTS: IntentDefinition[] = [
         'not worth living',
         'end my life',
         'take my life',
+        // Vernacular packs (yo/ha/ig/pcm) — pending clinical review.
+        ...vernacularKeywordsFor('SUICIDAL_IDEATION'),
       ],
       aiCategories: ['SUICIDAL_IDEATION'],
     },
@@ -158,6 +164,8 @@ export const INTENTS: IntentDefinition[] = [
         'burn myself',
         'hit myself',
         'self-harm',
+        // Vernacular packs (yo/ha/ig/pcm) — pending clinical review.
+        ...vernacularKeywordsFor('SELF_HARM'),
       ],
       aiCategories: ['SELF_HARM'],
     },
@@ -189,6 +197,8 @@ export const INTENTS: IntentDefinition[] = [
         'cannot breathe',
         'heart racing',
         'shaking and feel like i will collapse',
+        // Vernacular packs (yo/ha/ig/pcm) — pending clinical review.
+        ...vernacularKeywordsFor('ACUTE_PANIC'),
       ],
       aiCategories: ['PANIC'],
     },
@@ -216,6 +226,8 @@ export const INTENTS: IntentDefinition[] = [
         'everyone is better off without me',
         "i'm just a burden",
         'never good enough',
+        // Vernacular packs (yo/ha/ig/pcm) — pending clinical review.
+        ...vernacularKeywordsFor('PROLONGED_LOW_MOOD'),
       ],
       aiCategories: ['LOW_MOOD'],
     },
