@@ -8,9 +8,20 @@ import { AiService } from './ai.service.js';
 import { AiContextService } from './context/ai-context.service.js';
 import { AiDisclosureController } from './disclosure/disclosure.controller.js';
 import { AiWorkerService } from './ai-worker.service.js';
-import { AI_PROVIDER } from './providers/ai-provider.interface.js';
+import {
+  AI_PROVIDER,
+  type AiProvider,
+} from './providers/ai-provider.interface.js';
+import {
+  ChainedAiProvider,
+  AI_PROVIDER_CHAIN_MEMBERS,
+  type ChainMember,
+} from './providers/chain.provider.js';
 import { GroqAiProvider } from './providers/groq/groq.provider.js';
+import { OpenAiProvider } from './providers/openai/openai.provider.js';
+import { AiUsageMeterService } from './providers/usage-meter.service.js';
 import { AI_CONFIG, buildAiConfig } from './config/ai.config.js';
+import type { AiConfig } from './config/ai.config.js';
 import { IntentEngineService } from './intents/intent-engine.service.js';
 
 @Module({
@@ -22,7 +33,40 @@ import { IntentEngineService } from './intents/intent-engine.service.js';
     IntentEngineService,
     AiWorkerService,
     GroqAiProvider,
-    { provide: AI_PROVIDER, useExisting: GroqAiProvider },
+    OpenAiProvider,
+    AiUsageMeterService,
+    {
+      provide: AI_PROVIDER_CHAIN_MEMBERS,
+      useFactory: (
+        aiConfig: AiConfig,
+        openai: OpenAiProvider,
+        groq: GroqAiProvider,
+      ): ChainMember[] => {
+        // Registry of chainable members — 'n-atlas' joins here in Phase C
+        // step 4. Unknown names fail fast at boot, not mid-conversation.
+        const registry: Record<string, AiProvider> = {
+          openai,
+          groq,
+        };
+        const members = aiConfig.chain.order.map((name) => {
+          const provider = registry[name];
+          if (!provider) {
+            throw new Error(
+              `Unknown AI provider "${name}" in AI_PROVIDER_CHAIN ` +
+                `(known: ${Object.keys(registry).join(', ')})`,
+            );
+          }
+          return { name, provider };
+        });
+        if (members.length === 0) {
+          throw new Error('AI_PROVIDER_CHAIN resolved to zero providers');
+        }
+        return members;
+      },
+      inject: [AI_CONFIG, OpenAiProvider, GroqAiProvider],
+    },
+    ChainedAiProvider,
+    { provide: AI_PROVIDER, useExisting: ChainedAiProvider },
     {
       provide: AI_CONFIG,
       useFactory: buildAiConfig,

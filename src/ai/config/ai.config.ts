@@ -21,6 +21,23 @@ export interface AiConfig {
     /** First synchronous attempt budget before we fall back to the queue. */
     attemptTimeoutMs: number;
   };
+  /** Ordered chain member names, e.g. ['openai', 'groq'] ('n-atlas' later). */
+  chain: {
+    order: string[];
+  };
+  openai: {
+    model: string;
+    maxOutputTokens: number;
+  };
+  pricing: {
+    /** Estimated USD cents per 1M tokens, per provider — feeds AiUsageDaily. */
+    usdCentsPer1M: Record<string, { input: number; output: number }>;
+  };
+  budget: {
+    /** Once OpenAI serves this many generations in a server-local day, the
+     * chain starts at the next member until the day rolls over. */
+    openaiDailyRequestCap: number;
+  };
   transcription: {
     model: string;
   };
@@ -62,7 +79,14 @@ export const AI_CONFIG_DEFAULTS = {
 // Non-chat override defaults: reasoning models need room for thinking + JSON.
 const DEFAULT_MAX_OUTPUT_TOKENS = 1000;
 
+const DEFAULT_CHAIN = ['openai', 'groq'];
+
 export function buildAiConfig(config: ConfigService): AiConfig {
+  const configuredChain = (config.get<string>('AI_PROVIDER_CHAIN') ?? '')
+    .split(',')
+    .map((name) => name.trim().toLowerCase())
+    .filter((name) => name.length > 0);
+
   return {
     promptVersion: 'v2',
     chat: {
@@ -73,6 +97,41 @@ export function buildAiConfig(config: ConfigService): AiConfig {
       ),
       temperature: Number(config.get<string>('GROQ_TEMPERATURE') ?? 0.2),
       attemptTimeoutMs: AI_CONFIG_DEFAULTS.attemptTimeoutMs,
+    },
+    chain: {
+      order: configuredChain.length > 0 ? configuredChain : [...DEFAULT_CHAIN],
+    },
+    openai: {
+      model: config.get<string>('OPENAI_CHAT_MODEL') ?? 'gpt-5.6-luna',
+      maxOutputTokens: Number(
+        config.get<string>('OPENAI_MAX_OUTPUT_TOKENS') ??
+          DEFAULT_MAX_OUTPUT_TOKENS,
+      ),
+    },
+    pricing: {
+      usdCentsPer1M: {
+        openai: {
+          input: Number(
+            config.get<string>('OPENAI_INPUT_USD_CENTS_PER_1M') ?? 15,
+          ),
+          output: Number(
+            config.get<string>('OPENAI_OUTPUT_USD_CENTS_PER_1M') ?? 60,
+          ),
+        },
+        groq: {
+          input: Number(
+            config.get<string>('GROQ_INPUT_USD_CENTS_PER_1M') ?? 10,
+          ),
+          output: Number(
+            config.get<string>('GROQ_OUTPUT_USD_CENTS_PER_1M') ?? 30,
+          ),
+        },
+      },
+    },
+    budget: {
+      openaiDailyRequestCap: Number(
+        config.get<string>('OPENAI_DAILY_REQUEST_CAP') ?? 400,
+      ),
     },
     transcription: {
       model:

@@ -57,7 +57,11 @@ export class AiController {
   config() {
     return {
       promptVersion: this.aiConfig.promptVersion,
+      chain: this.aiConfig.chain,
       chat: this.aiConfig.chat,
+      openai: this.aiConfig.openai,
+      pricing: this.aiConfig.pricing,
+      budget: this.aiConfig.budget,
       transcription: this.aiConfig.transcription,
       context: this.aiConfig.context,
       async: this.aiConfig.async,

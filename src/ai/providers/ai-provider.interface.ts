@@ -25,7 +25,13 @@ export interface AiGenerationResult {
   /** Server extras: set by the intent engine / async pipeline, never by the model. */
   exerciseLabel?: string | null;
   asyncState?: 'COMPLETE' | 'PENDING_AI' | 'FAILED';
-  usage?: { inputTokens?: number; outputTokens?: number; latencyMs?: number };
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    latencyMs?: number;
+    /** Server-owned: which chain member served this generation (explainability). */
+    provider?: string;
+  };
 }
 
 export interface AiTranscriptionInput {

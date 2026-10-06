@@ -492,3 +492,21 @@ model AiGenerationJob {
   @@index([status, nextRetryAt])
   @@map("ai_generation_job")
 }
+
+/// Per-day, per-provider AI usage counters fed by the provider chain after
+/// every generation. `day` is server-local date (DB CURRENT_DATE) — raw SQL
+/// owned (see src/ai/providers/usage-meter.service.ts), never app-side Date.
+model AiUsageDaily {
+  id                String   @id @default(uuid()) @db.Uuid
+  day               DateTime @db.Date
+  provider          String
+  requests          Int      @default(0)
+  inputTokens       Int      @default(0)
+  outputTokens      Int      @default(0)
+  estimatedUsdCents Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([day, provider])
+  @@map("ai_usage_daily")
+}

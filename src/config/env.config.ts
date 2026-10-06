@@ -75,6 +75,46 @@ class EnvironmentVariables {
   @IsOptional()
   @IsNumber()
   AI_CONTEXT_CHARACTER_LIMIT?: number;
+
+  @IsOptional()
+  @IsString()
+  OPENAI_API_KEY?: string;
+
+  @IsOptional()
+  @IsString()
+  OPENAI_CHAT_MODEL?: string;
+
+  @IsOptional()
+  @IsNumber()
+  OPENAI_MAX_OUTPUT_TOKENS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  OPENAI_TEMPERATURE?: number;
+
+  @IsOptional()
+  @IsString()
+  AI_PROVIDER_CHAIN?: string;
+
+  @IsOptional()
+  @IsNumber()
+  OPENAI_DAILY_REQUEST_CAP?: number;
+
+  @IsOptional()
+  @IsNumber()
+  OPENAI_INPUT_USD_CENTS_PER_1M?: number;
+
+  @IsOptional()
+  @IsNumber()
+  OPENAI_OUTPUT_USD_CENTS_PER_1M?: number;
+
+  @IsOptional()
+  @IsNumber()
+  GROQ_INPUT_USD_CENTS_PER_1M?: number;
+
+  @IsOptional()
+  @IsNumber()
+  GROQ_OUTPUT_USD_CENTS_PER_1M?: number;
 }
 
 export function validateEnv(config: Record<string, unknown>) {
