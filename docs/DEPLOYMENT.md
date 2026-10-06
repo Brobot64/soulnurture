@@ -103,13 +103,16 @@ systemctl restart ssh     # let sshd attach to the new socket
 
 # PROVE the port is really bound — "Connection refused" from your laptop means
 # nothing listens on 2222 yet, no matter what sshd -T printed:
-ss -tlnp | grep -w 2222   # must list sshd
+ss -tlnp | grep -w 2222   # must show a LISTEN entry on :2222 (owner may print as systemd — that's the socket unit working)
 # not socket-activated (is-active says inactive) but still on 22? then the
 # daemon just wasn't restarted: systemctl restart ssh
 # no ssh.socket unit and restart fails? socket activation is off entirely;
 # plain `systemctl restart ssh` is all you need.
 
 # --- firewall: ssh on 2222 (rate-limited), web only
+# GATE: enabling ufw kills port 22 from the outside — for real. If the ss
+# check above did not show a listener on :2222, stop; fix it from the VNC
+# console first.
 ufw default deny incoming && ufw default allow outgoing
 ufw limit 2222/tcp && ufw allow 80/tcp && ufw allow 443/tcp
 ufw --force enable
@@ -119,7 +122,7 @@ systemctl enable --now fail2ban
 dpkg-reconfigure -plow unattended-upgrades    # answer Yes when prompted
 ```
 
-**Keep this root session open** and prove the new door from a second terminal on your laptop: `ssh -p 2222 deploy@YOUR_VPS_IP`. **"Connection refused" means nothing is bound to 2222 — re-run the ssh.socket block above; don't close this session until the new door opens.** Root login and password auth are dead now — catching a typo while this session is still open costs nothing; a lockout costs a VNC-console session. All further commands run as `deploy`: `ssh -p 2222 deploy@YOUR_VPS_IP` (with `sudo` where needed).
+**Keep this root session open** and prove the new door from a second terminal on your laptop: `ssh -p 2222 deploy@YOUR_VPS_IP`. **"Connection refused" means nothing is bound to 2222 — re-run the ssh.socket block above; don't close this session until the new door opens. (Port 22 timing out from the laptop is expected — that's ufw blocking it.)** Root login and password auth are dead now — catching a typo while this session is still open costs nothing; a lockout costs a VNC-console session. All further commands run as `deploy`: `ssh -p 2222 deploy@YOUR_VPS_IP` (with `sudo` where needed).
 
 ---
 
