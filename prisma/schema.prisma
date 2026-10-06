@@ -1,0 +1,494 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum UserRole {
+  STUDENT
+  COUNSELLOR
+  PSYCHOLOGIST
+  SUPPORT_STAFF
+}
+
+enum FeelingLabel {
+  OVERWHELMED
+  ANXIOUS
+  TIRED
+  SAD_LOW
+  CALM
+  HOPEFUL
+  GREAT
+  HAPPY
+  PEACEFUL
+  STRESSED
+  DOWN
+  ANGRY
+}
+
+enum FeelingIntensity {
+  A_LITTLE
+  SOMEWHAT
+  A_LOT
+}
+
+enum ConversationStatus {
+  ACTIVE
+  CLOSED
+  ARCHIVED
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+enum ResourceType {
+  ARTICLE
+  AUDIO_GUIDE
+  SOMATIC_EXERCISE
+  INTERACTIVE
+  SOUNDSCAPE
+  AFFIRMATION
+  TOOLKIT_ITEM
+}
+
+enum ResourceCategory {
+  EXAM_STRESS
+  FRIENDSHIPS
+  FAMILY
+  IDENTITY
+  ANXIETY
+  GROUNDING
+  SLEEP
+  FOCUS
+  CULTURAL_WISDOM
+  PEER_DYNAMICS
+  GENERAL
+}
+
+enum SupportPersonType {
+  COUNSELLOR
+  PSYCHOLOGIST
+  TRUSTED_TEACHER
+  PARENT_GUARDIAN
+}
+
+enum SupportTiming {
+  GENTLE_1_2_DAYS
+  TODAY_STUDY_PERIOD
+  URGENT_UNSAFE
+}
+
+enum SupportRequestStatus {
+  PENDING
+  ACCEPTED
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  ESCALATED
+}
+
+enum SupportFlagSeverity {
+  TIER_1_MODERATE
+  TIER_2_HIGH
+  TIER_3_ACUTE
+}
+
+enum SupportFlagStatus {
+  OPEN
+  IN_REVIEW
+  ACKNOWLEDGED
+  RESOLVED
+  ESCALATED
+}
+
+enum SupportFlagSource {
+  AI_CANDIDATE
+  SERVER_POLICY
+  PROFESSIONAL
+  SELF_REPORT
+}
+
+enum AiJobStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+}
+
+enum FollowUpStatus {
+  PENDING
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+}
+
+model User {
+  id            String   @id @default(uuid()) @db.Uuid
+  name          String
+  phone         String?  @unique
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  role          UserRole @default(STUDENT)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  sessions            Session[]
+  accounts            Account[]
+  studentProfile      StudentProfile?
+  professionalProfile ProfessionalProfile?
+  auditLogs           AuditLog[]
+
+  @@map("user")
+}
+
+model Session {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id @default(uuid()) @db.Uuid
+  userId                String    @db.Uuid
+  accountId             String
+  providerId            String
+  password              String?
+  idToken               String?
+  scope                 String?
+  accessToken           String?
+  refreshToken          String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id @default(uuid()) @db.Uuid
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("verification")
+}
+
+model StudentProfile {
+  id                String   @id @default(uuid()) @db.Uuid
+  userId            String   @unique @db.Uuid
+  firstName         String
+  lastName          String?
+  displayName       String?
+  classLabel        String?
+  studentRef        String?  @unique
+  preferredLanguage String   @default("en")
+  vibe              String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  checkIns          EmotionalCheckIn[]
+  conversations     Conversation[]
+  supportRequests   SupportRequest[]
+  supportFlags      SupportFlag[]
+  followUps         FollowUp[]
+  journalEntries    JournalEntry[]
+  toolboxItems      ToolboxItem[]
+  consentRecords    ConsentRecord[]
+  privacyPreference PrivacyPreference?
+
+  @@map("student_profile")
+}
+
+model ProfessionalProfile {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @unique @db.Uuid
+  title      String?
+  department String?
+  available  Boolean  @default(true)
+  imageUrl   String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  supportPeople SupportPerson[]
+  assignedFlags SupportFlag[]   @relation("FlagAssignee")
+  followUps     FollowUp[]
+
+  @@map("professional_profile")
+}
+
+model ConsentRecord {
+  id         String    @id @default(uuid()) @db.Uuid
+  studentId  String    @db.Uuid
+  version    String
+  accepted   Boolean   @default(false)
+  acceptedAt DateTime?
+  metadata   Json?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+student      StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, version])
+  @@index([studentId])
+  @@map("consent_record")
+}
+
+model PrivacyPreference {
+  id                              String   @id @default(uuid()) @db.Uuid
+  studentId                       String   @unique @db.Uuid
+  shareAiCopingHubNotes           Boolean  @default(false)
+  allowParentGuardianNotification Boolean  @default(false)
+  requestPeerSupportCompanion     Boolean  @default(false)
+  createdAt                       DateTime @default(now())
+  updatedAt                       DateTime @updatedAt
+  student                         StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@map("privacy_preference")
+}
+
+model EmotionalCheckIn {
+  id          String           @id @default(uuid()) @db.Uuid
+  studentId   String           @db.Uuid
+  feeling     FeelingLabel
+  intensity   FeelingIntensity
+  description String?
+  triggers    String[]         @default([])
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  student         StudentProfile   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  conversations   Conversation[]
+  supportRequests SupportRequest[]
+
+  @@index([studentId, createdAt])
+  @@map("emotional_check_in")
+}
+
+model Conversation {
+  id        String             @id @default(uuid()) @db.Uuid
+  studentId String             @db.Uuid
+  checkInId String?            @db.Uuid
+  source    String?
+  status    ConversationStatus @default(ACTIVE)
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+
+  student         StudentProfile        @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  checkIn         EmotionalCheckIn?     @relation(fields: [checkInId], references: [id], onDelete: SetNull)
+  messages        ConversationMessage[]
+  supportRequests SupportRequest[]
+  supportFlags    SupportFlag[]
+
+  @@index([studentId, createdAt])
+  @@map("conversation")
+}
+
+model ConversationMessage {
+  id                  String      @id @default(uuid()) @db.Uuid
+  conversationId      String      @db.Uuid
+  role                MessageRole
+  content             String
+  aiPayload           Json?
+  activeExerciseLabel String?
+  createdAt           DateTime @default(now())
+  conversation        Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  aiGenerationJob     AiGenerationJob?
+
+  @@index([conversationId, createdAt])
+  @@map("conversation_message")
+}
+
+model WellbeingResource {
+  id              String           @id @default(uuid()) @db.Uuid
+  title           String
+  description     String
+  type            ResourceType
+  category        ResourceCategory @default(GENERAL)
+  badge           String?
+  durationMinutes Int?
+  durationLabel   String?
+  ctaLabel        String?
+  mediaUrl        String?
+  tags            String[]         @default([])
+  active          Boolean          @default(true)
+  approved        Boolean          @default(false)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  toolboxItems    ToolboxItem[]
+
+  @@index([active, approved, category])
+  @@map("wellbeing_resource")
+}
+
+model ToolboxItem {
+  id         String            @id @default(uuid()) @db.Uuid
+  studentId  String            @db.Uuid
+  resourceId String            @db.Uuid
+  createdAt  DateTime          @default(now())
+  student    StudentProfile    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  resource   WellbeingResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, resourceId])
+  @@map("toolbox_item")
+}
+
+model JournalEntry {
+  id        String         @id @default(uuid()) @db.Uuid
+  studentId String         @db.Uuid
+  title     String?
+  content   String
+  prompt    String?
+  private   Boolean        @default(true)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  student   StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([studentId, createdAt])
+  @@map("journal_entry")
+}
+
+model SupportPerson {
+  id                String            @id @default(uuid()) @db.Uuid
+  professionalId    String?           @db.Uuid
+  name              String
+  type              SupportPersonType
+  title             String?
+  availabilityLabel String?
+  availableToday    Boolean           @default(false)
+  imageUrl          String?
+  active            Boolean           @default(true)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  professional      ProfessionalProfile? @relation(fields: [professionalId], references: [id], onDelete: SetNull)
+  supportRequests   SupportRequest[]
+
+  @@map("support_person")
+  @@unique([name, type])
+}
+
+model SupportRequest {
+  id              String               @id @default(uuid()) @db.Uuid
+  studentId       String               @db.Uuid
+  supportPersonId String               @db.Uuid
+  personType      SupportPersonType
+  timing          SupportTiming
+  note            String?
+  reviewNote      String?
+  status          SupportRequestStatus @default(PENDING)
+  checkInId       String?              @db.Uuid
+  conversationId  String?              @db.Uuid
+  scheduledAt     DateTime?
+  locationLabel   String?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  student       StudentProfile    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  supportPerson SupportPerson     @relation(fields: [supportPersonId], references: [id], onDelete: Restrict)
+  checkIn       EmotionalCheckIn? @relation(fields: [checkInId], references: [id], onDelete: SetNull)
+  conversation  Conversation?     @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  followUps     FollowUp[]
+
+  @@index([studentId, createdAt])
+  @@map("support_request")
+}
+
+model SupportFlag {
+  id               String              @id @default(uuid()) @db.Uuid
+  studentId        String              @db.Uuid
+  conversationId   String?             @db.Uuid
+  assigneeId       String?             @db.Uuid
+  studentRef       String
+  classLabel       String?
+  triggerLabel     String
+  category         String?
+  intentId         String?
+  severity         SupportFlagSeverity
+  status           SupportFlagStatus   @default(OPEN)
+  source           SupportFlagSource
+  aiContextSummary String?
+  autoActions      String[]            @default([])
+  createdAt        DateTime            @default(now())
+  resolvedAt       DateTime?
+  updatedAt        DateTime            @updatedAt
+
+  student      StudentProfile        @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  conversation Conversation?         @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  assignee     ProfessionalProfile?  @relation("FlagAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+
+  @@index([status, severity, createdAt])
+  @@map("support_flag")
+}
+
+model FollowUp {
+  id               String         @id @default(uuid()) @db.Uuid
+  studentId        String         @db.Uuid
+  professionalId   String?        @db.Uuid
+  supportRequestId String?        @db.Uuid
+  notes            String?
+  status           FollowUpStatus @default(PENDING)
+  dueAt            DateTime?
+  completedAt      DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  student        StudentProfile        @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  professional   ProfessionalProfile?  @relation(fields: [professionalId], references: [id], onDelete: SetNull)
+  supportRequest SupportRequest?       @relation(fields: [supportRequestId], references: [id], onDelete: SetNull)
+
+  @@index([studentId, status])
+  @@map("follow_up")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  actorId   String?  @db.Uuid
+  action    String
+  entity    String
+  entityId  String?
+  meta      Json?
+  createdAt DateTime @default(now())
+  actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([entity, entityId])
+  @@index([createdAt])
+  @@map("audit_log")
+}
+
+/// Queued regeneration of an AI assistant message that failed its first
+/// synchronous attempt. The worker (src/ai/ai-worker.service.ts) re-runs the
+/// orchestration and updates the placeholder message in place.
+model AiGenerationJob {
+  id                    String      @id @default(uuid()) @db.Uuid
+  conversationMessageId String      @unique @db.Uuid
+  input                 Json
+  attempts              Int         @default(0)
+  lastError             String?
+  nextRetryAt           DateTime?
+  status                AiJobStatus @default(PENDING)
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
+  message               ConversationMessage @relation(fields: [conversationMessageId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextRetryAt])
+  @@map("ai_generation_job")
+}
