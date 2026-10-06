@@ -1063,6 +1063,7 @@ Every row must produce exactly the stated status **with the stated actor**:
 | 8 | Jude | `PATCH /api/v1/support-requests/<supportRequestId>` | `403` (students cannot review their own request) |
 | 9 | Grace | `POST /api/v1/ai/disclosure/acknowledge` | `403` (STUDENT-role-only route) |
 | 10 | anonymous | `GET /api/v1/ai/disclosure` | `200` (deliberately public, pre-login) |
+| 11 | anonymous | `POST /api/v1/uploads/presign` (valid body) | `401` |
 
 ---
 
@@ -1072,6 +1073,84 @@ For each persona (Jude, Grace, Ibrahim, Tunde), in order:
 
 **Request** `POST /api/auth/sign-out` — assert `200`.
 **Request** `GET /api/users/me` with the same (now stale) cookie jar — assert `401`.
+
+---
+
+## 12. File uploads (object storage)
+
+Two routes, one layout: every object lands at `uploads/<userId>/<uuid><ext>` —
+the extension is derived from the declared MIME type, never from the
+client-supplied filename. Both routes require the S3/MinIO block
+(`S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` —
+docs/DEPLOYMENT.md §4); on a deployment without it both answer the friendly
+`503` described below and nothing else changes.
+
+Allowlisted types (both routes, max 10MB): `audio/webm`, `audio/wav`,
+`audio/wave`, `audio/x-wav`, `audio/mpeg`, `audio/mp3`, `audio/mp4`,
+`audio/m4a`, `audio/ogg`, `image/jpeg`, `image/png`, `image/webp`,
+`application/pdf`.
+
+### 12.1 Multipart upload (bytes transit the API)
+
+**Request** (as Jude, multipart — not JSON):
+
+```http
+POST /api/v1/uploads
+```
+
+```
+form-data:
+  file: <file>   (allowlisted type; max 10MB)
+```
+
+**Expected** `201`. Assert `data.key` matches `uploads/<userId>/<uuid>.<ext>`,
+`data.size` equals the uploaded byte count, and `data.contentType` echoes the
+part's MIME type. The API buffered the file and forwarded it to storage in one
+PUT — fine for small files, but the bytes transit Node; prefer §12.2 for
+anything large.
+
+### 12.2 Presigned direct upload
+
+**Request** (as Jude, JSON):
+
+```http
+POST /api/v1/uploads/presign
+```
+
+```json
+{ "contentType": "image/jpeg", "size": 284313 }
+```
+
+**Expected** `201`. Assert `data.key` (same shape as §12.1),
+`data.expiresInSeconds === 900`, and `data.uploadUrl` pointing at the
+configured `S3_ENDPOINT` (path-style: `/natlas-uploads/uploads/<userId>/...`)
+with `X-Amz-SignedHeaders=content-length;host`.
+
+Then the client PUTs the bytes **straight to storage** — same Content-Type as
+declared, and **exactly** `size` bytes (the signed `content-length` means any
+other byte count is rejected by storage with `403 SignatureDoesNotMatch`):
+
+```bash
+curl -sS -X PUT "<uploadUrl>" \
+  -H "Content-Type: image/jpeg" \
+  --data-binary @photo.jpg
+```
+
+Verify the object (MinIO console at `https://s3.<domain>`, or `mc`):
+`mc ls local/natlas-uploads/uploads/<userId>/`. The bucket is private — objects
+are readable only through a signed URL.
+
+**Negatives**:
+
+| Request | Expected |
+| --- | --- |
+| `POST /api/v1/uploads` with `file` type `text/plain` | `400` — `Unsupported file type: text/plain` |
+| `POST /api/v1/uploads` with >10MB file | `400` — the 10MB cap (the route check or the global multipart limit, whichever fires first) |
+| `POST /api/v1/uploads` without a `file` part | `400` — `file is required` |
+| `POST /api/v1/uploads/presign` `{"contentType":"text/html","size":100}` | `400` — Validation failed (allowlist) |
+| `POST /api/v1/uploads/presign` `{"contentType":"image/jpeg","size":0}` | `400` — Validation failed (min 1) |
+| `POST /api/v1/uploads/presign` `size` > `10485760` | `400` — Validation failed (max) |
+| Either route on a deployment without `S3_*` | friendly `503` — uploads "not available right now", no stack trace |
 
 ---
 
@@ -1105,6 +1184,7 @@ For each persona (Jude, Grace, Ibrahim, Tunde), in order:
 | `<supportPersonId>` | §8.1 people list |
 | `<supportRequestId>` | §8.1 create |
 | `<judeProfileId>` | §6.2 SQL |
+| `<userId>` | session user id — second path segment of every upload key (§12) |
 | `<flagId>`, `<followUpId>`, `<placeholderId>` | chapters 6 and 9 |
 
 ## Appendix C — Change log (keep current)
@@ -1118,3 +1198,4 @@ For each persona (Jude, Grace, Ibrahim, Tunde), in order:
 | 2026-10-06 | Phase C step 4: language layer — canonical `preferredLanguage` set + change audit (§4.3), vernacular detection + `languageOffer` + probe (§5.3), translation-based summaries (§5.5), VERNACULAR worker lane (§6.7), `AI_CANDIDATE` lang-refine note (§9.2), `ai_understanding.queued` audit (§9.4), `language`/`vernacularKeywords` config blocks + review status (§9.5). |
 | 2026-10-06 | Phase C step 5: voice routing — `en`/`pcm` → Whisper chain, `yo`/`ha`/`ig` → local N-ATLaS ASR sidecar, forced `language` + `Unsupported language` 400, friendly "type instead" 503 degradation (§9.6); `transcription.natlas` config sub-block (§9.5); sidecar service `services/n-atlas-asr` (NCAIR1 spike table, capacity honesty) + fixtures convention. |
 | 2026-10-06 | Phase C step 6: backend-orchestrated activities — seeded approved catalogue + list/detail/start/complete/history endpoints + renderer `steps` contract (§7.3), `recommendedActivity` on the turn shape with intent wiring (§5.3), `ActivityStepType` in Appendix A, `<activitySessionId>` placeholder (Appendix B). |
+| 2026-10-06 | File uploads (object storage) — multipart route + presigned direct-PUT route with 10MB/type allowlist and `uploads/<userId>/<uuid><ext>` keys (§12), anonymous negative in §10, `<userId>` placeholder (Appendix B); friendly `503` on deployments without `S3_*`. |

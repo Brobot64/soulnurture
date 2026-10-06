@@ -23,6 +23,7 @@ import { PrivacyModule } from './privacy/privacy.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { ProfessionalsModule } from './professionals/professionals.module.js';
 import { ResourcesModule } from './resources/resources.module.js';
+import { StorageModule } from './storage/storage.module.js';
 import { StudentsModule } from './students/students.module.js';
 import { SupportFlagsModule } from './support-flags/support-flags.module.js';
 import { SupportRequestsModule } from './support-requests/support-requests.module.js';
@@ -79,6 +80,7 @@ import { UsersModule } from './users/users.module.js';
     AuditModule,
     JournalModule,
     PrivacyModule,
+    StorageModule,
   ],
   controllers: [AppController],
   providers: [
