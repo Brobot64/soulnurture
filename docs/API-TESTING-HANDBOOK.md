@@ -904,7 +904,10 @@ Follow-up statuses: `PENDING | SCHEDULED | COMPLETED | CANCELLED`.
   `keywords` list includes the merged vernacular terms (yo/ha/ig/pcm)
 - serialized body contains **no secrets** (no `GROQ_API_KEY`, no `OPENAI_API_KEY`)
 - current blocks: `promptVersion`, `chain` (`{ "order": ["openai", "groq"] }`),
-  `chat`, `openai`, `pricing`, `budget`, `transcription`, `embedding`
+  `chat`, `openai`, `pricing`, `budget`, `transcription` (Groq Whisper model
+  + `natlas` sub-block: sidecar `baseUrl` — `NATLAS_ASR_BASE_URL`, null when
+  not deployed — `timeoutMs` — `NATLAS_ASR_TIMEOUT_MS` — and the served
+  `languages`, `["yo","ha","ig"]`), `embedding`
   (model + timeout), `memory` (idle close, recall windows, max similar),
   `summaries` (summary output cap), `context`, `async`, `safeguarding`,
   `language` (canonical `supported` codes, `offerEnabled` — `AI_LANGUAGE_OFFER_ENABLED`
@@ -933,11 +936,43 @@ POST /api/v1/ai/transcribe
 ```
 form-data:
   audio: <file>   (audio/webm, audio/wav, audio/mpeg, audio/mp4, audio/ogg, video/webm; max 10MB)
-  language: en    (optional)
+  language: yo    (optional — forces the route for this request)
 ```
+
+**Routing** (Phase C step 5) — no `language` field means the student profile's
+`preferredLanguage` decides:
+
+| Language | Lane | Notes |
+| --- | --- | --- |
+| `en` | Provider chain → Groq Whisper | explicit hint sent |
+| `pcm` | Provider chain → Groq Whisper | auto-detect, no hint (Whisper has no pcm code) |
+| `yo` / `ha` / `ig` | Local N-ATLaS ASR sidecar (`services/n-atlas-asr`) | NCAIR1 whisper-small fine-tunes |
+| anything else | `400` | `Unsupported language: <value>` — rejected before any provider call |
 
 **Expected** `200`. Assert `data.text` is a non-empty transcript
 (`data.durationSeconds` when available).
+
+**Vernacular without the sidecar** (default dev state — `NATLAS_ASR_BASE_URL`
+empty): a `yo`/`ha`/`ig` voice note gets a friendly `503` whose message says
+voice notes in that language are not available right now and asks the student
+to type instead. No stack trace, no raw provider error. Text chat (including
+vernacular text) is unaffected.
+
+**Sidecar dev-run** (optional — spoken-vernacular manual test):
+
+```bash
+cd services/n-atlas-asr
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt        # needs ffmpeg on PATH
+export HF_TOKEN=hf_...                 # NCAIR1 repos are gated (auto-approved)
+uvicorn app:app --host 127.0.0.1 --port 8100
+```
+
+Then set `NATLAS_ASR_BASE_URL=http://127.0.0.1:8100` (and optionally
+`NATLAS_ASR_TIMEOUT_MS`, default `60000` for cold model loads) in `.env` and
+re-POST. `GET http://127.0.0.1:8100/health` shows which languages are warm;
+first request per language pays a ~10–30s checkpoint load. Recorded fixture
+samples and the curl smoke test live in `services/n-atlas-asr/fixtures/`.
 
 ### 9.7 Budget meter check (after chat traffic)
 
@@ -1020,3 +1055,4 @@ For each persona (Jude, Grace, Ibrahim, Tunde), in order:
 | 2026-10-06 | Phase C step 2: guardrails — message/reply caps + injection probes + per-student AI rate limits (429) in §5.3, guardrails config block in §9.5. |
 | 2026-10-06 | Phase C step 3: conversation close endpoint + session-summary memory — close flow §5.5, SUMMARY/idle-close worker notes §6.6, `embedding`/`memory`/`summaries` config blocks + `canonicalTopics` §9.5, `AiJobKind` in Appendix A. |
 | 2026-10-06 | Phase C step 4: language layer — canonical `preferredLanguage` set + change audit (§4.3), vernacular detection + `languageOffer` + probe (§5.3), translation-based summaries (§5.5), VERNACULAR worker lane (§6.7), `AI_CANDIDATE` lang-refine note (§9.2), `ai_understanding.queued` audit (§9.4), `language`/`vernacularKeywords` config blocks + review status (§9.5). |
+| 2026-10-06 | Phase C step 5: voice routing — `en`/`pcm` → Whisper chain, `yo`/`ha`/`ig` → local N-ATLaS ASR sidecar, forced `language` + `Unsupported language` 400, friendly "type instead" 503 degradation (§9.6); `transcription.natlas` config sub-block (§9.5); sidecar service `services/n-atlas-asr` (NCAIR1 spike table, capacity honesty) + fixtures convention. |

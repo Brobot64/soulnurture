@@ -4,8 +4,10 @@ import {
   type GuardrailsConfig,
 } from '../guardrails/guardrails.config.js';
 import {
+  ASR_VERNACULAR_LANGUAGES,
   DEFAULT_VERNACULAR_REPLY_MODE,
   SUPPORTED_LANGUAGES,
+  type AsrVernacularLanguage,
   type SupportedLanguage,
   type VernacularReplyMode,
 } from '../language/language.config.js';
@@ -50,6 +52,15 @@ export interface AiConfig {
   };
   transcription: {
     model: string;
+    /** Local N-ATLaS ASR sidecar (services/n-atlas-asr) serving the
+     * vernacular languages. baseUrl null = not deployed; voice notes in
+     * those languages degrade to the friendly "type it instead" message. */
+    natlas: {
+      baseUrl: string | null;
+      /** Cold starts load a whisper-small checkpoint; generous on purpose. */
+      timeoutMs: number;
+      languages: AsrVernacularLanguage[];
+    };
   };
   /** OpenAI text embeddings — pgvector memory recall. Failure degrades the
    * memory layer to recency-only, never throws (see memory.repository.ts). */
@@ -204,6 +215,11 @@ export function buildAiConfig(config: ConfigService): AiConfig {
       model:
         config.get<string>('GROQ_TRANSCRIPTION_MODEL') ??
         'whisper-large-v3-turbo',
+      natlas: {
+        baseUrl: config.get<string>('NATLAS_ASR_BASE_URL')?.trim() || null,
+        timeoutMs: Number(config.get<string>('NATLAS_ASR_TIMEOUT_MS') ?? 60_000),
+        languages: [...ASR_VERNACULAR_LANGUAGES],
+      },
     },
     embedding: {
       model:

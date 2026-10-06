@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuditModule } from '../audit/audit.module.js';
 import { ConsentModule } from '../consent/consent.module.js';
 import { PrismaModule } from '../prisma/prisma.module.js';
+import { StudentsModule } from '../students/students.module.js';
 import { AiController } from './ai.controller.js';
 import { AiService } from './ai.service.js';
 import { AiContextService } from './context/ai-context.service.js';
@@ -29,9 +30,10 @@ import { IntentEngineService } from './intents/intent-engine.service.js';
 import { LanguageDetectorService } from './language/language-detector.service.js';
 import { NatlasLlmProvider } from './providers/natlas/natlas-llm.provider.js';
 import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js';
+import { NAtlasAsrProvider } from './providers/natlas/natlas-asr.provider.js';
 
 @Module({
-  imports: [PrismaModule, AuditModule, ConsentModule, ConfigModule],
+  imports: [PrismaModule, AuditModule, ConsentModule, ConfigModule, StudentsModule],
   controllers: [AiController, AiDisclosureController],
   providers: [
     AiService,
@@ -47,6 +49,7 @@ import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js
     LanguageDetectorService,
     NatlasLlmProvider,
     NatlasTranslationProvider,
+    NAtlasAsrProvider,
     {
       provide: AI_PROVIDER_CHAIN_MEMBERS,
       useFactory: (

@@ -12,6 +12,7 @@ import { AI_PROVIDER } from './providers/ai-provider.interface.js';
 import { IntentEngineService } from './intents/intent-engine.service.js';
 import { MemoryRepository } from './memory/memory.repository.js';
 import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js';
+import { NAtlasAsrProvider } from './providers/natlas/natlas-asr.provider.js';
 import type { MessageUnderstanding } from './language/understanding.schema.js';
 import type { AiGenerationResult } from './providers/ai-provider.interface.js';
 
@@ -90,6 +91,7 @@ describe('AiService.generateAndApply', () => {
   let prisma: Record<string, Record<string, ReturnType<typeof vi.fn>>>;
   let auditService: { log: ReturnType<typeof vi.fn> };
   let understandingProvider: { understand: ReturnType<typeof vi.fn> };
+  let asrProvider: { transcribeAudio: ReturnType<typeof vi.fn> };
 
   function createModule(providerValue: {
     generateResponse: (...args: unknown[]) => Promise<unknown>;
@@ -110,6 +112,7 @@ describe('AiService.generateAndApply', () => {
           useValue: { embedAndStore: vi.fn(), recall: vi.fn() },
         },
         { provide: NatlasTranslationProvider, useValue: understandingProvider },
+        { provide: NAtlasAsrProvider, useValue: asrProvider },
       ],
     }).compile();
   }
@@ -122,6 +125,9 @@ describe('AiService.generateAndApply', () => {
     auditService = { log: vi.fn().mockResolvedValue({ id: 'audit-1' }) };
     understandingProvider = {
       understand: vi.fn().mockResolvedValue(understandingOutcome()),
+    };
+    asrProvider = {
+      transcribeAudio: vi.fn().mockResolvedValue({ text: 'sidecar text', durationSeconds: 3.2 }),
     };
   });
 
@@ -295,6 +301,86 @@ describe('AiService.generateAndApply', () => {
       mimeType: 'audio/webm',
     });
     expect(result.text).toBe('transcribed:audio.webm');
+  });
+
+  describe('transcribe routing', () => {
+    const audio = {
+      buffer: Buffer.from('x'),
+      filename: 'audio.webm',
+      mimeType: 'audio/webm',
+    };
+
+    function mockChain() {
+      const transcribeAudio = vi.fn().mockResolvedValue({ text: 'whisper text' });
+      return { transcribeAudio };
+    }
+
+    async function serviceWith(provider: ReturnType<typeof mockChain>) {
+      const module = await createModule({
+        generateResponse: vi.fn(),
+        ...provider,
+      });
+      return { service: module.get(AiService), provider };
+    }
+
+    it('routes a forced vernacular language to the N-ATLaS ASR sidecar', async () => {
+      const { service, provider } = await serviceWith(mockChain());
+      const result = await service.transcribe({ ...audio, language: 'yo' });
+
+      expect(asrProvider.transcribeAudio).toHaveBeenCalledWith({
+        ...audio,
+        language: 'yo',
+      });
+      expect(provider.transcribeAudio).not.toHaveBeenCalled();
+      expect(result).toEqual({ text: 'sidecar text', durationSeconds: 3.2 });
+    });
+
+    it('routes by the student preferred language when nothing is forced', async () => {
+      const { service, provider } = await serviceWith(mockChain());
+      await service.transcribe({ ...audio, preferredLanguage: 'ha' });
+
+      expect(asrProvider.transcribeAudio).toHaveBeenCalledWith({
+        ...audio,
+        language: 'ha',
+      });
+      expect(provider.transcribeAudio).not.toHaveBeenCalled();
+    });
+
+    it('lets a forced language override the student preference', async () => {
+      const { service, provider } = await serviceWith(mockChain());
+      await service.transcribe({
+        ...audio,
+        language: 'en',
+        preferredLanguage: 'yo',
+      });
+
+      expect(provider.transcribeAudio).toHaveBeenCalledWith({
+        ...audio,
+        language: 'en',
+      });
+      expect(asrProvider.transcribeAudio).not.toHaveBeenCalled();
+    });
+
+    it('rejects an unsupported forced language before any provider call', async () => {
+      const { service, provider } = await serviceWith(mockChain());
+      await expect(
+        service.transcribe({ ...audio, language: 'fr' }),
+      ).rejects.toThrow(/Unsupported language: fr/);
+
+      expect(asrProvider.transcribeAudio).not.toHaveBeenCalled();
+      expect(provider.transcribeAudio).not.toHaveBeenCalled();
+    });
+
+    it('sends Nigerian Pidgin through the chain with no language hint', async () => {
+      const { service, provider } = await serviceWith(mockChain());
+      await service.transcribe({ ...audio, language: 'pcm' });
+
+      expect(asrProvider.transcribeAudio).not.toHaveBeenCalled();
+      expect(provider.transcribeAudio).toHaveBeenCalledWith({
+        ...audio,
+        language: undefined,
+      });
+    });
   });
 
   it('sends the vernacular language directive in the system prompt', async () => {

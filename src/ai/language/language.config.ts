@@ -19,6 +19,15 @@
 export const SUPPORTED_LANGUAGES = ['en', 'pcm', 'yo', 'ha', 'ig'] as const;
 export type SupportedLanguage = (typeof SUPPORTED_LANGUAGES)[number];
 
+/**
+ * Languages with a locally-hosted ASR model (NCAIR1 fine-tunes served by
+ * the n-atlas-asr sidecar, Phase C step 5). English and Nigerian Pidgin
+ * ride the Whisper chain instead: Pidgin is lexified on English and the
+ * sidecar has no Pidgin checkpoint, so auto-detect Whisper handles it.
+ */
+export const ASR_VERNACULAR_LANGUAGES = ['yo', 'ha', 'ig'] as const;
+export type AsrVernacularLanguage = (typeof ASR_VERNACULAR_LANGUAGES)[number];
+
 export const LANGUAGE_DISPLAY_NAMES: Record<SupportedLanguage, string> = {
   en: 'English',
   pcm: 'Nigerian Pidgin',

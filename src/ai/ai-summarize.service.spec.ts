@@ -12,6 +12,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AI_PROVIDER } from './providers/ai-provider.interface.js';
 import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js';
+import { NAtlasAsrProvider } from './providers/natlas/natlas-asr.provider.js';
 
 const aiConfigStub = {
   context: { messageLimit: 12, characterLimit: 12_000 },
@@ -79,6 +80,7 @@ describe('AiService.summarizeConversation', () => {
           provide: NatlasTranslationProvider,
           useValue: { understand: vi.fn() },
         },
+        { provide: NAtlasAsrProvider, useValue: { transcribeAudio: vi.fn() } },
       ],
     }).compile();
     return module.get(AiService);

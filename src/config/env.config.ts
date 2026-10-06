@@ -155,6 +155,14 @@ class EnvironmentVariables {
   @IsOptional()
   @IsString()
   NATLAS_LLM_MODEL?: string;
+
+  @IsOptional()
+  @IsString()
+  NATLAS_ASR_BASE_URL?: string;
+
+  @IsOptional()
+  @IsNumber()
+  NATLAS_ASR_TIMEOUT_MS?: number;
 }
 
 export function validateEnv(config: Record<string, unknown>) {

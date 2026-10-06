@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { AiContextService } from './context/ai-context.service.js';
 import { GuardrailService } from './guardrails/guardrail.service.js';
@@ -40,9 +40,12 @@ import {
 import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js';
 import type { MessageUnderstanding } from './language/understanding.schema.js';
 import {
+  ASR_VERNACULAR_LANGUAGES,
   languagePromptDirective,
+  SUPPORTED_LANGUAGES,
   type SupportedLanguage,
 } from './language/language.config.js';
+import { NAtlasAsrProvider } from './providers/natlas/natlas-asr.provider.js';
 
 /**
  * Full AI orchestration for one message: context → provider → schema
@@ -160,6 +163,7 @@ export class AiService {
     private readonly guardrail: GuardrailService,
     private readonly memory: MemoryRepository,
     private readonly understandingProvider: NatlasTranslationProvider,
+    private readonly natlasAsr: NAtlasAsrProvider,
     @Inject(AI_CONFIG) private readonly aiConfig: AiConfig,
   ) {}
 
@@ -435,12 +439,43 @@ export class AiService {
     return { understanding, escalated, notes };
   }
 
+  /**
+   * Voice routing (Phase C step 5):
+   *   yo / ha / ig  → local N-ATLaS ASR sidecar (NCAIR1 checkpoints)
+   *   en / pcm      → provider chain (Groq Whisper). Pidgin is lexified on
+   *                   English and Whisper auto-detects it; no hint is sent
+   *                   for pcm because Whisper has no pcm language code.
+   * A client-supplied `language` (validated) overrides the student profile.
+   */
   async transcribe(file: {
     buffer: Buffer;
     filename: string;
     mimeType: string;
     language?: string;
+    preferredLanguage?: string;
   }): Promise<AiTranscriptionResult> {
-    return this.provider.transcribeAudio(file);
+    const requested = file.language?.trim().toLowerCase() || undefined;
+    if (
+      requested &&
+      !SUPPORTED_LANGUAGES.includes(requested as SupportedLanguage)
+    ) {
+      throw new BadRequestException(`Unsupported language: ${file.language}`);
+    }
+
+    const language = requested ?? file.preferredLanguage ?? 'en';
+    const audio = {
+      buffer: file.buffer,
+      filename: file.filename,
+      mimeType: file.mimeType,
+    };
+
+    if ((ASR_VERNACULAR_LANGUAGES as readonly string[]).includes(language)) {
+      return this.natlasAsr.transcribeAudio({ ...audio, language });
+    }
+
+    return this.provider.transcribeAudio({
+      ...audio,
+      language: language === 'en' ? 'en' : undefined,
+    });
   }
 }
