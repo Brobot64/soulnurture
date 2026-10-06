@@ -164,6 +164,39 @@ const RECOMMEND_RESOURCE_EXECUTOR: IntentExecutor = {
   },
 };
 
+const RECOMMEND_ACTIVITY_EXECUTOR: IntentExecutor = {
+  type: 'RECOMMEND_ACTIVITY',
+  async execute(action, _verdict, ctx, notes) {
+    if (action.type !== 'RECOMMEND_ACTIVITY') return;
+    // Validate against the live catalogue rather than the bundled config:
+    // a reviewer un-approving an activity takes effect without a deploy,
+    // and we never point a student at a non-startable row.
+    const approved = await ctx.prisma.wellbeingActivity.findMany({
+      where: {
+        slug: { in: action.activitySlugs },
+        active: true,
+        approved: true,
+      },
+      select: { slug: true, title: true },
+    });
+    const pick = action.activitySlugs
+      .map((slug) => approved.find((a) => a.slug === slug))
+      .find((a) => a !== undefined);
+    if (!pick) {
+      notes.push(
+        `No approved activity among [${action.activitySlugs.join(', ')}]; recommendation left untouched.`,
+      );
+      return;
+    }
+    ctx.result.activity = {
+      recommended: true,
+      slug: pick.slug,
+      title: pick.title,
+    };
+    notes.push(`Activity recommended from approved catalogue (${pick.slug}).`);
+  },
+};
+
 /** Execution order follows each intent's own action list, not this record. */
 export const INTENT_EXECUTOR_REGISTRY: Record<IntentAction['type'], IntentExecutor> = {
   SUPPORT_FLAG: SUPPORT_FLAG_EXECUTOR,
@@ -171,6 +204,7 @@ export const INTENT_EXECUTOR_REGISTRY: Record<IntentAction['type'], IntentExecut
   SAFETY_MESSAGE: SAFETY_MESSAGE_EXECUTOR,
   GROUNDING: GROUNDING_EXECUTOR,
   RECOMMEND_RESOURCE: RECOMMEND_RESOURCE_EXECUTOR,
+  RECOMMEND_ACTIVITY: RECOMMEND_ACTIVITY_EXECUTOR,
 };
 
 /**

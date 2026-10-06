@@ -37,14 +37,16 @@ export type IntentActionType =
   | 'HUMAN_SUPPORT_PROMPT'
   | 'SAFETY_MESSAGE'
   | 'GROUNDING'
-  | 'RECOMMEND_RESOURCE';
+  | 'RECOMMEND_RESOURCE'
+  | 'RECOMMEND_ACTIVITY';
 
 export type IntentAction =
   | { type: 'SUPPORT_FLAG' }
   | { type: 'HUMAN_SUPPORT_PROMPT'; reason: string }
   | { type: 'SAFETY_MESSAGE'; message: string }
   | { type: 'GROUNDING'; exerciseLabel: string }
-  | { type: 'RECOMMEND_RESOURCE'; category?: string };
+  | { type: 'RECOMMEND_RESOURCE'; category?: string }
+  | { type: 'RECOMMEND_ACTIVITY'; activitySlugs: string[] };
 
 export interface IntentDefinition {
   /** Stable identifier; doubles as the SupportFlag.category written by SUPPORT_FLAG. */
@@ -147,6 +149,7 @@ export const INTENTS: IntentDefinition[] = [
           "When thoughts like this come up, a trained person can help you through. You can reach out to a support person at any time — you don't have to carry this alone.",
       },
       { type: 'RECOMMEND_RESOURCE', category: 'GROUNDING' },
+      { type: 'RECOMMEND_ACTIVITY', activitySlugs: ['five-senses-grounding'] },
     ],
   },
   {
@@ -181,6 +184,7 @@ export const INTENTS: IntentDefinition[] = [
         reason:
           'Self-harm deserves real human care. A school support person can listen without judgement and help you stay safe.',
       },
+      { type: 'RECOMMEND_ACTIVITY', activitySlugs: ['five-senses-grounding'] },
     ],
   },
   {
@@ -205,6 +209,7 @@ export const INTENTS: IntentDefinition[] = [
     actions: [
       { type: 'SUPPORT_FLAG' },
       { type: 'GROUNDING', exerciseLabel: '4-7-8 breathing exercise' },
+      { type: 'RECOMMEND_ACTIVITY', activitySlugs: ['box-breathing'] },
       { type: 'RECOMMEND_RESOURCE', category: 'GROUNDING' },
       {
         type: 'HUMAN_SUPPORT_PROMPT',
@@ -239,6 +244,10 @@ export const INTENTS: IntentDefinition[] = [
           "Feeling this low for a while is heavy. A caring person at your school can listen and walk with you — there's no threshold you need to reach first.",
       },
       { type: 'RECOMMEND_RESOURCE', category: 'EXAM_STRESS' },
+      {
+        type: 'RECOMMEND_ACTIVITY',
+        activitySlugs: ['thought-recap', 'mindful-body-scan'],
+      },
     ],
   },
 ];

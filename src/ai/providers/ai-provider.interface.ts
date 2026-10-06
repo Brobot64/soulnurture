@@ -28,6 +28,10 @@ export interface AiGenerationResult {
   action: 'NONE' | 'REFLECTION' | 'GROUNDING' | 'RESOURCE' | 'HUMAN_SUPPORT';
   /** Server extras: set by the intent engine / async pipeline, never by the model. */
   exerciseLabel?: string | null;
+  /** Backend-orchestrated activity recommendation (Phase C step 6). Slug
+   * references the seeded catalogue; the client fetches steps via the
+   * activities API. Not part of the model's structured-output contract. */
+  activity?: { recommended: boolean; slug: string | null; title: string | null } | null;
   asyncState?: 'COMPLETE' | 'PENDING_AI' | 'FAILED';
   usage?: {
     inputTokens?: number;

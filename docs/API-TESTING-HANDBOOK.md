@@ -524,10 +524,14 @@ Message 3 — **crisis wording** (content: *"Honestly, some nights I feel there 
 - `data.activeIntent.severity === "TIER_3_ACUTE"`
 - `data.assistantMessage.content` contains a scripted safety message (e.g. includes "matter")
 - `data.humanCareRecommendation.show === true` (human pathway always reachable)
+- `data.recommendedActivity.slug === "five-senses-grounding"` (the intent
+  engine attached a startable activity; requires the seeded catalogue — §7.3)
 
 The response envelope's `data` always carries the full turn:
 `userMessage`, `assistantMessage`, `humanCareRecommendation`,
-`recommendedResource` (null unless the AI recommends one), `activeIntent`
+`recommendedResource` (null unless the AI recommends one), `recommendedActivity`
+(null unless an intent attached one — carries `slug` + `title`; the client
+fetches the renderer steps via the activities API, §7.3), `activeIntent`
 (null unless the intent engine fired), `aiPending` (true when the sync
 attempt failed and the async lane took over — see Chapter 6), and
 `languageOffer` (null unless the message was detected as vernacular while the
@@ -692,7 +696,7 @@ ORDER BY "createdAt" DESC LIMIT 5;
 
 ---
 
-## 7. Resources, toolbox, journal
+## 7. Resources, toolbox, journal, activities
 
 ### 7.1 Resource catalogue (as Jude)
 
@@ -753,6 +757,61 @@ PATCH /api/v1/journal/<entryId>
 (student-private list).
 
 **Request** `DELETE /api/v1/journal/<entryId>` → then `GET /api/v1/journal/<entryId>` → assert `404`.
+
+### 7.3 Wellbeing activities (backend-orchestrated)
+
+The backend records and orchestrates; the frontend renders. The catalogue is
+seeded approved + active by `prisma/seed.ts` from
+`src/ai/activities/activities.config.ts`; only approved + active rows are
+listable, startable, or recommendable — a reviewer un-approving a row in the
+DB takes effect without a deploy. Requires the `phase_c_activities` migration
+applied.
+
+**Request** `GET /api/v1/activities` — assert `data.items.length >= 6`; cards
+carry no `steps` (list is card-only). Optional `?category=GROUNDING`.
+
+**Request** `GET /api/v1/activities/five-senses-grounding` — assert
+`data.steps` is the renderer contract: an ordered array of typed steps
+(`breath-pacing` / `timer` / `prompt-list` / `body-scan`, Appendix A) and
+`data.approved === true`. An unknown or unapproved slug → `404`
+`Activity not found`.
+
+**Request** (start a self-directed run, as Jude):
+
+```http
+POST /api/v1/activities/box-breathing/sessions
+```
+
+```json
+{}
+```
+
+**Expected** `201`; `data.session.recommendedBy === "SELF"`, and
+`data.activity` carries the full steps. Save `data.session.id` as
+`<activitySessionId>`. Starting from an AI recommendation passes provenance
+instead — same endpoint with
+`{ "conversationId": "<conversationId>", "intentId": "ACUTE_PANIC" }` →
+`recommendedBy === "AI"`; a `conversationId` that is not Jude's → `404`
+`Conversation not found`.
+
+**Request**
+
+```http
+PATCH /api/v1/activity-sessions/<activitySessionId>
+```
+
+```json
+{ "feelingAfter": "CALM", "noteAfter": "Timed it with the hostel lights out." }
+```
+
+**Expected** `200`, `data.completedAt` set, `data.feelingAfter === "CALM"`.
+The feel-after signal is measurement data: repeat the same PATCH (e.g. with a
+different feeling) and assert the record comes back **unchanged** (idempotent,
+no overwrite). A session belonging to another student → `404`.
+
+**Request** `GET /api/v1/activities/me/sessions` — assert `data.count >= 1`
+and the item includes the activity card (`slug`, `title`, `category`,
+`durationSeconds`).
 
 ---
 
@@ -1030,6 +1089,7 @@ For each persona (Jude, Grace, Ibrahim, Tunde), in order:
 | `SupportFlagStatus` | `OPEN`, `IN_REVIEW`, `ACKNOWLEDGED`, `RESOLVED`, `ESCALATED` |
 | `SupportFlagSource` | `AI_CANDIDATE`, `SERVER_POLICY`, `PROFESSIONAL`, `SELF_REPORT` |
 | `AiJobKind` | `REPLY`, `SUMMARY`, `VERNACULAR` |
+| `ActivityStepType` (renderer contract) | `breath-pacing`, `timer`, `prompt-list`, `body-scan` |
 | `FollowUpStatus` | `PENDING`, `SCHEDULED`, `COMPLETED`, `CANCELLED` |
 | `ResourceType` / `ResourceCategory` | see `prisma/schema.prisma` (seed data in `prisma/seed.ts`) |
 
@@ -1041,6 +1101,7 @@ For each persona (Jude, Grace, Ibrahim, Tunde), in order:
 | `<conversationId>` | §5.2 response `data.id` |
 | `<resourceId>` | §7.1 catalogue |
 | `<entryId>` | §7.2 journal create |
+| `<activitySessionId>` | §7.3 activity start |
 | `<supportPersonId>` | §8.1 people list |
 | `<supportRequestId>` | §8.1 create |
 | `<judeProfileId>` | §6.2 SQL |
@@ -1056,3 +1117,4 @@ For each persona (Jude, Grace, Ibrahim, Tunde), in order:
 | 2026-10-06 | Phase C step 3: conversation close endpoint + session-summary memory — close flow §5.5, SUMMARY/idle-close worker notes §6.6, `embedding`/`memory`/`summaries` config blocks + `canonicalTopics` §9.5, `AiJobKind` in Appendix A. |
 | 2026-10-06 | Phase C step 4: language layer — canonical `preferredLanguage` set + change audit (§4.3), vernacular detection + `languageOffer` + probe (§5.3), translation-based summaries (§5.5), VERNACULAR worker lane (§6.7), `AI_CANDIDATE` lang-refine note (§9.2), `ai_understanding.queued` audit (§9.4), `language`/`vernacularKeywords` config blocks + review status (§9.5). |
 | 2026-10-06 | Phase C step 5: voice routing — `en`/`pcm` → Whisper chain, `yo`/`ha`/`ig` → local N-ATLaS ASR sidecar, forced `language` + `Unsupported language` 400, friendly "type instead" 503 degradation (§9.6); `transcription.natlas` config sub-block (§9.5); sidecar service `services/n-atlas-asr` (NCAIR1 spike table, capacity honesty) + fixtures convention. |
+| 2026-10-06 | Phase C step 6: backend-orchestrated activities — seeded approved catalogue + list/detail/start/complete/history endpoints + renderer `steps` contract (§7.3), `recommendedActivity` on the turn shape with intent wiring (§5.3), `ActivityStepType` in Appendix A, `<activitySessionId>` placeholder (Appendix B). |

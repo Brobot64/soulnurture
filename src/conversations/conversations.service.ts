@@ -283,6 +283,11 @@ export class ConversationsService {
           }
         : null;
 
+    const recommendedActivity =
+      aiResult.activity?.recommended && aiResult.activity.slug
+        ? { slug: aiResult.activity.slug, title: aiResult.activity.title ?? null }
+        : null;
+
     return {
       userMessage,
       assistantMessage,
@@ -295,6 +300,7 @@ export class ConversationsService {
           }
         : null,
       recommendedResource,
+      recommendedActivity,
       activeIntent: outcome.verdict
         ? {
             id: outcome.verdict.intentId,

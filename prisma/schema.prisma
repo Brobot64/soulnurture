@@ -222,6 +222,7 @@ model StudentProfile {
   consentRecords    ConsentRecord[]
   privacyPreference PrivacyPreference?
   sessionSummaries  SessionSummary[]
+  activitySessions  ActivitySession[]
 
   @@map("student_profile")
 }
@@ -302,10 +303,11 @@ model Conversation {
 
   student         StudentProfile        @relation(fields: [studentId], references: [id], onDelete: Cascade)
   checkIn         EmotionalCheckIn?     @relation(fields: [checkInId], references: [id], onDelete: SetNull)
-  messages        ConversationMessage[]
-  supportRequests SupportRequest[]
-  supportFlags    SupportFlag[]
-  summary         SessionSummary?
+  messages         ConversationMessage[]
+  supportRequests  SupportRequest[]
+  supportFlags     SupportFlag[]
+  summary          SessionSummary?
+  activitySessions ActivitySession[]
 
   @@index([studentId, createdAt])
   @@map("conversation")
@@ -543,4 +545,50 @@ model SessionSummary {
 
   @@index([studentId, createdAt])
   @@map("session_summary")
+}
+
+/// Backend-orchestrated coping activity (Phase C step 6). `steps` is the
+/// frontend renderer contract — an ordered list of typed steps
+/// (breath-pacing | timer | prompt-list | body-scan). Catalogue lives in
+/// src/ai/activities/activities.config.ts and is seeded by prisma/seed.ts.
+model WellbeingActivity {
+  id              String           @id @default(uuid()) @db.Uuid
+  slug            String           @unique
+  title           String
+  description     String
+  category        ResourceCategory @default(GENERAL)
+  steps           Json
+  durationSeconds Int
+  active          Boolean          @default(true)
+  approved        Boolean          @default(false)
+  tags            String[]         @default([])
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  sessions ActivitySession[]
+
+  @@index([active, approved, category])
+  @@map("wellbeing_activity")
+}
+
+/// A student's run of a WellbeingActivity. `completedAt` + `feelingAfter`
+/// are the feel-after signal consumed by the (parked) effectiveness dashboard.
+model ActivitySession {
+  id             String        @id @default(uuid()) @db.Uuid
+  studentId      String        @db.Uuid
+  activityId     String        @db.Uuid
+  conversationId String?       @db.Uuid
+  intentId       String?
+  recommendedBy  String?
+  startedAt      DateTime      @default(now())
+  completedAt    DateTime?
+  feelingAfter   FeelingLabel?
+  noteAfter      String?       @db.VarChar(500)
+
+  student      StudentProfile    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  activity     WellbeingActivity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  conversation Conversation?     @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([studentId, startedAt])
+  @@map("activity_session")
 }

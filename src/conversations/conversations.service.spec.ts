@@ -216,9 +216,48 @@ describe('ConversationsService', () => {
       title: 'Breath',
       type: null,
     });
+    expect(result.recommendedActivity).toBeNull();
     expect(result.activeIntent).toBeNull();
     expect(result.aiPending).toBe(false);
     expect(prisma.aiGenerationJob.create).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the recommended activity alongside the resource', async () => {
+    prisma.conversation.findUnique.mockResolvedValue({
+      id: 'conv-1',
+      studentId: student.id,
+      checkInId: null,
+      messages: [],
+    });
+    prisma.conversationMessage.create.mockImplementation(async (args: {
+      data: { role: MessageRole; content: string };
+    }) => ({
+      id: 'assistant-1',
+      role: args.data.role,
+      content: args.data.content,
+    }));
+    prisma.conversation.update.mockResolvedValue({ id: 'conv-1' });
+    ai.generateAndApply.mockResolvedValue({
+      ...orchestratedOutcome,
+      result: {
+        ...orchestratedOutcome.result,
+        activity: {
+          recommended: true,
+          slug: 'box-breathing',
+          title: 'Box Breathing (4-4-4-4)',
+        },
+      },
+    });
+
+    const result = await service.sendMessage('user-1', 'conv-1', {
+      content: 'I feel overwhelmed',
+    });
+
+    expect(result.recommendedActivity).toEqual({
+      slug: 'box-breathing',
+      title: 'Box Breathing (4-4-4-4)',
+    });
+    expect(result.recommendedResource).not.toBeNull();
   });
 
   it('surfaces the active intent when the engine made a verdict', async () => {
