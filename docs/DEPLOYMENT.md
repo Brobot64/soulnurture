@@ -52,8 +52,10 @@ Memory budget on 12 GB: model resident ≈ 5–6 GB (Q4_K_M) + Postgres 1.5 GB +
 ## 1. Secure server baseline
 
 ```bash
-# --- from your laptop: make sure you have a key (skip if you already have one)
-ls ~/.ssh/*.pub    # none? ssh-keygen -t ed25519
+# --- from your laptop: the SSH key is the ONLY door after hardening — make
+#     sure it exists, because the bootstrap below has nothing to install without
+#     one (that failure is silent until the lockout)
+ls ~/.ssh/*.pub || ssh-keygen -t ed25519   # empty passphrase is fine for a deploy laptop
 
 # --- first login: root + the password Contabo emailed you
 #     (the panel VNC console is the rescue path if SSH ever locks you out)
@@ -70,6 +72,13 @@ mkdir -p ~/.ssh && chmod 700 ~/.ssh
 echo 'ssh-ed25519 AAAA... your-laptop-comment' >> ~/.ssh/authorized_keys
 chmod 600 ~/.ssh/authorized_keys
 
+# GATE: from a second laptop terminal, prove the key door opens — must print OK
+# with no password prompt and no "Permission denied":
+#   ssh -o BatchMode=yes root@YOUR_VPS_IP 'echo OK'
+# Failing here costs one VNC-console trip now; the SAME failure after hardening
+# looks identical ("Permission denied (publickey,password)") — but password and
+# root auth are already dead by then.
+
 # --- deploy user (no root logins afterwards)
 adduser --disabled-password --gecos '' deploy
 usermod -aG sudo deploy
@@ -85,29 +94,30 @@ sed -i 's/^#\?Port .*/Port 2222/' /etc/ssh/sshd_config
 sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 
-# Ubuntu cloud images can drop override files in sshd_config.d/ that silently
-# beat sshd_config — verify the EFFECTIVE config before restarting sshd:
-sshd -T | grep -Ei '^(port|permitrootlogin|passwordauthentication)'
-# want: port 2222 / permitrootlogin no / passwordauthentication no
-# if a .d/ file overrides them: fix or remove that file, re-run sshd -T
+# Ubuntu cloud images ship drop-ins in sshd_config.d/, and sshd takes the FIRST
+# value it sees — drop-ins are parsed before sshd_config, so the stock
+# 60-cloudimg-settings.conf (PasswordAuthentication yes) silently beats the sed
+# above. Beat it with a file that sorts earlier (00- < 60-):
+printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' > /etc/ssh/sshd_config.d/00-natlas-hardening.conf
 
-# Ubuntu 24.04 runs sshd socket-activated: ssh.socket owns the listening port
-# and the Port directive above is IGNORED — sshd stays on 22 and sshd -T
-# cannot catch that. Pin the socket to 2222 (the empty ListenStream= resets
-# the stock value before ours is added; "active" from: systemctl is-active ssh.socket):
-mkdir -p /etc/systemd/system/ssh.socket.d
-printf '[Socket]\nListenStream=\nListenStream=2222\n' > /etc/systemd/system/ssh.socket.d/override.conf
-systemctl daemon-reload
-systemctl restart ssh.socket
-systemctl restart ssh     # let sshd attach to the new socket
+# verify the EFFECTIVE config BEFORE restarting sshd:
+sshd -T | grep -Ei '^(port|permitrootlogin|passwordauthentication|kbdinteractiveauthentication)'
+# want: port 2222 / permitrootlogin no / passwordauthentication no / kbdinteractiveauthentication no
+
+# Ubuntu 24.04 starts sshd socket-activated: ssh.socket owns the listening port
+# and the Port directive above is IGNORED (sshd -T cannot see this). Pinning
+# ssh.socket to 2222 instead produced an IPv6-only listener ([::]:2222) that
+# refused every IPv4 client even with net.ipv6.bindv6only=0. Don't fight the
+# socket unit — turn it off and run the plain daemon; sshd_config becomes the
+# single source of truth:
+systemctl disable --now ssh.socket   # "Unit ssh.socket does not exist" = already off, fine
+systemctl restart ssh
+systemctl enable ssh                 # socket activation was the only reason ssh was
+                                     # enabled; without this sshd does NOT start after a reboot
 
 # PROVE the port is really bound — "Connection refused" from your laptop means
 # nothing listens on 2222 yet, no matter what sshd -T printed:
-ss -tlnp | grep -w 2222   # must show a LISTEN entry on :2222 (owner may print as systemd — that's the socket unit working)
-# not socket-activated (is-active says inactive) but still on 22? then the
-# daemon just wasn't restarted: systemctl restart ssh
-# no ssh.socket unit and restart fails? socket activation is off entirely;
-# plain `systemctl restart ssh` is all you need.
+ss -tlnp | grep -w 2222   # want 0.0.0.0:2222 owned by sshd — NOT a [::]: only entry
 
 # --- firewall: ssh on 2222 (rate-limited), web only
 # GATE: enabling ufw kills port 22 from the outside — for real. If the ss
@@ -120,9 +130,18 @@ ufw --force enable
 # --- brute-force protection + automatic security patches
 systemctl enable --now fail2ban
 dpkg-reconfigure -plow unattended-upgrades    # answer Yes when prompted
+
+# --- sudo without a password: deploy was created --disabled-password, so it has
+#     no password to type at a sudo prompt and cannot use sudo at all. NOPASSWD
+#     is the norm for a solo-admin box (cloud default users on AWS/GCP ship it);
+#     prefer a sudo password instead? skip this and run `passwd deploy` — SSH
+#     password login stays disabled either way.
+printf 'deploy ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/00-natlas-deploy
+chmod 440 /etc/sudoers.d/00-natlas-deploy
+visudo -c                  # want "parsed OK" — do not continue otherwise
 ```
 
-**Keep this root session open** and prove the new door from a second terminal on your laptop: `ssh -p 2222 deploy@YOUR_VPS_IP`. **"Connection refused" means nothing is bound to 2222 — re-run the ssh.socket block above; don't close this session until the new door opens. (Port 22 timing out from the laptop is expected — that's ufw blocking it.)** Root login and password auth are dead now — catching a typo while this session is still open costs nothing; a lockout costs a VNC-console session. All further commands run as `deploy`: `ssh -p 2222 deploy@YOUR_VPS_IP` (with `sudo` where needed).
+**Keep this root session open** and prove the new door from a second terminal on your laptop: `ssh -p 2222 deploy@YOUR_VPS_IP 'whoami; sudo -n true && echo sudo-ok'`. **Read the failure — it tells you exactly where you are: "Connection refused" = nothing bound to 2222 (re-run the daemon block above); "Permission denied (publickey,password)" = the door is open but the deploy key was never installed (from this console: write your laptop's pubkey into `/home/deploy/.ssh/authorized_keys`); port 22 timing out = ufw working as intended.** Root login and password auth are dead now — catching a typo while this session is still open costs nothing; a lockout costs a VNC-console session. All further commands run as `deploy`: `ssh -p 2222 deploy@YOUR_VPS_IP` (with `sudo` where needed).
 
 ---
 
