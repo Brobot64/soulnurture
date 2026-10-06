@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { AiContextService } from './context/ai-context.service.js';
+import { GuardrailService } from './guardrails/guardrail.service.js';
 import {
   SYSTEM_PROMPT,
   REFLECTION_PROMPT_VERSION,
@@ -58,6 +59,7 @@ export class AiService {
     private readonly intentEngine: IntentEngineService,
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
+    private readonly guardrail: GuardrailService,
   ) {}
 
   async generateAndApply(
@@ -69,6 +71,10 @@ export class AiService {
       checkInId: input.checkInId,
     });
 
+    // Input guardrail: the model sees the truncated message; the intent floor
+    // below still evaluates the RAW userContent — safety is never truncated.
+    const sanitized = this.guardrail.sanitizeInput(input.userContent);
+
     const systemPrompt = [
       SYSTEM_PROMPT,
       `Prompt version: ${REFLECTION_PROMPT_VERSION}`,
@@ -76,6 +82,9 @@ export class AiService {
       `Valid supportFlag.category values: ${CANONICAL_CATEGORIES.join(', ')}`,
       `Valid supportFlag.severity values: ${CANONICAL_SEVERITIES.join(', ')}`,
       `Approved context JSON: ${JSON.stringify(ctx)}`,
+      ...(sanitized.injected
+        ? [this.guardrail.promptHardeningLine()]
+        : []),
     ].join('\n\n');
 
     const messages = [
@@ -85,7 +94,7 @@ export class AiService {
           | 'assistant',
         content: m.content,
       })),
-      { role: 'user' as const, content: input.userContent },
+      { role: 'user' as const, content: sanitized.content },
     ];
 
     let raw: unknown;
@@ -103,24 +112,31 @@ export class AiService {
 
     const result = validateAiResponse(raw);
 
+    // Output guardrail runs before the intent engine so verdict/executors and
+    // the stored aiPayload only ever see the filtered reply.
+    const filtered = this.guardrail.filterOutput(result.message);
+    result.message = filtered.reply;
+
     const verdict = this.intentEngine.evaluate({
       userContent: input.userContent,
       aiResult: result,
     });
 
-    let notes: string[] = [];
+    const notes: string[] = [...sanitized.notes, ...filtered.notes];
     if (verdict) {
-      notes = await applyIntentVerdict(verdict, {
-        prisma: this.prisma,
-        auditService: this.auditService,
-        result,
-        studentId: input.studentId,
-        studentRef: input.studentRef,
-        classLabel: input.classLabel,
-        conversationId: input.conversationId,
-        userContent: input.userContent,
-        relevantResources: ctx.relevantResources,
-      });
+      notes.push(
+        ...(await applyIntentVerdict(verdict, {
+          prisma: this.prisma,
+          auditService: this.auditService,
+          result,
+          studentId: input.studentId,
+          studentRef: input.studentRef,
+          classLabel: input.classLabel,
+          conversationId: input.conversationId,
+          userContent: input.userContent,
+          relevantResources: ctx.relevantResources,
+        })),
+      );
     }
 
     // Final whitelist: the model may never reference an unapproved resource.

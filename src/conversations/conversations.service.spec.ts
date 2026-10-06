@@ -6,6 +6,10 @@ import { AiGenerationError } from '../ai/ai.errors.js';
 import { AI_CONFIG } from '../ai/config/ai.config.js';
 import type { AiConfig } from '../ai/config/ai.config.js';
 import { IntentEngineService } from '../ai/intents/intent-engine.service.js';
+import {
+  GuardrailService,
+  RateLimitExceededException,
+} from '../ai/guardrails/guardrail.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
@@ -37,6 +41,7 @@ describe('ConversationsService', () => {
     supportFlag: Record<string, ReturnType<typeof vi.fn>>;
   };
   let ai: { generateAndApply: ReturnType<typeof vi.fn> };
+  let guardrail: { assertMessageAllowed: ReturnType<typeof vi.fn> };
   let auditService: { log: ReturnType<typeof vi.fn> };
 
   const student = {
@@ -95,6 +100,7 @@ describe('ConversationsService', () => {
       supportFlag: { findFirst: vi.fn(), create: vi.fn() },
     };
     ai = { generateAndApply: vi.fn() };
+    guardrail = { assertMessageAllowed: vi.fn() };
     auditService = { log: vi.fn().mockResolvedValue({ id: 'audit-1' }) };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -109,12 +115,33 @@ describe('ConversationsService', () => {
         },
         { provide: AiService, useValue: ai },
         IntentEngineService,
+        { provide: GuardrailService, useValue: guardrail },
         { provide: AuditService, useValue: auditService },
         { provide: AI_CONFIG, useValue: aiConfigStub },
       ],
     }).compile();
 
     service = module.get(ConversationsService);
+  });
+
+  it('rate gate rejects before any write or AI call when the limit is exceeded', async () => {
+    prisma.conversation.findUnique.mockResolvedValue({
+      id: 'conv-1',
+      studentId: student.id,
+      messages: [],
+    });
+    guardrail.assertMessageAllowed.mockImplementation(() => {
+      throw new RateLimitExceededException('limit reached', 42);
+    });
+
+    await expect(
+      service.sendMessage('user-1', 'conv-1', { content: 'hi' }),
+    ).rejects.toThrow(RateLimitExceededException);
+
+    expect(guardrail.assertMessageAllowed).toHaveBeenCalledWith(student.id);
+    expect(prisma.conversationMessage.create).not.toHaveBeenCalled();
+    expect(ai.generateAndApply).not.toHaveBeenCalled();
+    expect(prisma.aiGenerationJob.create).not.toHaveBeenCalled();
   });
 
   it('rejects access to another students conversation', async () => {

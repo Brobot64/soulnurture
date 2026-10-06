@@ -22,6 +22,7 @@ import { OpenAiProvider } from './providers/openai/openai.provider.js';
 import { AiUsageMeterService } from './providers/usage-meter.service.js';
 import { AI_CONFIG, buildAiConfig } from './config/ai.config.js';
 import type { AiConfig } from './config/ai.config.js';
+import { GuardrailService } from './guardrails/guardrail.service.js';
 import { IntentEngineService } from './intents/intent-engine.service.js';
 
 @Module({
@@ -32,6 +33,7 @@ import { IntentEngineService } from './intents/intent-engine.service.js';
     AiContextService,
     IntentEngineService,
     AiWorkerService,
+    GuardrailService,
     GroqAiProvider,
     OpenAiProvider,
     AiUsageMeterService,
@@ -73,6 +75,12 @@ import { IntentEngineService } from './intents/intent-engine.service.js';
       inject: [ConfigService],
     },
   ],
-  exports: [AiService, AiWorkerService, IntentEngineService, AI_CONFIG],
+  exports: [
+    AiService,
+    AiWorkerService,
+    IntentEngineService,
+    GuardrailService,
+    AI_CONFIG,
+  ],
 })
 export class AiModule {}

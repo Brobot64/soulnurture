@@ -8,6 +8,7 @@ import { MessageRole, Prisma } from '@prisma/client';
 import { AiService } from '../ai/ai.service.js';
 import type { AiOrchestrationOutcome } from '../ai/ai.service.js';
 import { IntentEngineService } from '../ai/intents/intent-engine.service.js';
+import { GuardrailService } from '../ai/guardrails/guardrail.service.js';
 import { applyIntentVerdict } from '../ai/intents/intent-executors.js';
 import { AI_CONFIG } from '../ai/config/ai.config.js';
 import type { AiConfig } from '../ai/config/ai.config.js';
@@ -52,6 +53,7 @@ export class ConversationsService {
     private readonly studentsService: StudentsService,
     private readonly aiService: AiService,
     private readonly intentEngine: IntentEngineService,
+    private readonly guardrail: GuardrailService,
     private readonly auditService: AuditService,
     @Inject(AI_CONFIG) private readonly aiConfig: AiConfig,
   ) {}
@@ -94,6 +96,11 @@ export class ConversationsService {
 
   async sendMessage(userId: string, id: string, dto: SendMessageDto) {
     const { student, conversation } = await this.owned(userId, id);
+
+    // Rate gate — runs before any DB write so a rejected turn leaves no trace
+    // and consumes no budget. Guards AI chat turns only; the human support
+    // route (support-requests) never passes through here.
+    this.guardrail.assertMessageAllowed(student.id);
 
     const userMessage = await this.prisma.conversationMessage.create({
       data: {

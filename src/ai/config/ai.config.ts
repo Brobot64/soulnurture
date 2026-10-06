@@ -1,4 +1,8 @@
 import type { ConfigService } from '@nestjs/config';
+import {
+  GUARDRAILS_DEFAULTS,
+  type GuardrailsConfig,
+} from '../guardrails/guardrails.config.js';
 
 /**
  * ---------------------------------------------------------------------------
@@ -64,6 +68,10 @@ export interface AiConfig {
      */
     persistModelCandidates: boolean;
   };
+  /** Reviewer surface for the configurable guardrail layer (see
+   * guardrails/guardrails.config.ts). Non-secret; exposed via
+   * GET /api/v1/ai/config so behaviour is explainable. */
+  guardrails: GuardrailsConfig;
 }
 
 export const AI_CONFIG_DEFAULTS = {
@@ -154,6 +162,40 @@ export function buildAiConfig(config: ConfigService): AiConfig {
     },
     safeguarding: {
       persistModelCandidates: true,
+    },
+    guardrails: {
+      input: {
+        maxMessageChars: Number(
+          config.get<string>('AI_MAX_MESSAGE_CHARS') ??
+            GUARDRAILS_DEFAULTS.maxMessageChars,
+        ),
+        truncationNote:
+          'Long message — shown to the model in truncated form; the safeguarding review still sees the full original text.',
+        injectionPatterns: GUARDRAILS_DEFAULTS.injectionPatterns,
+        promptHardeningLine: GUARDRAILS_DEFAULTS.promptHardeningLine,
+      },
+      output: {
+        maxReplyChars: Number(
+          config.get<string>('AI_MAX_REPLY_CHARS') ??
+            GUARDRAILS_DEFAULTS.maxReplyChars,
+        ),
+        truncationNote:
+          'Reply exceeded the character cap and was cut — flagged for reviewer attention.',
+        bannedClaims: GUARDRAILS_DEFAULTS.bannedClaims,
+        fallbackCopy: GUARDRAILS_DEFAULTS.fallbackCopy,
+      },
+      rate: {
+        perStudentDaily: Number(
+          config.get<string>('AI_RATE_LIMIT_DAILY') ??
+            GUARDRAILS_DEFAULTS.perStudentDaily,
+        ),
+        perStudentPerMinute: Number(
+          config.get<string>('AI_RATE_LIMIT_PER_MINUTE') ??
+            GUARDRAILS_DEFAULTS.perStudentPerMinute,
+        ),
+        limitMessage:
+          'You have sent quite a few messages in a short time — let us take a short pause so I can give each one proper attention. You can always reach a school counsellor right away through Support; they are there for you even while I rest.',
+      },
     },
   };
 }

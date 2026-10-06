@@ -51,7 +51,7 @@ export class AiController {
   @ApiOperation({
     summary: 'Explain current AI configuration and safeguarding intents',
     description:
-      'Non-secret explanation surface for professionals and the clinical reviewer: chat/transcription models, context bounds, async pipeline settings, and every registered intent with its detection signals and actions. Secrets (API keys) are never included.',
+      'Non-secret explanation surface for professionals and the clinical reviewer: chat/transcription models, context bounds, async pipeline settings, the guardrail configuration (input/output/rate), and every registered intent with its detection signals and actions. Secrets (API keys) are never included.',
   })
   @ApiEnvelopeOk(Object)
   config() {
@@ -66,6 +66,7 @@ export class AiController {
       context: this.aiConfig.context,
       async: this.aiConfig.async,
       safeguarding: this.aiConfig.safeguarding,
+      guardrails: this.aiConfig.guardrails,
       intents: INTENTS.map((intent) => ({
         id: intent.id,
         label: intent.label,

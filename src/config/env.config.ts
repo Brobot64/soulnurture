@@ -77,6 +77,22 @@ class EnvironmentVariables {
   AI_CONTEXT_CHARACTER_LIMIT?: number;
 
   @IsOptional()
+  @IsNumber()
+  AI_MAX_MESSAGE_CHARS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  AI_MAX_REPLY_CHARS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  AI_RATE_LIMIT_DAILY?: number;
+
+  @IsOptional()
+  @IsNumber()
+  AI_RATE_LIMIT_PER_MINUTE?: number;
+
+  @IsOptional()
   @IsString()
   OPENAI_API_KEY?: string;
 
