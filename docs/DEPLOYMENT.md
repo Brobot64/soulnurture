@@ -466,7 +466,7 @@ ollama run natlas --verbose "I feel overwhelmed about my exams"
 Tuning notes for the 12 GB box:
 
 - `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_LOADED_MODELS=1` (default service env) keep a single resident copy — the model stays loaded (~5–6 GB) thanks to Ollama's default `keep_alive`, so the async worker's jobs don't pay a load penalty per request.
-- Expected throughput on 6 shared vCPUs: **~4–10 tokens/sec**. Real-time student chat always rides the OpenAI→Groq provider chain (`AI_PROVIDER_CHAIN` in §6 — local N-ATLaS is deliberately *not* a chat-chain member); this Ollama instance serves the **vernacular understanding lane**, reached via `NATLAS_LLM_BASE_URL` (the app posts to `/api/chat` on `http://127.0.0.1:11434` — no `/v1` suffix).
+- Expected throughput on 6 shared vCPUs: **~2 tokens/sec** (measured 2026-10-07: 40s warm / 85s cold for the ~60-token understanding JSON). Real-time student chat always rides the OpenAI→Groq provider chain (`AI_PROVIDER_CHAIN` in §6 — local N-ATLaS is deliberately *not* a chat-chain member); this Ollama instance serves the **vernacular understanding lane**, reached via `NATLAS_LLM_BASE_URL` (the app posts to `/api/chat` on `http://127.0.0.1:11434` — no `/v1` suffix). Because of that latency, §6 sets `NATLAS_UNDERSTANDING_TIMEOUT_MS=120000` — at the 15s code default the local lane always times out and every understanding job falls back to OpenAI anyway.
 - Ollama must remain on `127.0.0.1` — never open 11434 in ufw.
 
 **License:** display *"N-ATLaS … powered by Awarri Technologies"* in the product and expose it via `GET /api/v1/ai/config`; stay ≤ 1000 active users/30 days.
@@ -601,9 +601,14 @@ OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 # Language layer
 AI_LANGUAGE_OFFER_ENABLED=true
 AI_VERNACULAR_REPLY_MODE=openai-native
-# Local N-ATLaS (Ollama) — async vernacular understanding lane only
+# Local N-ATLaS (Ollama) — async vernacular understanding lane only.
+# Model name must match `ollama list` EXACTLY (a mismatch 404s every request
+# and silently falls back to OpenAI). CPU inference runs ~2 tokens/s, so the
+# understanding call takes 40-85s — the timeout must cover that or the local
+# lane never wins and every job falls back anyway.
 NATLAS_LLM_BASE_URL=http://127.0.0.1:11434
-NATLAS_LLM_MODEL=n-atlas
+NATLAS_LLM_MODEL=natlas:latest
+NATLAS_UNDERSTANDING_TIMEOUT_MS=120000
 
 # Vernacular ASR sidecar — phase 2 (§5). Empty = yo/ha/ig voice gets a friendly 503
 NATLAS_ASR_BASE_URL=

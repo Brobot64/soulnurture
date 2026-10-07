@@ -249,9 +249,14 @@ export function buildAiConfig(config: ConfigService): AiConfig {
         config.get<string>('AI_VERNACULAR_REPLY_MODE'),
       ),
       natlasBaseUrl: config.get<string>('NATLAS_LLM_BASE_URL')?.trim() || null,
-      natlasModel: config.get<string>('NATLAS_LLM_MODEL') ?? 'n-atlas',
+      natlasModel: config.get<string>('NATLAS_LLM_MODEL')?.trim() || 'natlas:latest',
       understandingMaxOutputTokens: 120,
-      understandingTimeoutMs: 15_000,
+      // Local CPU inference on the VPS runs ~2 tokens/s (40-85s for the
+      // understanding JSON), so the local lane needs far more headroom than
+      // remote APIs. Local-only knob: the OpenAI fallback keeps its own
+      // tighter budget elsewhere.
+      understandingTimeoutMs:
+        Number(config.get<string>('NATLAS_UNDERSTANDING_TIMEOUT_MS')) || 15_000,
     },
     context: {
       messageLimit: Number(config.get<string>('AI_CONTEXT_MESSAGE_LIMIT') ?? 12),
