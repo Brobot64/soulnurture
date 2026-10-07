@@ -25,7 +25,7 @@ SSH runs on **port 2222** throughout (§1): `ssh -p 2222 deploy@YOUR_VPS_IP`.
 
 | Component | Runtime | Port (bind) | Memory cap | Persistence |
 |---|---|---|---|---|
-| NestJS API | systemd (`natlas.service`), native Node 22 | 127.0.0.1:3000 | ~512 MB | — (stateless) |
+| NestJS API | systemd (`natlas.service`), native Node 24 | 127.0.0.1:3000 | ~512 MB | — (stateless) |
 | N-ATLaS LLM | Ollama (native, systemd) | 127.0.0.1:11434 | ~6 GB (model resident) | `/opt/ollama/models` |
 | PostgreSQL 17 | Docker Compose | 127.0.0.1:5432 | 1.5 GB | named volume `pgdata` |
 | RustFS (S3) | Docker Compose | 127.0.0.1:9000 / 9001 | 512 MB | named volume `rustfs-data` |
@@ -517,8 +517,10 @@ whisper-small runs ~1 GB RAM **per warm language** (×3 ≈ 3 GB), loads lazily 
 ## 6. NestJS deployment (this repo)
 
 ```bash
-# --- node 22
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -
+# --- node 24 (must match CI's node-version and the laptop — npm 10 on Node 22
+#     resolves the lockfile differently and rejects `npm ci` with
+#     "Missing: typescript@5.9.3 from lock file")
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo bash -
 sudo apt install -y nodejs
 
 # --- service user FIRST (owns the .env group, and must exist before chown)
@@ -984,14 +986,19 @@ cd /opt/natlas
 exec 9>/tmp/natlas-deploy.lock
 flock -n 9 || { echo "another deploy is already running; aborting"; exit 1; }
 
+# The marker is written ONLY after the health gate passes, so a run that dies
+# mid-deploy (npm ci, build, migrate, seed) is still "not deployed" and reruns.
+# Comparing git HEAD instead would silently skip redeploys after partial failures.
+MARKER="$HOME/.natlas-last-deploy"
+LAST=$(cat "$MARKER" 2>/dev/null || git rev-parse HEAD)
+
 git fetch origin
 git checkout -f main
-OLD=$(git rev-parse HEAD)
 # deterministic: server tree is exactly origin/main (local junk is discarded;
 # .env and node_modules are untracked and survive)
 git reset --hard origin/main
 NEW=$(git rev-parse HEAD)
-if [ "$OLD" = "$NEW" ]; then
+if [ "$LAST" = "$NEW" ]; then
   echo "already deployed at $(git rev-parse --short "$NEW"); nothing to do"
   exit 0
 fi
@@ -1007,14 +1014,15 @@ sudo systemctl restart natlas
 for _ in $(seq 1 20); do
   sleep 2
   if curl -sf -m 5 http://127.0.0.1:3000/api/health/auth >/dev/null; then
-    echo "DEPLOY OK: $(git rev-parse --short "$OLD") -> $(git rev-parse --short "$NEW")"
+    echo "$NEW" > "$MARKER"
+    echo "DEPLOY OK: $(git rev-parse --short "$LAST") -> $(git rev-parse --short "$NEW")"
     exit 0
   fi
 done
 
-echo "HEALTH GATE FAILED after deploying $(git rev-parse --short "$NEW"); rolling code back to $(git rev-parse --short "$OLD")" >&2
+echo "HEALTH GATE FAILED after deploying $(git rev-parse --short "$NEW"); rolling code back to $(git rev-parse --short "$LAST")" >&2
 # Migrations are additive-only and stay applied; old code tolerates the newer schema.
-git reset --hard "$OLD"
+git reset --hard "$LAST"
 npm ci
 npx prisma generate --config prisma7.config.ts
 npm run build
