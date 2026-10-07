@@ -186,7 +186,7 @@ POSTGRES_DB=natlas
 RUSTFS_ACCESS_KEY=natlas-storage
 RUSTFS_SECRET_KEY=<generate>
 GRAFANA_ADMIN_PASSWORD=<generate>
-GF_SMTP_HOST=smtp.ethereal.email:587        # or your SMTP
+GF_SMTP_HOST=smtp.ethereal.email:587        # test-only default — replace with real SMTP before relying on email alerts
 GF_SMTP_USER=...
 GF_SMTP_PASSWORD=...
 ```
@@ -877,6 +877,8 @@ scrape_configs:
 Grafana → Explore → Loki → `{unit="natlas.service"}` gives you the API logs; `{syslog_id="ollama"}` for model traffic.
 
 ### Alerting (Grafana → Alerting → Alert rules)
+
+**Heads-up:** with the runbook default, `GF_SMTP_HOST` is `smtp.ethereal.email` — a throwaway test inbox; email alerts **never reach a real address** until real `GF_SMTP_*` values go into `/opt/infra/.env` and grafana is recreated (`cd /opt/infra && sudo docker compose up -d grafana`). Contact-point setup and the full warning live in `docs/MONITORING.md`.
 
 Minimum viable rules (evaluate every 1m, notify via the SMTP contact point):
 
