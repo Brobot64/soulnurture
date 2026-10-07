@@ -1044,6 +1044,13 @@ Host github.com
 
 `/opt/natlas` remote: `git@github.com:Brobot64/soulnurture.git`.
 
+Also pin GitHub's host key into `~deploy/.ssh/known_hosts` — without it every fetch dies with `Host key verification failed` (verify the fingerprint against https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints before trusting the scan):
+
+```bash
+ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts   # then chmod 600 and check: ssh-keygen -lf ~/.ssh/known_hosts
+# expect: 256 SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU github.com (ED25519)
+```
+
 ### One-time GitHub setup
 
 1. **Deploy key (pull access)**: repo Settings → Deploy keys → add the server's `~/.ssh/natlas_github.pub` (`ssh -p 2222 deploy@169.58.86.169 'cat ~/.ssh/natlas_github.pub'`). Read-only — do **not** tick "Allow write access".
