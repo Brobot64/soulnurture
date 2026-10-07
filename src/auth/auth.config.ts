@@ -18,6 +18,10 @@ export function createAuth(
     prisma: PrismaService,
     mailer: MailerService
 ) {
+    // Cross-site frontends (e.g. Vercel) get SameSite=None + Secure cookies —
+    // without them the browser never returns the session cookie cross-origin.
+    const crossSiteCookies = process.env.BETTER_AUTH_CROSS_SITE_COOKIES === 'true';
+
     const rejectExistingEmailSignup = {
         id: 'reject-existing-email-signup',
         hooks: {
@@ -55,7 +59,10 @@ export function createAuth(
         advanced: {
             database: {
                 generateId: 'uuid',
-            }
+            },
+            ...(crossSiteCookies
+                ? { defaultCookieAttributes: { sameSite: 'none', secure: true } }
+                : {}),
         },
         user: {
             additionalFields: {
@@ -117,9 +124,11 @@ export function createAuth(
             updateAge: 60 * 60 * 24, // 1 day
         },
 
-        trustedDomains: [
-            'localhost', 
-            '127.0.0.1'
+        // better-auth also appends BETTER_AUTH_TRUSTED_ORIGINS (comma-separated)
+        // natively; the deployed frontend origin belongs there.
+        trustedOrigins: [
+            'http://localhost:3001',
+            'http://localhost:3000',
         ],
     })
 }
