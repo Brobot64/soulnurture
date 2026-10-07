@@ -21,6 +21,10 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # Prisma 7 no longer generates the client on install — without this,
+      # every suite importing @prisma/client fails with
+      # "Cannot find module '.prisma/client/default'" on a fresh runner.
+      - run: npx prisma generate --config prisma7.config.ts
       - run: npm run lint
       - run: npm test
       - run: npm run build
