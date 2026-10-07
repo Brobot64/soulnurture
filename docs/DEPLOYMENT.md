@@ -543,10 +543,13 @@ DATABASE_URL=postgresql://natlas:<PG_PASSWORD>@127.0.0.1:5432/natlas?schema=publ
 BETTER_AUTH_SECRET=<openssl rand -hex 32>
 BETTER_AUTH_URL=https://api.YOUR_VPS_IP.sslip.io
 # Browser origins allowed to call the API; add the deployed frontend origin before it goes live
-# (comma-separated, NO spaces after commas — the app does not trim, so "a, b" never matches b)
+# (comma-separated; entries are trimmed, but keep it space-free out of habit)
 ALLOWED_ORIGINS=https://app.example.com
 # Cross-origin frontend (e.g. Vercel): better-auth origin checks + SameSite=None session cookie
-# (with Lax cookies the browser never stores the session cookie from a cross-site call)
+# (with Lax cookies the browser never stores the session cookie from a cross-site call).
+# MUST be set — better-auth merges it natively for origin checks, and the NestJS wrapper
+# needs it in trustedOrigins to answer CORS preflights on /api/auth/* (else they 404
+# and the browser blocks cross-origin sign-up/sign-in before it even starts).
 BETTER_AUTH_TRUSTED_ORIGINS=https://app.example.com
 BETTER_AUTH_CROSS_SITE_COOKIES=true
 

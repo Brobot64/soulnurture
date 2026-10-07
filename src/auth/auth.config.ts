@@ -22,6 +22,16 @@ export function createAuth(
     // without them the browser never returns the session cookie cross-origin.
     const crossSiteCookies = process.env.BETTER_AUTH_CROSS_SITE_COOKIES === 'true';
 
+    // better-auth merges BETTER_AUTH_TRUSTED_ORIGINS natively for its own
+    // origin checks, but the @thallesp/nestjs-better-auth Fastify preflight
+    // interceptor reads ONLY this array — without merging the env var in,
+    // CORS preflights on /api/auth/* fall through to better-auth's router
+    // and 404, so cross-origin sign-up/sign-in never leaves the browser.
+    const envTrustedOrigins = (process.env.BETTER_AUTH_TRUSTED_ORIGINS ?? '')
+        .split(',')
+        .map((origin) => origin.trim())
+        .filter(Boolean);
+
     const rejectExistingEmailSignup = {
         id: 'reject-existing-email-signup',
         hooks: {
@@ -124,11 +134,10 @@ export function createAuth(
             updateAge: 60 * 60 * 24, // 1 day
         },
 
-        // better-auth also appends BETTER_AUTH_TRUSTED_ORIGINS (comma-separated)
-        // natively; the deployed frontend origin belongs there.
         trustedOrigins: [
             'http://localhost:3001',
             'http://localhost:3000',
+            ...envTrustedOrigins,
         ],
     })
 }
