@@ -44,7 +44,7 @@ export class StorageService {
             client: new S3Client({
               endpoint,
               region,
-              // MinIO serves bucket-in-path style; required for the compose
+              // RustFS serves bucket-in-path style; required for the compose
               // deployment in DEPLOYMENT.md §4.
               forcePathStyle: true,
               // Without this, the SDK embeds a CRC32 checksum computed over an
