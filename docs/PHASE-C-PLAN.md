@@ -124,7 +124,7 @@ model SessionSummary { id, studentId, conversationId, summary VarChar(400), topi
 2. `npm run test:e2e:journey` ×2 idempotent — new acts green.
 3. `npm run verify:load` at 100 and 500 virtual users (mock AI) — printed p95/error budgets pass.
 4. Chain failover + budget-pause drills green; showcase-moment smoke for all three demoable moments.
-5. Cost sanity: pilot-day estimate ≤ $20 (Grafana panel math shown).
+5. Cost sanity: pilot-month estimate ≤ $20 — a full month of pilot usage fits within the org cap (Grafana panel math shown).
 6. Clinical packet v2 printout: intents (incl. vernacular keywords w/ glosses), guardrails config, eval-set results — reviewer sign-off before launch.
 
 ## Parked (unchanged + additions)
