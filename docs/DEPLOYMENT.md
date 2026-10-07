@@ -543,7 +543,12 @@ DATABASE_URL=postgresql://natlas:<PG_PASSWORD>@127.0.0.1:5432/natlas?schema=publ
 BETTER_AUTH_SECRET=<openssl rand -hex 32>
 BETTER_AUTH_URL=https://api.YOUR_VPS_IP.sslip.io
 # Browser origins allowed to call the API; add the deployed frontend origin before it goes live
+# (comma-separated, NO spaces after commas — the app does not trim, so "a, b" never matches b)
 ALLOWED_ORIGINS=https://app.example.com
+# Cross-origin frontend (e.g. Vercel): better-auth origin checks + SameSite=None session cookie
+# (with Lax cookies the browser never stores the session cookie from a cross-site call)
+BETTER_AUTH_TRUSTED_ORIGINS=https://app.example.com
+BETTER_AUTH_CROSS_SITE_COOKIES=true
 
 # SMTP (verification + password reset emails)
 SMTP_HOST=<smtp-host>

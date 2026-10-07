@@ -19,7 +19,10 @@ async function bootstrap() {
   const cors = (await import('@fastify/cors')).default;
   const cookie = (await import('@fastify/cookie')).default;
   const multipart = (await import('@fastify/multipart')).default;
-  const origins = (process.env.ALLOWED_ORIGINS ?? '').split(',').filter(Boolean);
+  const origins = (process.env.ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
 
   await app.register(cors, {
     origin: origins.length ? origins : true,
