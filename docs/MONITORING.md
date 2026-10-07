@@ -33,7 +33,12 @@ Everything runs as containers from `/opt/infra/docker-compose.yml`; the Natlas A
 
 ## 2. Access
 
-- **Grafana**: https://monitor.169.58.86.169.sslip.io — user `admin`, password `GRAFANA_ADMIN_PASSWORD` from `/opt/infra/.env` on the VPS (`sudo grep GRAFANA_ADMIN_PASSWORD /opt/infra/.env`). Change it on first login (Grafana will prompt); the env var only sets the initial password.
+- **Grafana**: https://monitor.169.58.86.169.sslip.io — user `admin`, password `GRAFANA_ADMIN_PASSWORD` from `/opt/infra/.env` on the VPS (`sudo grep GRAFANA_ADMIN_PASSWORD /opt/infra/.env`).
+  Gotcha: `GF_SECURITY_ADMIN_PASSWORD` is only read when Grafana's database is **first initialized**. Editing it in `.env` later (or recreating the container) does *not* change the admin password — logins keep failing with "invalid username or password". Reset it without ever printing the secret (the container already holds it in its env):
+
+  ```bash
+  sudo docker exec natlas-infra-grafana-1 sh -c 'grafana-cli --homepath /usr/share/grafana admin reset-admin-password "$GF_SECURITY_ADMIN_PASSWORD"'
+  ```
 - **Prometheus and Loki have no public URL** (by design). Query them through Grafana → Explore, or over SSH: `ssh -p 2222 deploy@169.58.86.169` then `curl -s localhost:9090/api/v1/query?query=up | head`.
 
 ## 3. The 60-second health check
@@ -74,7 +79,7 @@ Optional extra panel — API error rate over the last hour: Loki query `count_ov
 
 ## 5. Alerting (Grafana-managed rules + email)
 
-SMTP is already wired into the Grafana container (`GF_SMTP_*` in `/opt/infra/.env`), so Grafana can send mail — you just need to create the contact point and the rules.
+SMTP is wired into the Grafana container (`GF_SMTP_*` in `/opt/infra/.env`). **Heads-up:** the runbook default is `smtp.ethereal.email` — a throwaway inbox service for testing; mail sent through it never reaches a real address. Before relying on email alerts, put your real SMTP host/user/password into `/opt/infra/.env`, then `cd /opt/infra && sudo docker compose up -d grafana`. After that you just create the contact point and the rules.
 
 **One-time setup:**
 
