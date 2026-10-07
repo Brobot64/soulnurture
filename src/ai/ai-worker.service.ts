@@ -225,7 +225,7 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
       });
       await this.prisma.$executeRaw<number>`
         UPDATE ai_generation_job
-        SET status = 'SUCCEEDED', attempts = attempts + 1, lastError = NULL, "nextRetryAt" = NULL
+        SET status = 'SUCCEEDED', attempts = attempts + 1, "lastError" = NULL, "nextRetryAt" = NULL
         WHERE id = ${job.id}::uuid AND status = 'PROCESSING'`;
       this.logger.log(`AI job ${job.id} completed`);
     } catch (error) {
@@ -256,7 +256,7 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
       await this.aiService.summarizeConversation(input);
       await this.prisma.$executeRaw<number>`
         UPDATE ai_generation_job
-        SET status = 'SUCCEEDED', attempts = attempts + 1, lastError = NULL, "nextRetryAt" = NULL
+        SET status = 'SUCCEEDED', attempts = attempts + 1, "lastError" = NULL, "nextRetryAt" = NULL
         WHERE id = ${job.id}::uuid AND status = 'PROCESSING'`;
       this.logger.log(`AI job ${job.id} (SUMMARY) completed`);
     } catch (error) {
@@ -309,7 +309,7 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
       });
       await this.prisma.$executeRaw<number>`
         UPDATE ai_generation_job
-        SET status = 'SUCCEEDED', attempts = attempts + 1, lastError = NULL, "nextRetryAt" = NULL
+        SET status = 'SUCCEEDED', attempts = attempts + 1, "lastError" = NULL, "nextRetryAt" = NULL
         WHERE id = ${job.id}::uuid AND status = 'PROCESSING'`;
       this.logger.log(`AI job ${job.id} (VERNACULAR) completed`);
     } catch (error) {

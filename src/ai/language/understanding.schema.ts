@@ -40,8 +40,11 @@ export const UNDERSTANDING_JSON_SCHEMA = {
 export function validateUnderstanding(raw: unknown): UnderstandingResult {
   const parsed = UnderstandingResultSchema.safeParse(raw);
   if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+      .join('; ');
     throw new AiGenerationError(
-      'AI message understanding failed schema validation',
+      `AI message understanding failed schema validation (${issues})`,
       { cause: parsed.error },
     );
   }

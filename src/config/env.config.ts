@@ -186,7 +186,14 @@ class EnvironmentVariables {
 }
 
 export function validateEnv(config: Record<string, unknown>) {
-  const validatedConfig = plainToInstance(EnvironmentVariables, config, {
+  // Empty values must not reach class-transformer: with implicit conversion a
+  // numeric prop set to '' coerces to 0, and the validated env takes
+  // precedence in ConfigService — so OPENAI_TEMPERATURE='' became 0 and
+  // OpenAI rejected every request ("temperature does not support 0").
+  const pruned = Object.fromEntries(
+    Object.entries(config).filter(([, value]) => value !== ''),
+  );
+  const validatedConfig = plainToInstance(EnvironmentVariables, pruned, {
     enableImplicitConversion: true,
   });
 

@@ -58,6 +58,9 @@ export class ChainedAiProvider implements AiProvider {
       } catch (error) {
         if (error instanceof AiGenerationError) {
           lastError = error;
+          this.logger.warn(
+            `AI provider "${member.name}" failed; failing over: ${error.message}`,
+          );
           continue;
         }
         throw error;
