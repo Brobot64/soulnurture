@@ -1080,7 +1080,7 @@ For each persona (Jude, Grace, Ibrahim, Tunde), in order:
 
 Two routes, one layout: every object lands at `uploads/<userId>/<uuid><ext>` —
 the extension is derived from the declared MIME type, never from the
-client-supplied filename. Both routes require the S3/MinIO block
+client-supplied filename. Both routes require the S3/RustFS block
 (`S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` —
 docs/DEPLOYMENT.md §4); on a deployment without it both answer the friendly
 `503` described below and nothing else changes.
@@ -1136,9 +1136,9 @@ curl -sS -X PUT "<uploadUrl>" \
   --data-binary @photo.jpg
 ```
 
-Verify the object (MinIO console at `https://s3.<domain>`, or `mc`):
-`mc ls local/natlas-uploads/uploads/<userId>/`. The bucket is private — objects
-are readable only through a signed URL.
+Verify the object (RustFS console at `https://s3.<domain>`, or the AWS CLI):
+`aws --endpoint-url https://s3.<domain> s3 ls s3://natlas-uploads/uploads/<userId>/ --recursive`.
+The bucket is private — objects are readable only through a signed URL.
 
 **Negatives**:
 

@@ -31,7 +31,7 @@ export class UploadsController {
   @ApiOperation({
     summary: 'Issue a presigned URL for direct-to-storage upload',
     description:
-      'Signs a single PUT to `uploadUrl` (valid for `expiresInSeconds`). The signature binds the exact declared byte size — uploading a different size is rejected by storage. The client must send the same Content-Type it declared. Prefer this over the multipart route for large files: the bytes never transit the API server. Requires S3/MinIO configuration (docs/DEPLOYMENT.md §4); otherwise 503.',
+      'Signs a single PUT to `uploadUrl` (valid for `expiresInSeconds`). The signature binds the exact declared byte size — uploading a different size is rejected by storage. The client must send the same Content-Type it declared. Prefer this over the multipart route for large files: the bytes never transit the API server. Requires S3/RustFS configuration (docs/DEPLOYMENT.md §4); otherwise 503.',
   })
   @ApiBody({ type: PresignUploadDto })
   @ApiEnvelopeOk(Object)
@@ -49,7 +49,7 @@ export class UploadsController {
   @ApiConsumes('multipart/form-data')
   @ApiOperation({
     summary: 'Upload a file through the API',
-    description: `Multipart field \`file\` (max ${MAX_UPLOAD_MB}MB, allowlisted types only). The API buffers the file and forwards it to storage in one PUT — convenient for small files, but the bytes transit Node; use /v1/uploads/presign for large files. Requires S3/MinIO configuration; otherwise 503.`,
+    description: `Multipart field \`file\` (max ${MAX_UPLOAD_MB}MB, allowlisted types only). The API buffers the file and forwards it to storage in one PUT — convenient for small files, but the bytes transit Node; use /v1/uploads/presign for large files. Requires S3/RustFS configuration; otherwise 503.`,
   })
   @ApiBody({
     schema: {

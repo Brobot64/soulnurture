@@ -61,7 +61,7 @@ npm start
 
 OpenAPI docs: `http://localhost:3000/api/docs` (Swagger UI) and `http://localhost:3000/api/docs-json` (raw JSON).
 
-**Production deployment** (Contabo VPS runbook: security baseline, Docker infra, PostgreSQL, MinIO uploads, N-ATLaS/Ollama, systemd, Nginx/TLS, Prometheus + Grafana + Loki monitoring, backups): see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+**Production deployment** (Contabo VPS runbook: security baseline, Docker infra, PostgreSQL, RustFS uploads, N-ATLaS/Ollama, systemd, Nginx/TLS, Prometheus + Grafana + Loki monitoring, backups): see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 **Agent/dev handoff** (full working memory: decisions ledger, debugging stories, traps, resume steps): see [docs/HANDOFF.md](docs/HANDOFF.md). Phase C plan (approved, paused): [docs/PHASE-C-PLAN.md](docs/PHASE-C-PLAN.md).
 

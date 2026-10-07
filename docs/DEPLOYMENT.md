@@ -12,7 +12,7 @@ with zero DNS setup. Replace `YOUR_VPS_IP` everywhere below with your Contabo IP
 | Hostname | Serves |
 |---|---|
 | `api.YOUR_VPS_IP.sslip.io` | NestJS backend (this repo) |
-| `s3.YOUR_VPS_IP.sslip.io` | MinIO object storage (S3 API + console) |
+| `s3.YOUR_VPS_IP.sslip.io` | RustFS object storage (S3 API + console) |
 | `monitor.YOUR_VPS_IP.sslip.io` | Grafana dashboards |
 
 Swapping in a real domain later: point its `A` records at the same IP, update `server_name` and the
@@ -28,7 +28,7 @@ SSH runs on **port 2222** throughout (§1): `ssh -p 2222 deploy@YOUR_VPS_IP`.
 | NestJS API | systemd (`natlas.service`), native Node 22 | 127.0.0.1:3000 | ~512 MB | — (stateless) |
 | N-ATLaS LLM | Ollama (native, systemd) | 127.0.0.1:11434 | ~6 GB (model resident) | `/opt/ollama/models` |
 | PostgreSQL 17 | Docker Compose | 127.0.0.1:5432 | 1.5 GB | named volume `pgdata` |
-| MinIO (S3) | Docker Compose | 127.0.0.1:9000 / 9001 | 512 MB | named volume `minio-data` |
+| RustFS (S3) | Docker Compose | 127.0.0.1:9000 / 9001 | 512 MB | named volume `rustfs-data` |
 | Prometheus | Docker Compose | 127.0.0.1:9090 | 512 MB | volume `prom-data` |
 | Grafana | Docker Compose | 127.0.0.1:3001 | 384 MB | volume `grafana-data` |
 | Loki | Docker Compose | 127.0.0.1:3100 | 384 MB | volume `loki-data` |
@@ -183,8 +183,8 @@ Layout: infra lives in `/opt/infra`, one compose file, one shared network.
 POSTGRES_USER=natlas
 POSTGRES_PASSWORD=<generate: openssl rand -hex 24>
 POSTGRES_DB=natlas
-MINIO_ROOT_USER=natlas-storage
-MINIO_ROOT_PASSWORD=<generate>
+RUSTFS_ACCESS_KEY=natlas-storage
+RUSTFS_SECRET_KEY=<generate>
 GRAFANA_ADMIN_PASSWORD=<generate>
 GF_SMTP_HOST=smtp.ethereal.email:587        # or your SMTP
 GF_SMTP_USER=...
@@ -217,21 +217,25 @@ services:
       resources:
         limits: { memory: 1536M }
 
-  minio:
-    image: minio/minio:RELEASE.2025-02-28T09-55-06Z   # check latest release tag
+  rustfs:
+    image: rustfs/rustfs:latest
     restart: unless-stopped
-    command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
     ports:
       - "127.0.0.1:9000:9000"        # S3 API (proxied via s3.YOUR_VPS_IP.sslip.io)
       - "127.0.0.1:9001:9001"        # web console (proxied via s3.YOUR_VPS_IP.sslip.io/console)
     volumes:
-      - minio-data:/data
+      - rustfs-data:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health"]
       interval: 30s
+      timeout: 5s
+      start_period: 20s
     deploy:
       resources:
         limits: { memory: 512M }
@@ -335,7 +339,7 @@ services:
     image: prom/blackbox-exporter:v0.25.0
     restart: unless-stopped
     # host networking: probes must reach the native services bound to
-    # 127.0.0.1 (API :3000, Ollama :11434, MinIO :9000) — unreachable
+    # 127.0.0.1 (API :3000, Ollama :11434, RustFS :9000) — unreachable
     # from a bridge network, and the backend is not containerized
     network_mode: host
     deploy:
@@ -344,7 +348,7 @@ services:
 
 volumes:
   pgdata:
-  minio-data:
+  rustfs-data:
   prom-data:
   grafana-data:
   loki-data:
@@ -373,17 +377,28 @@ Persistence model: `pgdata` is a named Docker volume — survives `compose down`
 
 ---
 
-## 4. MinIO — object storage & file uploads
+## 4. RustFS — object storage & file uploads
+
+RustFS speaks the standard S3 API on the usual 9000 (API) / 9001 (console) split, so the app's
+AWS-SDK configuration does not change — only the container. Bucket setup and backups use the
+**AWS CLI** (the backend already runs on `@aws-sdk`, so no extra S3 tooling to maintain):
 
 ```bash
+sudo apt install -y awscli
+
 # one-time bucket setup from the host (credentials come from the infra .env)
-docker run --rm --env-file /opt/infra/.env --network natlas-infra_default minio/mc \
-  sh -c "mc alias set local http://minio:9000 \$MINIO_ROOT_USER \$MINIO_ROOT_PASSWORD && mc mb local/natlas-uploads && mc anonymous set none local/natlas-uploads"
+set -a; . /opt/infra/.env; set +a
+export AWS_ACCESS_KEY_ID="$RUSTFS_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$RUSTFS_SECRET_KEY"
+aws --endpoint-url http://127.0.0.1:9000 --region us-east-1 s3api create-bucket --bucket natlas-uploads
+
+# S3 buckets are private by default — prove it: an unauthenticated read must return 403
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9000/natlas-uploads/anything
 ```
 
-(The bucket stays private — access only via presigned URLs or the backend's service credentials.)
+(The bucket stays private — access only via presigned URLs or the backend's service credentials;
+the `403` above proves it.)
 
-**Upload pattern for the NestJS app** (files like student voice notes ≥ the current 10 MB multipart cap should go direct-to-MinIO):
+**Upload pattern for the NestJS app** (files like student voice notes ≥ the current 10 MB multipart cap should go direct-to-RustFS):
 
 - **Preferred:** backend issues a **presigned PUT URL** (`@aws-sdk/client-s3` → `getSignedUrl`), the client uploads straight to `https://s3.YOUR_VPS_IP.sslip.io/natlas-uploads/...` — large files never transit Node. Nginx sets `client_max_body_size 512m` on the `s3.` vhost.
 - **Small files / server-validated writes:** keep the existing Fastify multipart route (10 MB cap in `main.ts`) and stream into S3 with `@aws-sdk/client-s3` `PutObject`.
@@ -394,17 +409,18 @@ App env additions (`.env`):
 S3_ENDPOINT=https://s3.YOUR_VPS_IP.sslip.io
 S3_REGION=us-east-1
 S3_BUCKET=natlas-uploads
-S3_ACCESS_KEY=<MINIO_ROOT_USER or a dedicated service account>
-S3_SECRET_KEY=<MINIO_ROOT_PASSWORD or service key>
+S3_ACCESS_KEY=<RUSTFS_ACCESS_KEY from the infra .env>
+S3_SECRET_KEY=<its secret>
 ```
 
-Never expose `MINIO_ROOT_*` to clients; create scoped service accounts in the MinIO console for the app if you prefer.
+Never expose the RustFS credentials to clients — the API's presigned URLs are the only client-facing door.
 
 **Daily data backup** (mirrors object storage next to the DB dumps):
 
 ```bash
-docker run --rm --env-file /opt/infra/.env --network natlas-infra_default -v /opt/backups:/backups minio/mc \
-  sh -c "mc alias set local http://minio:9000 \$MINIO_ROOT_USER \$MINIO_ROOT_PASSWORD && mc mirror --overwrite local/natlas-uploads /backups/minio"
+. /opt/infra/.env
+export AWS_ACCESS_KEY_ID="$RUSTFS_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$RUSTFS_SECRET_KEY"
+aws --endpoint-url http://127.0.0.1:9000 s3 sync s3://natlas-uploads /opt/backups/rustfs
 ```
 
 ---
@@ -577,11 +593,11 @@ NATLAS_ASR_TIMEOUT_MS=60000
 # Staff enrolment secret; leave empty once staff accounts exist
 STAFF_BOOTSTRAP_KEY=<openssl rand -hex 24>
 
-# Object storage (MinIO from §4; empty S3_* = upload endpoints answer a friendly 503)
+# Object storage (RustFS from §4; empty S3_* = upload endpoints answer a friendly 503)
 S3_ENDPOINT=https://s3.YOUR_VPS_IP.sslip.io
 S3_REGION=us-east-1
 S3_BUCKET=natlas-uploads
-S3_ACCESS_KEY=<MINIO_ROOT_USER, or a dedicated MinIO service account>
+S3_ACCESS_KEY=<RUSTFS_ACCESS_KEY from the infra .env>
 S3_SECRET_KEY=<its secret>
 EOF
 sudo chown root:natlas /opt/natlas/.env && sudo chmod 640 /opt/natlas/.env
@@ -681,7 +697,7 @@ server {
   }
 }
 
-# --- MinIO (S3 API + console) — client_max_body_size raised for direct PUTs
+# --- RustFS (S3 API + console) — client_max_body_size raised for direct PUTs
 server {
   listen 80;
   server_name s3.YOUR_VPS_IP.sslip.io;
@@ -782,7 +798,7 @@ scrape_configs:
     metrics_path: /probe
     params: { module: [http_2xx] }
     static_configs:
-      - targets: ["https://s3.YOUR_VPS_IP.sslip.io/minio/health/live"]
+      - targets: ["https://s3.YOUR_VPS_IP.sslip.io/health"]
     relabel_configs:
       - { source_labels: [__address__], target_label: __param_target }
       - { target_label: __address__, replacement: "host.docker.internal:9115" }
@@ -855,7 +871,7 @@ Minimum viable rules (evaluate every 1m, notify via the SMTP contact point):
 | Alert | Condition |
 |---|---|
 | API down | `probe_success{job="blackbox-api"} == 0 for 2m` |
-| MinIO (S3) down | `probe_success{job="blackbox-s3"} == 0 for 2m` |
+| RustFS (S3) down | `probe_success{job="blackbox-s3"} == 0 for 2m` |
 | Ollama down | `probe_success{job="blackbox-ollama"} == 0 for 5m` |
 | Disk filling | `node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes < 0.15` |
 | Memory pressure | `node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10` |
@@ -872,7 +888,7 @@ That last pair turns the model pipeline and the safeguarding flow into operation
 
 ```cron
 30 2 * * * deploy cd /opt/infra && docker compose exec -T postgres pg_dump -U natlas natlas | gzip > /opt/backups/natlas-$(date +\%F).sql.gz
-40 2 * * * deploy docker run --rm --env-file /opt/infra/.env --network natlas-infra_default -v /opt/backups:/backups minio/mc sh -c "mc alias set local http://minio:9000 \$MINIO_ROOT_USER \$MINIO_ROOT_PASSWORD && mc mirror --overwrite local/natlas-uploads /backups/minio"
+40 2 * * * deploy . /opt/infra/.env && export AWS_ACCESS_KEY_ID="$RUSTFS_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$RUSTFS_SECRET_KEY" && aws --endpoint-url http://127.0.0.1:9000 s3 sync s3://natlas-uploads /opt/backups/rustfs
 0  3 * * * root find /opt/backups -name 'natlas-*.sql.gz' -mtime +14 -delete
 ```
 
@@ -896,7 +912,7 @@ docker compose -f /opt/infra/docker-compose.yml ps
 
 # endpoints (from the internet)
 curl -s https://api.YOUR_VPS_IP.sslip.io/api/health/auth
-curl -s https://s3.YOUR_VPS_IP.sslip.io/minio/health/live
+curl -s https://s3.YOUR_VPS_IP.sslip.io/health
 # grafana login: https://monitor.YOUR_VPS_IP.sslip.io
 
 # model

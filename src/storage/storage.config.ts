@@ -1,7 +1,7 @@
 import type { ConfigService } from '@nestjs/config';
 
 /**
- * Object storage (S3 / MinIO) for the upload routes — see docs/DEPLOYMENT.md §4.
+ * Object storage (S3 / RustFS) for the upload routes — see docs/DEPLOYMENT.md §4.
  * All of endpoint/bucket/accessKey/secretKey must be present for uploads to
  * work; otherwise the upload endpoints answer 503 and the rest of the API is
  * unaffected.
