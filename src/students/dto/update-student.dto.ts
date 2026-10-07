@@ -1,5 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { SUPPORTED_LANGUAGES } from '../../ai/language/language.config.js';
 
 export class UpdateStudentDto {
   @ApiPropertyOptional()
@@ -21,10 +22,13 @@ export class UpdateStudentDto {
   @MaxLength(100)
   displayName?: string;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({
+    enum: SUPPORTED_LANGUAGES,
+    description: 'Preferred reply language (en | pcm | yo | ha | ig)',
+  })
   @IsOptional()
   @IsString()
-  @MaxLength(16)
+  @IsIn([...SUPPORTED_LANGUAGES])
   preferredLanguage?: string;
 
   @ApiPropertyOptional()

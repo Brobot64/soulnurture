@@ -8,7 +8,9 @@ import { MessageRole, Prisma } from '@prisma/client';
 import { AiService } from '../ai/ai.service.js';
 import type { AiOrchestrationOutcome } from '../ai/ai.service.js';
 import { IntentEngineService } from '../ai/intents/intent-engine.service.js';
+import { GuardrailService } from '../ai/guardrails/guardrail.service.js';
 import { applyIntentVerdict } from '../ai/intents/intent-executors.js';
+import { LanguageDetectorService } from '../ai/language/language-detector.service.js';
 import { AI_CONFIG } from '../ai/config/ai.config.js';
 import type { AiConfig } from '../ai/config/ai.config.js';
 import type { AiGenerationResult } from '../ai/providers/ai-provider.interface.js';
@@ -42,6 +44,7 @@ function emptyContext(): AiContext {
     relevantReflection: null,
     relevantResources: [],
     currentJourneyStep: null,
+    carriedContext: null,
   };
 }
 
@@ -52,6 +55,8 @@ export class ConversationsService {
     private readonly studentsService: StudentsService,
     private readonly aiService: AiService,
     private readonly intentEngine: IntentEngineService,
+    private readonly guardrail: GuardrailService,
+    private readonly languageDetector: LanguageDetectorService,
     private readonly auditService: AuditService,
     @Inject(AI_CONFIG) private readonly aiConfig: AiConfig,
   ) {}
@@ -92,8 +97,73 @@ export class ConversationsService {
     return conversation;
   }
 
+  /**
+   * Student closes a conversation. Idempotent: an already CLOSED/ARCHIVED
+   * conversation returns without enqueueing anything. When the conversation
+   * has messages and no summary yet, a SUMMARY AiGenerationJob is queued —
+   * the AI worker writes the session summary that feeds memory recall.
+   */
+  async close(userId: string, id: string) {
+    const { student, conversation } = await this.owned(userId, id);
+    if (conversation.status !== 'ACTIVE') {
+      return { conversation, summaryQueued: false };
+    }
+
+    const closed = await this.prisma.conversation.update({
+      where: { id: conversation.id },
+      data: { status: 'CLOSED' },
+    });
+
+    let summaryQueued = false;
+    const existingSummary = await this.prisma.sessionSummary.findUnique({
+      where: { conversationId: conversation.id },
+      select: { id: true },
+    });
+    if (conversation.messages.length > 0 && !existingSummary) {
+      await this.prisma.aiGenerationJob.create({
+        data: {
+          kind: 'SUMMARY',
+          conversationMessageId: null,
+          input: {
+            studentId: student.id,
+            conversationId: conversation.id,
+          } as unknown as Prisma.InputJsonValue,
+        },
+      });
+      summaryQueued = true;
+    }
+
+    await this.auditService.log({
+      actorId: userId,
+      action: 'conversation.closed',
+      entity: 'Conversation',
+      entityId: conversation.id,
+      meta: { summaryQueued },
+    });
+
+    return { conversation: closed, summaryQueued };
+  }
+
   async sendMessage(userId: string, id: string, dto: SendMessageDto) {
     const { student, conversation } = await this.owned(userId, id);
+
+    // Rate gate — runs before any DB write so a rejected turn leaves no trace
+    // and consumes no budget. Guards AI chat turns only; the human support
+    // route (support-requests) never passes through here.
+    this.guardrail.assertMessageAllowed(student.id);
+
+    // Realtime language detection (offline heuristics — no LLM in this lane).
+    // Drives the one-time language offer and the async VERNACULAR job only;
+    // the reply language itself stays dto.language ?? preference.
+    const detection = this.languageDetector.detect(dto.content);
+    const detectedLanguage =
+      detection.lang !== null && detection.lang !== 'en' ? detection.lang : null;
+    const languageOffer =
+      detectedLanguage &&
+      this.aiConfig.language.offerEnabled &&
+      student.preferredLanguage === 'en'
+        ? { detected: detectedLanguage, current: student.preferredLanguage }
+        : null;
 
     const userMessage = await this.prisma.conversationMessage.create({
       data: {
@@ -162,6 +232,40 @@ export class ConversationsService {
       });
     }
 
+    // Vernacular message: queue the async understanding lane (translate →
+    // store understanding → second intent sweep on the English translation).
+    // Queued after the outcome so the job knows whether the first pass
+    // already flagged (skips the second sweep when it did).
+    if (detectedLanguage) {
+      await this.prisma.aiGenerationJob.create({
+        data: {
+          kind: 'VERNACULAR',
+          conversationMessageId: userMessage.id,
+          input: {
+            studentId: student.id,
+            conversationId: conversation.id,
+            studentRef: orchestrationInput.studentRef,
+            classLabel: orchestrationInput.classLabel,
+            language: detectedLanguage,
+            firstPassFlagged: Boolean(outcome.verdict),
+          } as unknown as Prisma.InputJsonValue,
+        },
+      });
+      await this.auditService.log({
+        actorId: userId,
+        action: 'ai_understanding.queued',
+        entity: 'ConversationMessage',
+        entityId: userMessage.id,
+        meta: {
+          conversationId: conversation.id,
+          language: detectedLanguage,
+          detectedBy: detection.method,
+          confidence: detection.confidence,
+          firstPassFlagged: Boolean(outcome.verdict),
+        },
+      });
+    }
+
     await this.prisma.conversation.update({
       where: { id: conversation.id },
       data: { updatedAt: new Date() },
@@ -179,6 +283,11 @@ export class ConversationsService {
           }
         : null;
 
+    const recommendedActivity =
+      aiResult.activity?.recommended && aiResult.activity.slug
+        ? { slug: aiResult.activity.slug, title: aiResult.activity.title ?? null }
+        : null;
+
     return {
       userMessage,
       assistantMessage,
@@ -191,6 +300,7 @@ export class ConversationsService {
           }
         : null,
       recommendedResource,
+      recommendedActivity,
       activeIntent: outcome.verdict
         ? {
             id: outcome.verdict.intentId,
@@ -200,6 +310,7 @@ export class ConversationsService {
           }
         : null,
       aiPending: aiResult.asyncState === 'PENDING_AI',
+      languageOffer,
     };
   }
 

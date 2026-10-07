@@ -1,8 +1,11 @@
+import { ACTIVITY_CATALOG_SLUGS } from '../activities/activities.config.js';
 import type { IntentVerdict } from './intent-engine.service.js';
 import {
   applyIntentVerdict,
 } from './intent-executors.js';
 import type { IntentApplyContext } from './intent-executors.js';
+import { INTENTS } from './intents.config.js';
+import type { IntentAction } from './intents.config.js';
 
 const verdict = (overrides: Partial<IntentVerdict> = {}): IntentVerdict => ({
   intentId: 'SUICIDAL_IDEATION',
@@ -51,6 +54,7 @@ describe('applyIntentVerdict', () => {
   beforeEach(() => {
     prisma = {
       supportFlag: { findFirst: vi.fn(), create: vi.fn() },
+      wellbeingActivity: { findMany: vi.fn() },
     };
     auditService = { log: vi.fn().mockResolvedValue({ id: 'audit-1' }) };
   });
@@ -182,5 +186,117 @@ describe('applyIntentVerdict', () => {
     );
     expect(ctx.result.message).toBe('You matter.');
     expect(ctx.result.action).toBe('REFLECTION'); // unchanged by the failed flag executor
+  });
+
+  it('activity action picks the first configured slug that is approved in the live catalogue', async () => {
+    prisma.wellbeingActivity.findMany.mockResolvedValue([
+      { slug: 'mindful-body-scan', title: 'Mindful Body Scan' },
+      { slug: 'thought-recap', title: 'Thought Recap' },
+    ]);
+
+    const ctx = context(prisma, auditService);
+    const notes = await applyIntentVerdict(
+      verdict({
+        actions: [
+          {
+            type: 'RECOMMEND_ACTIVITY',
+            activitySlugs: ['thought-recap', 'mindful-body-scan'],
+          },
+        ],
+      }),
+      ctx,
+    );
+
+    expect(prisma.wellbeingActivity.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          slug: { in: ['thought-recap', 'mindful-body-scan'] },
+          active: true,
+          approved: true,
+        },
+      }),
+    );
+    expect(ctx.result.activity).toEqual({
+      recommended: true,
+      slug: 'thought-recap',
+      title: 'Thought Recap',
+    });
+    expect(notes.join(' ')).toContain('thought-recap');
+  });
+
+  it('falls back to the next configured slug when the first is not approved', async () => {
+    prisma.wellbeingActivity.findMany.mockResolvedValue([
+      { slug: 'mindful-body-scan', title: 'Mindful Body Scan' },
+    ]);
+
+    const ctx = context(prisma, auditService);
+    await applyIntentVerdict(
+      verdict({
+        actions: [
+          {
+            type: 'RECOMMEND_ACTIVITY',
+            activitySlugs: ['thought-recap', 'mindful-body-scan'],
+          },
+        ],
+      }),
+      ctx,
+    );
+
+    expect(ctx.result.activity?.slug).toBe('mindful-body-scan');
+  });
+
+  it('leaves the result untouched and notes when nothing is approved', async () => {
+    prisma.wellbeingActivity.findMany.mockResolvedValue([]);
+
+    const ctx = context(prisma, auditService);
+    const notes = await applyIntentVerdict(
+      verdict({
+        actions: [
+          { type: 'RECOMMEND_ACTIVITY', activitySlugs: ['box-breathing'] },
+        ],
+      }),
+      ctx,
+    );
+
+    expect(ctx.result.activity ?? null).toBeNull();
+    expect(notes.join(' ')).toContain('No approved activity');
+  });
+});
+
+describe('RECOMMEND_ACTIVITY catalogue integrity', () => {
+  const activitySlugsByIntent = (intentId: string): string[] =>
+    INTENTS.filter((i) => i.id === intentId).flatMap((i) =>
+      i.actions
+        .filter(
+          (a): a is Extract<IntentAction, { type: 'RECOMMEND_ACTIVITY' }> =>
+            a.type === 'RECOMMEND_ACTIVITY',
+        )
+        .flatMap((a) => a.activitySlugs),
+    );
+
+  it('every slug referenced by an intent exists in the seeded catalogue', () => {
+    const referenced = INTENTS.flatMap((i) =>
+      i.actions.flatMap((a) =>
+        a.type === 'RECOMMEND_ACTIVITY' ? a.activitySlugs : [],
+      ),
+    );
+    expect(referenced.length).toBeGreaterThan(0);
+    const unknown = referenced.filter(
+      (slug) => !ACTIVITY_CATALOG_SLUGS.includes(slug),
+    );
+    expect(unknown).toEqual([]);
+  });
+
+  it('acute-risk intents each recommend a grounding activity', () => {
+    expect(activitySlugsByIntent('SUICIDAL_IDEATION')).toContain(
+      'five-senses-grounding',
+    );
+    expect(activitySlugsByIntent('SELF_HARM')).toContain(
+      'five-senses-grounding',
+    );
+    expect(activitySlugsByIntent('ACUTE_PANIC')).toContain('box-breathing');
+    expect(activitySlugsByIntent('PROLONGED_LOW_MOOD')).toContain(
+      'thought-recap',
+    );
   });
 });

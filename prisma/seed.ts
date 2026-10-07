@@ -1,7 +1,13 @@
 import 'dotenv/config';
 import 'dotenv-expand';
 import { PrismaPg } from '@prisma/adapter-pg';
-import { PrismaClient, ResourceCategory, ResourceType } from '@prisma/client';
+import {
+  Prisma,
+  PrismaClient,
+  ResourceCategory,
+  ResourceType,
+} from '@prisma/client';
+import { ACTIVITY_CATALOG } from '../src/ai/activities/activities.config.js';
 
 const connectionString =
   process.env.DATABASE_URL && !process.env.DATABASE_URL.includes('${')
@@ -83,6 +89,22 @@ async function main() {
     } else {
       await prisma.wellbeingResource.create({ data });
     }
+  }
+
+  for (const activity of ACTIVITY_CATALOG) {
+    // Idempotent by slug. Only approved + active activities are ever
+    // student-visible or eligible for intent-driven recommendations.
+    const data = {
+      ...activity,
+      steps: activity.steps as unknown as Prisma.InputJsonValue,
+      active: true,
+      approved: true,
+    };
+    await prisma.wellbeingActivity.upsert({
+      where: { slug: activity.slug },
+      create: data,
+      update: data,
+    });
   }
 
   const supportPeople = [

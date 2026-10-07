@@ -58,6 +58,21 @@ export class ConversationsController {
     return this.conversationsService.getOne(session.user.id, id);
   }
 
+  @Post(':id/close')
+  @ApiSessionAuth()
+  @ApiStandardErrors()
+  @ApiOperation({
+    summary: 'Close conversation (queues an AI session summary)',
+  })
+  @ApiParam({ name: 'id' })
+  @ApiEnvelopeOk(Object)
+  close(
+    @Session() session: UserSession,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.conversationsService.close(session.user.id, id);
+  }
+
   @Post(':id/messages')
   @ApiSessionAuth()
   @ApiStandardErrors()

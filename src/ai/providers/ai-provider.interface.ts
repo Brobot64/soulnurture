@@ -4,6 +4,10 @@ export interface AiGenerationInput {
   systemPrompt: string;
   messages: { role: 'user' | 'assistant' | 'system'; content: string }[];
   language?: string;
+  /** Structured-output override (e.g. the session-summary schema). Members
+   * that support json_schema use it; others ignore it and the caller
+   * validates the raw JSON itself. */
+  jsonSchema?: { name: string; strict: boolean; schema: Record<string, unknown> };
 }
 
 export interface AiGenerationResult {
@@ -24,8 +28,18 @@ export interface AiGenerationResult {
   action: 'NONE' | 'REFLECTION' | 'GROUNDING' | 'RESOURCE' | 'HUMAN_SUPPORT';
   /** Server extras: set by the intent engine / async pipeline, never by the model. */
   exerciseLabel?: string | null;
+  /** Backend-orchestrated activity recommendation (Phase C step 6). Slug
+   * references the seeded catalogue; the client fetches steps via the
+   * activities API. Not part of the model's structured-output contract. */
+  activity?: { recommended: boolean; slug: string | null; title: string | null } | null;
   asyncState?: 'COMPLETE' | 'PENDING_AI' | 'FAILED';
-  usage?: { inputTokens?: number; outputTokens?: number; latencyMs?: number };
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    latencyMs?: number;
+    /** Server-owned: which chain member served this generation (explainability). */
+    provider?: string;
+  };
 }
 
 export interface AiTranscriptionInput {

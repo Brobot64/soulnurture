@@ -5,13 +5,17 @@ import {
   type OnModuleDestroy,
   type OnModuleInit,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { AiJobKind, Prisma } from '@prisma/client';
 import { AI_CONFIG } from './config/ai.config.js';
 import type { AiConfig } from './config/ai.config.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { AiService } from './ai.service.js';
-import type { AiOrchestrationInput } from './ai.service.js';
+import type {
+  AiOrchestrationInput,
+  SummarizeConversationInput,
+  VernacularJobInput,
+} from './ai.service.js';
 
 /**
  * Queued AI regeneration worker.
@@ -66,6 +70,17 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
     this.scanning = true;
     try {
       await this.reclaimStale();
+      // Idle close is isolated from the due-scan: a missing session_summary
+      // table (migration not applied) must not starve REPLY jobs.
+      try {
+        await this.closeIdleConversations();
+      } catch (error) {
+        this.logger.warn(
+          `Idle-close scan failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
       const due = await this.prisma.$queryRaw<{ id: string }[]>`
         SELECT id FROM ai_generation_job
         WHERE status = 'PENDING'
@@ -86,6 +101,63 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Idle close (Phase C step 3): ACTIVE conversations untouched for
+   * memory.idleMinutes get closed here and a SUMMARY job queued, so every
+   * real conversation ends up summarized even when the student never hits
+   * close. Only conversations with at least one message qualify — an empty
+   * conversation could only yield a hallucinated summary. Batch of 10 per
+   * scan; the atomic UPDATE guards against races with a manual close.
+   */
+  private async closeIdleConversations() {
+    const idleSeconds = Math.max(
+      Math.round(this.aiConfig.memory.idleMinutes * 60),
+      1,
+    );
+    const idle = await this.prisma.$queryRaw<
+      { id: string; studentId: string }[]
+    >`
+      SELECT c.id, c."studentId" FROM conversation c
+      WHERE c.status = 'ACTIVE'
+        AND c."updatedAt" < NOW() - (interval '1 second' * ${idleSeconds})
+        AND EXISTS (
+          SELECT 1 FROM conversation_message m WHERE m."conversationId" = c.id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM session_summary s WHERE s."conversationId" = c.id
+        )
+      ORDER BY c."updatedAt" ASC
+      LIMIT 10`;
+
+    for (const row of idle) {
+      const closed = await this.prisma.$executeRaw<number>`
+        UPDATE conversation
+        SET status = 'CLOSED', "updatedAt" = NOW()
+        WHERE id = ${row.id}::uuid AND status = 'ACTIVE'`;
+      if (Number(closed) === 0) continue;
+
+      await this.prisma.aiGenerationJob.create({
+        data: {
+          kind: 'SUMMARY',
+          conversationMessageId: null,
+          input: {
+            studentId: row.studentId,
+            conversationId: row.id,
+          } as unknown as Prisma.InputJsonValue,
+        },
+      });
+      await this.auditService.log({
+        action: 'conversation.closed',
+        entity: 'Conversation',
+        entityId: row.id,
+        meta: {
+          reason: 'idle',
+          idleMinutes: this.aiConfig.memory.idleMinutes,
+        },
+      });
+    }
+  }
+
   /** PROCESSING jobs older than staleClaimMs are reclaimed (crash safety). */
   private async reclaimStale() {
     const staleCount = await this.prisma.$executeRaw<number>`
@@ -103,20 +175,36 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
   private async claimAndProcess(jobId: string) {
     // Atomic claim+reread in one statement; losing a race returns 0 rows.
     const claimed = await this.prisma.$queryRaw<
-      { id: string; conversationMessageId: string; attempts: number; input: unknown }[]
+      {
+        id: string;
+        conversationMessageId: string | null;
+        kind: AiJobKind;
+        attempts: number;
+        input: unknown;
+      }[]
     >`
       UPDATE ai_generation_job
       SET status = 'PROCESSING', "updatedAt" = NOW()
       WHERE id = ${jobId}::uuid AND status = 'PENDING'
-      RETURNING id, "conversationMessageId", attempts, input`;
+      RETURNING id, "conversationMessageId", kind, attempts, input`;
     if (claimed.length === 0) return;
     const job = claimed[0];
+
+    if (job.kind === 'SUMMARY') {
+      await this.processSummaryJob(job);
+      return;
+    }
+
+    if (job.kind === 'VERNACULAR') {
+      await this.processVernacularJob(job);
+      return;
+    }
 
     const input = job.input as AiOrchestrationInput;
     try {
       const outcome = await this.aiService.generateAndApply(input);
       await this.prisma.conversationMessage.update({
-        where: { id: job.conversationMessageId },
+        where: { id: job.conversationMessageId ?? '' },
         data: {
           content: outcome.result.message,
           aiPayload: {
@@ -141,36 +229,146 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
         WHERE id = ${job.id}::uuid AND status = 'PROCESSING'`;
       this.logger.log(`AI job ${job.id} completed`);
     } catch (error) {
-      const attempts = job.attempts + 1;
-      const delaySeconds = this.aiConfig.async.retryDelaysMs.map((ms) =>
-        Math.max(Math.round(ms / 1000), 1),
-      );
-      const lastError = error instanceof Error ? error.message : String(error);
-      const terminal = attempts > delaySeconds.length;
-      const delay = delaySeconds[Math.min(attempts, delaySeconds.length) - 1] ?? delaySeconds[0];
+      const moved = await this.rescheduleAfterFailure(job.id, job.attempts, error);
+      if (!moved) return;
 
-      const moved = await this.prisma.$queryRaw<{ status: string }[]>`
-        UPDATE ai_generation_job
-        SET ${
-          terminal
-            ? Prisma.sql`status = 'FAILED', attempts = ${attempts}, "lastError" = ${lastError}, "nextRetryAt" = NULL`
-            : Prisma.sql`status = 'PENDING', attempts = ${attempts}, "lastError" = ${lastError}, "nextRetryAt" = NOW() + (interval '1 second' * ${delay})`
-        }
-        WHERE id = ${job.id}::uuid AND status = 'PROCESSING'
-        RETURNING status`;
-      if (moved.length === 0) return;
-
-      if (terminal) {
-        await this.markMessageFailed(job.conversationMessageId, input);
+      if (moved.terminal) {
+        await this.markMessageFailed(job.conversationMessageId ?? '', input);
         this.logger.warn(
-          `AI job ${job.id} failed permanently after ${attempts} attempts`,
+          `AI job ${job.id} failed permanently after ${moved.attempts} attempts`,
         );
       } else {
         this.logger.warn(
-          `AI job ${job.id} attempt ${attempts} failed; retrying in ${delay}s: ${lastError}`,
+          `AI job ${job.id} attempt ${moved.attempts} failed; retrying in ${moved.delay}s: ${moved.lastError}`,
         );
       }
     }
+  }
+
+  /** SUMMARY lane: writes the session summary that feeds memory recall. */
+  private async processSummaryJob(job: {
+    id: string;
+    attempts: number;
+    input: unknown;
+  }) {
+    const input = job.input as SummarizeConversationInput;
+    try {
+      await this.aiService.summarizeConversation(input);
+      await this.prisma.$executeRaw<number>`
+        UPDATE ai_generation_job
+        SET status = 'SUCCEEDED', attempts = attempts + 1, lastError = NULL, "nextRetryAt" = NULL
+        WHERE id = ${job.id}::uuid AND status = 'PROCESSING'`;
+      this.logger.log(`AI job ${job.id} (SUMMARY) completed`);
+    } catch (error) {
+      const moved = await this.rescheduleAfterFailure(job.id, job.attempts, error);
+      if (!moved) return;
+
+      if (moved.terminal) {
+        await this.auditService.log({
+          action: 'ai_generation.exhausted',
+          entity: 'SessionSummary',
+          entityId: input.conversationId,
+          meta: { lastError: moved.lastError },
+        });
+        this.logger.warn(
+          `AI job ${job.id} (SUMMARY) failed permanently after ${moved.attempts} attempts`,
+        );
+      } else {
+        this.logger.warn(
+          `AI job ${job.id} (SUMMARY) attempt ${moved.attempts} failed; retrying in ${moved.delay}s: ${moved.lastError}`,
+        );
+      }
+    }
+  }
+
+  /** VERNACULAR lane: understands (translates + classifies) a non-English
+   * USER message and runs the second-intent safety sweep. The message row is
+   * the source of truth for the raw content — a job whose message vanished
+   * fails like any other processing error (retry schedule → terminal). */
+  private async processVernacularJob(job: {
+    id: string;
+    conversationMessageId: string | null;
+    attempts: number;
+    input: unknown;
+  }) {
+    const input = job.input as VernacularJobInput;
+    try {
+      const message = await this.prisma.conversationMessage.findUnique({
+        where: { id: job.conversationMessageId ?? '' },
+        select: { content: true },
+      });
+      if (!message) {
+        throw new Error(
+          `VERNACULAR job ${job.id} references missing message ${job.conversationMessageId}`,
+        );
+      }
+      await this.aiService.understandMessage({
+        ...input,
+        messageId: job.conversationMessageId ?? '',
+        content: message.content,
+      });
+      await this.prisma.$executeRaw<number>`
+        UPDATE ai_generation_job
+        SET status = 'SUCCEEDED', attempts = attempts + 1, lastError = NULL, "nextRetryAt" = NULL
+        WHERE id = ${job.id}::uuid AND status = 'PROCESSING'`;
+      this.logger.log(`AI job ${job.id} (VERNACULAR) completed`);
+    } catch (error) {
+      const moved = await this.rescheduleAfterFailure(job.id, job.attempts, error);
+      if (!moved) return;
+
+      if (moved.terminal) {
+        await this.auditService.log({
+          action: 'ai_generation.exhausted',
+          entity: 'ConversationMessage',
+          entityId: job.conversationMessageId ?? '',
+          meta: {
+            kind: 'VERNACULAR',
+            conversationId: input.conversationId,
+            language: input.language,
+            lastError: moved.lastError,
+          },
+        });
+        this.logger.warn(
+          `AI job ${job.id} (VERNACULAR) failed permanently after ${moved.attempts} attempts`,
+        );
+      } else {
+        this.logger.warn(
+          `AI job ${job.id} (VERNACULAR) attempt ${moved.attempts} failed; retrying in ${moved.delay}s: ${moved.lastError}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Shared failure scheduling (Postgres NOW() + interval arithmetic — never
+   * app-side Date). Returns null when the job was already moved (crash during
+   * processing); otherwise whether it landed terminal.
+   */
+  private async rescheduleAfterFailure(
+    jobId: string,
+    attemptsSoFar: number,
+    error: unknown,
+  ): Promise<{ attempts: number; terminal: boolean; lastError: string; delay: number } | null> {
+    const attempts = attemptsSoFar + 1;
+    const delaySeconds = this.aiConfig.async.retryDelaysMs.map((ms) =>
+      Math.max(Math.round(ms / 1000), 1),
+    );
+    const lastError = error instanceof Error ? error.message : String(error);
+    const terminal = attempts > delaySeconds.length;
+    const delay =
+      delaySeconds[Math.min(attempts, delaySeconds.length) - 1] ?? delaySeconds[0];
+
+    const moved = await this.prisma.$queryRaw<{ status: string }[]>`
+      UPDATE ai_generation_job
+      SET ${
+        terminal
+          ? Prisma.sql`status = 'FAILED', attempts = ${attempts}, "lastError" = ${lastError}, "nextRetryAt" = NULL`
+          : Prisma.sql`status = 'PENDING', attempts = ${attempts}, "lastError" = ${lastError}, "nextRetryAt" = NOW() + (interval '1 second' * ${delay})`
+      }
+      WHERE id = ${jobId}::uuid AND status = 'PROCESSING'
+      RETURNING status`;
+    if (moved.length === 0) return null;
+    return { attempts, terminal, lastError, delay };
   }
 
   private async markMessageFailed(

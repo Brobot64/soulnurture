@@ -121,6 +121,12 @@ enum AiJobStatus {
   FAILED
 }
 
+enum AiJobKind {
+  REPLY
+  SUMMARY
+  VERNACULAR
+}
+
 enum FollowUpStatus {
   PENDING
   SCHEDULED
@@ -215,6 +221,8 @@ model StudentProfile {
   toolboxItems      ToolboxItem[]
   consentRecords    ConsentRecord[]
   privacyPreference PrivacyPreference?
+  sessionSummaries  SessionSummary[]
+  activitySessions  ActivitySession[]
 
   @@map("student_profile")
 }
@@ -295,9 +303,11 @@ model Conversation {
 
   student         StudentProfile        @relation(fields: [studentId], references: [id], onDelete: Cascade)
   checkIn         EmotionalCheckIn?     @relation(fields: [checkInId], references: [id], onDelete: SetNull)
-  messages        ConversationMessage[]
-  supportRequests SupportRequest[]
-  supportFlags    SupportFlag[]
+  messages         ConversationMessage[]
+  supportRequests  SupportRequest[]
+  supportFlags     SupportFlag[]
+  summary          SessionSummary?
+  activitySessions ActivitySession[]
 
   @@index([studentId, createdAt])
   @@map("conversation")
@@ -479,7 +489,8 @@ model AuditLog {
 /// orchestration and updates the placeholder message in place.
 model AiGenerationJob {
   id                    String      @id @default(uuid()) @db.Uuid
-  conversationMessageId String      @unique @db.Uuid
+  conversationMessageId String?     @unique @db.Uuid
+  kind                  AiJobKind   @default(REPLY)
   input                 Json
   attempts              Int         @default(0)
   lastError             String?
@@ -487,8 +498,97 @@ model AiGenerationJob {
   status                AiJobStatus @default(PENDING)
   createdAt             DateTime    @default(now())
   updatedAt             DateTime    @updatedAt
-  message               ConversationMessage @relation(fields: [conversationMessageId], references: [id], onDelete: Cascade)
+  message               ConversationMessage? @relation(fields: [conversationMessageId], references: [id], onDelete: Cascade)
 
   @@index([status, nextRetryAt])
+  @@index([kind, status])
   @@map("ai_generation_job")
+}
+
+/// Per-day, per-provider AI usage counters fed by the provider chain after
+/// every generation. `day` is server-local date (DB CURRENT_DATE) — raw SQL
+/// owned (see src/ai/providers/usage-meter.service.ts), never app-side Date.
+model AiUsageDaily {
+  id                String   @id @default(uuid()) @db.Uuid
+  day               DateTime @db.Date
+  provider          String
+  requests          Int      @default(0)
+  inputTokens       Int      @default(0)
+  outputTokens      Int      @default(0)
+  estimatedUsdCents Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([day, provider])
+  @@map("ai_usage_daily")
+}
+
+/// AI-written digest of a closed conversation. One row per conversation
+/// (enforced by the worker, not a unique constraint — re-close is idempotent).
+/// `embedding` is pgvector-owned raw SQL (see src/ai/memory/memory.repository.ts);
+/// the schema marks it for typing only.
+model SessionSummary {
+  id                    String   @id @default(uuid()) @db.Uuid
+  studentId             String   @db.Uuid
+  conversationId        String   @unique @db.Uuid
+  summary               String   @db.VarChar(400)
+  topics                String[]
+  followUpHook          String?  @db.VarChar(140)
+  emotionalTrend        String?
+  summaryLocalized      String?
+  followUpHookLocalized String?
+  embedding             Unsupported("vector(1536)")?
+  createdAt             DateTime @default(now())
+
+  student      StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  conversation Conversation   @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([studentId, createdAt])
+  @@map("session_summary")
+}
+
+/// Backend-orchestrated coping activity (Phase C step 6). `steps` is the
+/// frontend renderer contract — an ordered list of typed steps
+/// (breath-pacing | timer | prompt-list | body-scan). Catalogue lives in
+/// src/ai/activities/activities.config.ts and is seeded by prisma/seed.ts.
+model WellbeingActivity {
+  id              String           @id @default(uuid()) @db.Uuid
+  slug            String           @unique
+  title           String
+  description     String
+  category        ResourceCategory @default(GENERAL)
+  steps           Json
+  durationSeconds Int
+  active          Boolean          @default(true)
+  approved        Boolean          @default(false)
+  tags            String[]         @default([])
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  sessions ActivitySession[]
+
+  @@index([active, approved, category])
+  @@map("wellbeing_activity")
+}
+
+/// A student's run of a WellbeingActivity. `completedAt` + `feelingAfter`
+/// are the feel-after signal consumed by the (parked) effectiveness dashboard.
+model ActivitySession {
+  id             String        @id @default(uuid()) @db.Uuid
+  studentId      String        @db.Uuid
+  activityId     String        @db.Uuid
+  conversationId String?       @db.Uuid
+  intentId       String?
+  recommendedBy  String?
+  startedAt      DateTime      @default(now())
+  completedAt    DateTime?
+  feelingAfter   FeelingLabel?
+  noteAfter      String?       @db.VarChar(500)
+
+  student      StudentProfile    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  activity     WellbeingActivity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  conversation Conversation?     @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([studentId, startedAt])
+  @@map("activity_session")
 }

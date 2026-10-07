@@ -1,10 +1,14 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { AuditService } from '../audit/audit.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { UpdateStudentDto } from './dto/update-student.dto.js';
 
 @Injectable()
 export class StudentsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditService: AuditService,
+  ) {}
 
   async ensureProfile(userId: string) {
     const existing = await this.prisma.studentProfile.findUnique({
@@ -31,8 +35,29 @@ export class StudentsService {
   }
 
   async updateMe(userId: string, dto: UpdateStudentDto) {
-    await this.ensureProfile(userId);
-    return this.prisma.studentProfile.update({ where: { userId }, data: dto });
+    const before = await this.ensureProfile(userId);
+    const student = await this.prisma.studentProfile.update({
+      where: { userId },
+      data: dto,
+    });
+    // Language preference changes are audited: they alter how the AI replies
+    // to every subsequent message, so the trail must show who switched when.
+    if (
+      dto.preferredLanguage &&
+      dto.preferredLanguage !== before.preferredLanguage
+    ) {
+      await this.auditService.log({
+        actorId: userId,
+        action: 'student.language_changed',
+        entity: 'StudentProfile',
+        entityId: student.id,
+        meta: {
+          from: before.preferredLanguage,
+          to: dto.preferredLanguage,
+        },
+      });
+    }
+    return student;
   }
 
   async getSanctuary(userId: string) {

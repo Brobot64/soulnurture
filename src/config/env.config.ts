@@ -75,6 +75,114 @@ class EnvironmentVariables {
   @IsOptional()
   @IsNumber()
   AI_CONTEXT_CHARACTER_LIMIT?: number;
+
+  @IsOptional()
+  @IsNumber()
+  AI_MAX_MESSAGE_CHARS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  AI_MAX_REPLY_CHARS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  AI_RATE_LIMIT_DAILY?: number;
+
+  @IsOptional()
+  @IsNumber()
+  AI_RATE_LIMIT_PER_MINUTE?: number;
+
+  @IsOptional()
+  @IsString()
+  OPENAI_API_KEY?: string;
+
+  @IsOptional()
+  @IsString()
+  OPENAI_EMBEDDING_MODEL?: string;
+
+  @IsOptional()
+  @IsNumber()
+  AI_SESSION_IDLE_MINUTES?: number;
+
+  @IsOptional()
+  @IsString()
+  OPENAI_CHAT_MODEL?: string;
+
+  @IsOptional()
+  @IsNumber()
+  OPENAI_MAX_OUTPUT_TOKENS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  OPENAI_TEMPERATURE?: number;
+
+  @IsOptional()
+  @IsString()
+  AI_PROVIDER_CHAIN?: string;
+
+  @IsOptional()
+  @IsNumber()
+  OPENAI_DAILY_REQUEST_CAP?: number;
+
+  @IsOptional()
+  @IsNumber()
+  OPENAI_INPUT_USD_CENTS_PER_1M?: number;
+
+  @IsOptional()
+  @IsNumber()
+  OPENAI_OUTPUT_USD_CENTS_PER_1M?: number;
+
+  @IsOptional()
+  @IsNumber()
+  GROQ_INPUT_USD_CENTS_PER_1M?: number;
+
+  @IsOptional()
+  @IsNumber()
+  GROQ_OUTPUT_USD_CENTS_PER_1M?: number;
+
+  @IsOptional()
+  @IsString()
+  AI_LANGUAGE_OFFER_ENABLED?: string;
+
+  @IsOptional()
+  @IsString()
+  AI_VERNACULAR_REPLY_MODE?: string;
+
+  @IsOptional()
+  @IsString()
+  NATLAS_LLM_BASE_URL?: string;
+
+  @IsOptional()
+  @IsString()
+  NATLAS_LLM_MODEL?: string;
+
+  @IsOptional()
+  @IsString()
+  NATLAS_ASR_BASE_URL?: string;
+
+  @IsOptional()
+  @IsNumber()
+  NATLAS_ASR_TIMEOUT_MS?: number;
+
+  @IsOptional()
+  @IsString()
+  S3_ENDPOINT?: string;
+
+  @IsOptional()
+  @IsString()
+  S3_REGION?: string;
+
+  @IsOptional()
+  @IsString()
+  S3_BUCKET?: string;
+
+  @IsOptional()
+  @IsString()
+  S3_ACCESS_KEY?: string;
+
+  @IsOptional()
+  @IsString()
+  S3_SECRET_KEY?: string;
 }
 
 export function validateEnv(config: Record<string, unknown>) {

@@ -1,4 +1,5 @@
 import { SupportFlagSeverity } from '@prisma/client';
+import { vernacularKeywordsFor } from './vernacular-keywords.js';
 
 /**
  * ---------------------------------------------------------------------------
@@ -22,6 +23,9 @@ import { SupportFlagSeverity } from '@prisma/client';
  *   3. Model-only candidates persist as AI_CANDIDATE flags (source of truth:
  *      the triage dashboard), unless persistModelCandidates is disabled.
  *
+ * Server keywords include the vernacular starter packs (Yoruba/Hausa/Igbo/
+ * Nigerian Pidgin) from vernacular-keywords.ts — PENDING_CLINICAL_REVIEW.
+ *
  * The flag rows produced by SUPPORT_FLAG carry `description + reason` so
  * professionals see why each student was referred (report requirement:
  * "view AI safeguarding indicators ... flag plus reason").
@@ -33,14 +37,16 @@ export type IntentActionType =
   | 'HUMAN_SUPPORT_PROMPT'
   | 'SAFETY_MESSAGE'
   | 'GROUNDING'
-  | 'RECOMMEND_RESOURCE';
+  | 'RECOMMEND_RESOURCE'
+  | 'RECOMMEND_ACTIVITY';
 
 export type IntentAction =
   | { type: 'SUPPORT_FLAG' }
   | { type: 'HUMAN_SUPPORT_PROMPT'; reason: string }
   | { type: 'SAFETY_MESSAGE'; message: string }
   | { type: 'GROUNDING'; exerciseLabel: string }
-  | { type: 'RECOMMEND_RESOURCE'; category?: string };
+  | { type: 'RECOMMEND_RESOURCE'; category?: string }
+  | { type: 'RECOMMEND_ACTIVITY'; activitySlugs: string[] };
 
 export interface IntentDefinition {
   /** Stable identifier; doubles as the SupportFlag.category written by SUPPORT_FLAG. */
@@ -87,6 +93,24 @@ export const CANONICAL_SEVERITIES = [
   'TIER_3_ACUTE',
 ] as const;
 
+/**
+ * Canonical topic vocabulary for session summaries (Phase C step 3). The
+ * summary writer must pick from this list only — keeps the memory/search
+ * surface uniform and reviewable.
+ */
+export const CANONICAL_TOPICS = [
+  'exam',
+  'family',
+  'friendship',
+  'money',
+  'health',
+  'sleep',
+  'loneliness',
+  'bullying',
+  'identity',
+  'other',
+] as const;
+
 export const INTENTS: IntentDefinition[] = [
   {
     id: 'SUICIDAL_IDEATION',
@@ -107,6 +131,8 @@ export const INTENTS: IntentDefinition[] = [
         'not worth living',
         'end my life',
         'take my life',
+        // Vernacular packs (yo/ha/ig/pcm) — pending clinical review.
+        ...vernacularKeywordsFor('SUICIDAL_IDEATION'),
       ],
       aiCategories: ['SUICIDAL_IDEATION'],
     },
@@ -123,6 +149,7 @@ export const INTENTS: IntentDefinition[] = [
           "When thoughts like this come up, a trained person can help you through. You can reach out to a support person at any time — you don't have to carry this alone.",
       },
       { type: 'RECOMMEND_RESOURCE', category: 'GROUNDING' },
+      { type: 'RECOMMEND_ACTIVITY', activitySlugs: ['five-senses-grounding'] },
     ],
   },
   {
@@ -140,6 +167,8 @@ export const INTENTS: IntentDefinition[] = [
         'burn myself',
         'hit myself',
         'self-harm',
+        // Vernacular packs (yo/ha/ig/pcm) — pending clinical review.
+        ...vernacularKeywordsFor('SELF_HARM'),
       ],
       aiCategories: ['SELF_HARM'],
     },
@@ -155,6 +184,7 @@ export const INTENTS: IntentDefinition[] = [
         reason:
           'Self-harm deserves real human care. A school support person can listen without judgement and help you stay safe.',
       },
+      { type: 'RECOMMEND_ACTIVITY', activitySlugs: ['five-senses-grounding'] },
     ],
   },
   {
@@ -171,12 +201,15 @@ export const INTENTS: IntentDefinition[] = [
         'cannot breathe',
         'heart racing',
         'shaking and feel like i will collapse',
+        // Vernacular packs (yo/ha/ig/pcm) — pending clinical review.
+        ...vernacularKeywordsFor('ACUTE_PANIC'),
       ],
       aiCategories: ['PANIC'],
     },
     actions: [
       { type: 'SUPPORT_FLAG' },
       { type: 'GROUNDING', exerciseLabel: '4-7-8 breathing exercise' },
+      { type: 'RECOMMEND_ACTIVITY', activitySlugs: ['box-breathing'] },
       { type: 'RECOMMEND_RESOURCE', category: 'GROUNDING' },
       {
         type: 'HUMAN_SUPPORT_PROMPT',
@@ -198,6 +231,8 @@ export const INTENTS: IntentDefinition[] = [
         'everyone is better off without me',
         "i'm just a burden",
         'never good enough',
+        // Vernacular packs (yo/ha/ig/pcm) — pending clinical review.
+        ...vernacularKeywordsFor('PROLONGED_LOW_MOOD'),
       ],
       aiCategories: ['LOW_MOOD'],
     },
@@ -209,6 +244,10 @@ export const INTENTS: IntentDefinition[] = [
           "Feeling this low for a while is heavy. A caring person at your school can listen and walk with you — there's no threshold you need to reach first.",
       },
       { type: 'RECOMMEND_RESOURCE', category: 'EXAM_STRESS' },
+      {
+        type: 'RECOMMEND_ACTIVITY',
+        activitySlugs: ['thought-recap', 'mindful-body-scan'],
+      },
     ],
   },
 ];

@@ -6,6 +6,11 @@ import { AiGenerationError } from '../ai/ai.errors.js';
 import { AI_CONFIG } from '../ai/config/ai.config.js';
 import type { AiConfig } from '../ai/config/ai.config.js';
 import { IntentEngineService } from '../ai/intents/intent-engine.service.js';
+import { LanguageDetectorService } from '../ai/language/language-detector.service.js';
+import {
+  GuardrailService,
+  RateLimitExceededException,
+} from '../ai/guardrails/guardrail.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
@@ -26,6 +31,15 @@ const aiConfigStub = {
     holdingMessage: HOLDING_MESSAGE,
   },
   safeguarding: { persistModelCandidates: true },
+  language: {
+    offerEnabled: true,
+    supported: ['en', 'pcm', 'yo', 'ha', 'ig'],
+    vernacularReplyMode: 'openai-native',
+    natlasBaseUrl: null,
+    natlasModel: 'n-atlas',
+    understandingMaxOutputTokens: 120,
+    understandingTimeoutMs: 15_000,
+  },
 } as AiConfig;
 
 describe('ConversationsService', () => {
@@ -37,7 +51,9 @@ describe('ConversationsService', () => {
     supportFlag: Record<string, ReturnType<typeof vi.fn>>;
   };
   let ai: { generateAndApply: ReturnType<typeof vi.fn> };
+  let guardrail: { assertMessageAllowed: ReturnType<typeof vi.fn> };
   let auditService: { log: ReturnType<typeof vi.fn> };
+  let studentsService: { ensureProfile: ReturnType<typeof vi.fn> };
 
   const student = {
     id: 'student-1',
@@ -93,28 +109,50 @@ describe('ConversationsService', () => {
       },
       aiGenerationJob: { create: vi.fn() },
       supportFlag: { findFirst: vi.fn(), create: vi.fn() },
+      sessionSummary: { findUnique: vi.fn() },
     };
     ai = { generateAndApply: vi.fn() };
+    guardrail = { assertMessageAllowed: vi.fn() };
     auditService = { log: vi.fn().mockResolvedValue({ id: 'audit-1' }) };
+    studentsService = {
+      ensureProfile: vi.fn().mockResolvedValue(student),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ConversationsService,
         { provide: PrismaService, useValue: prisma },
-        {
-          provide: StudentsService,
-          useValue: {
-            ensureProfile: vi.fn().mockResolvedValue(student),
-          },
-        },
+        { provide: StudentsService, useValue: studentsService },
         { provide: AiService, useValue: ai },
         IntentEngineService,
+        LanguageDetectorService,
+        { provide: GuardrailService, useValue: guardrail },
         { provide: AuditService, useValue: auditService },
         { provide: AI_CONFIG, useValue: aiConfigStub },
       ],
     }).compile();
 
     service = module.get(ConversationsService);
+  });
+
+  it('rate gate rejects before any write or AI call when the limit is exceeded', async () => {
+    prisma.conversation.findUnique.mockResolvedValue({
+      id: 'conv-1',
+      studentId: student.id,
+      messages: [],
+    });
+    guardrail.assertMessageAllowed.mockImplementation(() => {
+      throw new RateLimitExceededException('limit reached', 42);
+    });
+
+    await expect(
+      service.sendMessage('user-1', 'conv-1', { content: 'hi' }),
+    ).rejects.toThrow(RateLimitExceededException);
+
+    expect(guardrail.assertMessageAllowed).toHaveBeenCalledWith(student.id);
+    expect(prisma.conversationMessage.create).not.toHaveBeenCalled();
+    expect(ai.generateAndApply).not.toHaveBeenCalled();
+    expect(prisma.aiGenerationJob.create).not.toHaveBeenCalled();
   });
 
   it('rejects access to another students conversation', async () => {
@@ -178,9 +216,48 @@ describe('ConversationsService', () => {
       title: 'Breath',
       type: null,
     });
+    expect(result.recommendedActivity).toBeNull();
     expect(result.activeIntent).toBeNull();
     expect(result.aiPending).toBe(false);
     expect(prisma.aiGenerationJob.create).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the recommended activity alongside the resource', async () => {
+    prisma.conversation.findUnique.mockResolvedValue({
+      id: 'conv-1',
+      studentId: student.id,
+      checkInId: null,
+      messages: [],
+    });
+    prisma.conversationMessage.create.mockImplementation(async (args: {
+      data: { role: MessageRole; content: string };
+    }) => ({
+      id: 'assistant-1',
+      role: args.data.role,
+      content: args.data.content,
+    }));
+    prisma.conversation.update.mockResolvedValue({ id: 'conv-1' });
+    ai.generateAndApply.mockResolvedValue({
+      ...orchestratedOutcome,
+      result: {
+        ...orchestratedOutcome.result,
+        activity: {
+          recommended: true,
+          slug: 'box-breathing',
+          title: 'Box Breathing (4-4-4-4)',
+        },
+      },
+    });
+
+    const result = await service.sendMessage('user-1', 'conv-1', {
+      content: 'I feel overwhelmed',
+    });
+
+    expect(result.recommendedActivity).toEqual({
+      slug: 'box-breathing',
+      title: 'Box Breathing (4-4-4-4)',
+    });
+    expect(result.recommendedResource).not.toBeNull();
   });
 
   it('surfaces the active intent when the engine made a verdict', async () => {
@@ -293,5 +370,206 @@ describe('ConversationsService', () => {
       expect.objectContaining({ show: true }),
     );
     expect(result.assistantMessage.content).toContain('connect');
+  });
+
+  describe('language layer', () => {
+    function mockHappyPath(userMessageId: string, assistantMessageId: string) {
+      prisma.conversation.findUnique.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        checkInId: null,
+        messages: [],
+      });
+      prisma.conversationMessage.create
+        .mockImplementationOnce(
+          async (args: { data: Record<string, unknown> }) => ({
+            ...args.data,
+            id: userMessageId,
+          }),
+        )
+        .mockImplementationOnce(
+          async (args: { data: Record<string, unknown> }) => ({
+            ...args.data,
+            id: assistantMessageId,
+          }),
+        );
+      prisma.conversation.update.mockResolvedValue({ id: 'conv-1' });
+      ai.generateAndApply.mockResolvedValue(orchestratedOutcome);
+    }
+
+    it('detects Yoruba, offers the language switch and queues a VERNACULAR job', async () => {
+      mockHappyPath('user-msg-1', 'assistant-msg-1');
+
+      const result = await service.sendMessage('user-1', 'conv-1', {
+        content: 'Mo ti rẹ̀ rẹ̀ lónìí',
+      });
+
+      expect(result.languageOffer).toEqual({ detected: 'yo', current: 'en' });
+      expect(prisma.aiGenerationJob.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          kind: 'VERNACULAR',
+          conversationMessageId: 'user-msg-1',
+          input: expect.objectContaining({
+            studentId: student.id,
+            conversationId: 'conv-1',
+            language: 'yo',
+            firstPassFlagged: false,
+          }),
+        }),
+      });
+      expect(auditService.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'ai_understanding.queued',
+          entity: 'ConversationMessage',
+          entityId: 'user-msg-1',
+          meta: expect.objectContaining({
+            conversationId: 'conv-1',
+            language: 'yo',
+            detectedBy: 'diacritics',
+            confidence: 'high',
+            firstPassFlagged: false,
+          }),
+        }),
+      );
+    });
+
+    it('leaves English content without an offer or a VERNACULAR job', async () => {
+      mockHappyPath('user-msg-2', 'assistant-msg-2');
+
+      const result = await service.sendMessage('user-1', 'conv-1', {
+        content: 'I feel overwhelmed today because of my exams.',
+      });
+
+      expect(result.languageOffer).toBeNull();
+      expect(prisma.aiGenerationJob.create).not.toHaveBeenCalled();
+      expect(auditService.log).not.toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'ai_understanding.queued' }),
+      );
+    });
+
+    it('queues understanding without an offer when the preference is not English', async () => {
+      studentsService.ensureProfile.mockResolvedValue({
+        ...student,
+        preferredLanguage: 'yo',
+      });
+      mockHappyPath('user-msg-3', 'assistant-msg-3');
+
+      const result = await service.sendMessage('user-1', 'conv-1', {
+        content: 'Ina jin ɓacin rai sosai',
+      });
+
+      expect(result.languageOffer).toBeNull();
+      expect(prisma.aiGenerationJob.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          kind: 'VERNACULAR',
+          conversationMessageId: 'user-msg-3',
+          input: expect.objectContaining({ language: 'ha' }),
+        }),
+      });
+    });
+  });
+
+  describe('close', () => {
+    it('closes an ACTIVE conversation and queues a SUMMARY job for the worker', async () => {
+      prisma.conversation.findUnique.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        status: 'ACTIVE',
+        messages: [{ id: 'msg-1' }, { id: 'msg-2' }],
+      });
+      prisma.conversation.update.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        status: 'CLOSED',
+      });
+      prisma.sessionSummary.findUnique.mockResolvedValue(null);
+      prisma.aiGenerationJob.create.mockResolvedValue({ id: 'job-1' });
+
+      const result = await service.close('user-1', 'conv-1');
+
+      expect(result.summaryQueued).toBe(true);
+      expect(result.conversation.status).toBe('CLOSED');
+      expect(prisma.conversation.update).toHaveBeenCalledWith({
+        where: { id: 'conv-1' },
+        data: { status: 'CLOSED' },
+      });
+      expect(prisma.aiGenerationJob.create).toHaveBeenCalledWith({
+        data: {
+          kind: 'SUMMARY',
+          conversationMessageId: null,
+          input: { studentId: student.id, conversationId: 'conv-1' },
+        },
+      });
+      expect(auditService.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          actorId: 'user-1',
+          action: 'conversation.closed',
+          entity: 'Conversation',
+          entityId: 'conv-1',
+          meta: { summaryQueued: true },
+        }),
+      );
+    });
+
+    it('is idempotent: an already CLOSED conversation queues nothing', async () => {
+      prisma.conversation.findUnique.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        status: 'CLOSED',
+        messages: [{ id: 'msg-1' }],
+      });
+
+      const result = await service.close('user-1', 'conv-1');
+
+      expect(result.summaryQueued).toBe(false);
+      expect(prisma.conversation.update).not.toHaveBeenCalled();
+      expect(prisma.sessionSummary.findUnique).not.toHaveBeenCalled();
+      expect(prisma.aiGenerationJob.create).not.toHaveBeenCalled();
+      expect(auditService.log).not.toHaveBeenCalled();
+    });
+
+    it('queues nothing for a conversation without messages', async () => {
+      prisma.conversation.findUnique.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        status: 'ACTIVE',
+        messages: [],
+      });
+      prisma.conversation.update.mockResolvedValue({
+        id: 'conv-1',
+        status: 'CLOSED',
+      });
+      prisma.sessionSummary.findUnique.mockResolvedValue(null);
+
+      const result = await service.close('user-1', 'conv-1');
+
+      expect(result.summaryQueued).toBe(false);
+      expect(prisma.aiGenerationJob.create).not.toHaveBeenCalled();
+      expect(auditService.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'conversation.closed',
+          meta: { summaryQueued: false },
+        }),
+      );
+    });
+
+    it('queues nothing when a summary already exists', async () => {
+      prisma.conversation.findUnique.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        status: 'ACTIVE',
+        messages: [{ id: 'msg-1' }],
+      });
+      prisma.conversation.update.mockResolvedValue({
+        id: 'conv-1',
+        status: 'CLOSED',
+      });
+      prisma.sessionSummary.findUnique.mockResolvedValue({ id: 'sum-1' });
+
+      const result = await service.close('user-1', 'conv-1');
+
+      expect(result.summaryQueued).toBe(false);
+      expect(prisma.aiGenerationJob.create).not.toHaveBeenCalled();
+    });
   });
 });

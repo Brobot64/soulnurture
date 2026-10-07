@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { fileURLToPath } from 'node:url';
+import { ActivitiesModule } from './activities/activities.module.js';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AiModule } from './ai/ai.module.js';
@@ -22,6 +23,7 @@ import { PrivacyModule } from './privacy/privacy.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { ProfessionalsModule } from './professionals/professionals.module.js';
 import { ResourcesModule } from './resources/resources.module.js';
+import { StorageModule } from './storage/storage.module.js';
 import { StudentsModule } from './students/students.module.js';
 import { SupportFlagsModule } from './support-flags/support-flags.module.js';
 import { SupportRequestsModule } from './support-requests/support-requests.module.js';
@@ -70,6 +72,7 @@ import { UsersModule } from './users/users.module.js';
     ConversationsModule,
     AiModule,
     ResourcesModule,
+    ActivitiesModule,
     SupportRequestsModule,
     SupportFlagsModule,
     FollowUpsModule,
@@ -77,6 +80,7 @@ import { UsersModule } from './users/users.module.js';
     AuditModule,
     JournalModule,
     PrivacyModule,
+    StorageModule,
   ],
   controllers: [AppController],
   providers: [

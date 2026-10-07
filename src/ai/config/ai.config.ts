@@ -1,4 +1,16 @@
 import type { ConfigService } from '@nestjs/config';
+import {
+  GUARDRAILS_DEFAULTS,
+  type GuardrailsConfig,
+} from '../guardrails/guardrails.config.js';
+import {
+  ASR_VERNACULAR_LANGUAGES,
+  DEFAULT_VERNACULAR_REPLY_MODE,
+  SUPPORTED_LANGUAGES,
+  type AsrVernacularLanguage,
+  type SupportedLanguage,
+  type VernacularReplyMode,
+} from '../language/language.config.js';
 
 /**
  * ---------------------------------------------------------------------------
@@ -21,8 +33,81 @@ export interface AiConfig {
     /** First synchronous attempt budget before we fall back to the queue. */
     attemptTimeoutMs: number;
   };
+  /** Ordered chain member names, e.g. ['openai', 'groq'] ('n-atlas' later). */
+  chain: {
+    order: string[];
+  };
+  openai: {
+    model: string;
+    maxOutputTokens: number;
+  };
+  pricing: {
+    /** Estimated USD cents per 1M tokens, per provider — feeds AiUsageDaily. */
+    usdCentsPer1M: Record<string, { input: number; output: number }>;
+  };
+  budget: {
+    /** Once OpenAI serves this many generations in a server-local day, the
+     * chain starts at the next member until the day rolls over. */
+    openaiDailyRequestCap: number;
+  };
   transcription: {
     model: string;
+    /** Local N-ATLaS ASR sidecar (services/n-atlas-asr) serving the
+     * vernacular languages. baseUrl null = not deployed; voice notes in
+     * those languages degrade to the friendly "type it instead" message. */
+    natlas: {
+      baseUrl: string | null;
+      /** Cold starts load a whisper-small checkpoint; generous on purpose. */
+      timeoutMs: number;
+      languages: AsrVernacularLanguage[];
+    };
+  };
+  /** OpenAI text embeddings — pgvector memory recall. Failure degrades the
+   * memory layer to recency-only, never throws (see memory.repository.ts). */
+  embedding: {
+    model: string;
+    timeoutMs: number;
+  };
+  /** Session-summary memory: idle close + recall windows (see
+   * src/ai/memory/memory.repository.ts). */
+  memory: {
+    /** ACTIVE conversation untouched for this long → worker closes it and
+     * queues a SUMMARY job. */
+    idleMinutes: number;
+    /** How far back recency recall + vector similarity look. */
+    recallDays: number;
+    /** Pending follow-up hooks stay eligible this long. */
+    hookDays: number;
+    maxRecents: number;
+    maxHooks: number;
+    maxSimilar: number;
+    /** Cosine similarity floor for vector recall. */
+    minSimilarity: number;
+  };
+  /** Session-summary generation budget (small JSON, see summarize.prompt.ts). */
+  summaries: {
+    maxOutputTokens: number;
+  };
+  /** Language layer (Phase C step 4): realtime detection, vernacular replies
+   * and the async understanding lane (see src/ai/language/). */
+  language: {
+    /** Canonical codes the product replies in. */
+    supported: SupportedLanguage[];
+    /** When true, a message detected as vernacular while the preference is
+     * still 'en' comes back with a languageOffer in the response. */
+    offerEnabled: boolean;
+    /** Reply lane for vernacular turns. 'openai-native' is the built
+     * default; 'n-atlas-translate' is pre-wired for the post-pilot local
+     * model and currently behaves as openai-native. */
+    vernacularReplyMode: VernacularReplyMode;
+    /** Local N-ATLaS (Ollama) endpoint for the async understanding lane;
+     * null → straight to the OpenAI translation fallback. */
+    natlasBaseUrl: string | null;
+    natlasModel: string;
+    /** Strict output budget for the understanding contract (small JSON). */
+    understandingMaxOutputTokens: number;
+    /** Per-attempt timeout for the understanding lane (ms). */
+    understandingTimeoutMs: number;
   };
   context: {
     /** Max recent messages replayed to the model. */
@@ -47,6 +132,10 @@ export interface AiConfig {
      */
     persistModelCandidates: boolean;
   };
+  /** Reviewer surface for the configurable guardrail layer (see
+   * guardrails/guardrails.config.ts). Non-secret; exposed via
+   * GET /api/v1/ai/config so behaviour is explainable. */
+  guardrails: GuardrailsConfig;
 }
 
 export const AI_CONFIG_DEFAULTS = {
@@ -62,7 +151,20 @@ export const AI_CONFIG_DEFAULTS = {
 // Non-chat override defaults: reasoning models need room for thinking + JSON.
 const DEFAULT_MAX_OUTPUT_TOKENS = 1000;
 
+const DEFAULT_CHAIN = ['openai', 'groq'];
+
+function parseVernacularReplyMode(raw: string | undefined): VernacularReplyMode {
+  return raw?.trim().toLowerCase() === 'n-atlas-translate'
+    ? 'n-atlas-translate'
+    : DEFAULT_VERNACULAR_REPLY_MODE;
+}
+
 export function buildAiConfig(config: ConfigService): AiConfig {
+  const configuredChain = (config.get<string>('AI_PROVIDER_CHAIN') ?? '')
+    .split(',')
+    .map((name) => name.trim().toLowerCase())
+    .filter((name) => name.length > 0);
+
   return {
     promptVersion: 'v2',
     chat: {
@@ -74,10 +176,82 @@ export function buildAiConfig(config: ConfigService): AiConfig {
       temperature: Number(config.get<string>('GROQ_TEMPERATURE') ?? 0.2),
       attemptTimeoutMs: AI_CONFIG_DEFAULTS.attemptTimeoutMs,
     },
+    chain: {
+      order: configuredChain.length > 0 ? configuredChain : [...DEFAULT_CHAIN],
+    },
+    openai: {
+      model: config.get<string>('OPENAI_CHAT_MODEL') ?? 'gpt-5.6-luna',
+      maxOutputTokens: Number(
+        config.get<string>('OPENAI_MAX_OUTPUT_TOKENS') ??
+          DEFAULT_MAX_OUTPUT_TOKENS,
+      ),
+    },
+    pricing: {
+      usdCentsPer1M: {
+        openai: {
+          input: Number(
+            config.get<string>('OPENAI_INPUT_USD_CENTS_PER_1M') ?? 15,
+          ),
+          output: Number(
+            config.get<string>('OPENAI_OUTPUT_USD_CENTS_PER_1M') ?? 60,
+          ),
+        },
+        groq: {
+          input: Number(
+            config.get<string>('GROQ_INPUT_USD_CENTS_PER_1M') ?? 10,
+          ),
+          output: Number(
+            config.get<string>('GROQ_OUTPUT_USD_CENTS_PER_1M') ?? 30,
+          ),
+        },
+      },
+    },
+    budget: {
+      openaiDailyRequestCap: Number(
+        config.get<string>('OPENAI_DAILY_REQUEST_CAP') ?? 400,
+      ),
+    },
     transcription: {
       model:
         config.get<string>('GROQ_TRANSCRIPTION_MODEL') ??
         'whisper-large-v3-turbo',
+      natlas: {
+        baseUrl: config.get<string>('NATLAS_ASR_BASE_URL')?.trim() || null,
+        timeoutMs: Number(config.get<string>('NATLAS_ASR_TIMEOUT_MS') ?? 60_000),
+        languages: [...ASR_VERNACULAR_LANGUAGES],
+      },
+    },
+    embedding: {
+      model:
+        config.get<string>('OPENAI_EMBEDDING_MODEL') ??
+        'text-embedding-3-small',
+      timeoutMs: 10_000,
+    },
+    memory: {
+      idleMinutes: Number(config.get<string>('AI_SESSION_IDLE_MINUTES') ?? 120),
+      recallDays: 30,
+      hookDays: 14,
+      maxRecents: 2,
+      maxHooks: 3,
+      maxSimilar: 2,
+      minSimilarity: 0.8,
+    },
+    summaries: {
+      maxOutputTokens: 200,
+    },
+    language: {
+      supported: [...SUPPORTED_LANGUAGES],
+      offerEnabled:
+        (config.get<string>('AI_LANGUAGE_OFFER_ENABLED') ?? 'true')
+          .trim()
+          .toLowerCase() !== 'false',
+      vernacularReplyMode: parseVernacularReplyMode(
+        config.get<string>('AI_VERNACULAR_REPLY_MODE'),
+      ),
+      natlasBaseUrl: config.get<string>('NATLAS_LLM_BASE_URL')?.trim() || null,
+      natlasModel: config.get<string>('NATLAS_LLM_MODEL') ?? 'n-atlas',
+      understandingMaxOutputTokens: 120,
+      understandingTimeoutMs: 15_000,
     },
     context: {
       messageLimit: Number(config.get<string>('AI_CONTEXT_MESSAGE_LIMIT') ?? 12),
@@ -95,6 +269,40 @@ export function buildAiConfig(config: ConfigService): AiConfig {
     },
     safeguarding: {
       persistModelCandidates: true,
+    },
+    guardrails: {
+      input: {
+        maxMessageChars: Number(
+          config.get<string>('AI_MAX_MESSAGE_CHARS') ??
+            GUARDRAILS_DEFAULTS.maxMessageChars,
+        ),
+        truncationNote:
+          'Long message — shown to the model in truncated form; the safeguarding review still sees the full original text.',
+        injectionPatterns: GUARDRAILS_DEFAULTS.injectionPatterns,
+        promptHardeningLine: GUARDRAILS_DEFAULTS.promptHardeningLine,
+      },
+      output: {
+        maxReplyChars: Number(
+          config.get<string>('AI_MAX_REPLY_CHARS') ??
+            GUARDRAILS_DEFAULTS.maxReplyChars,
+        ),
+        truncationNote:
+          'Reply exceeded the character cap and was cut — flagged for reviewer attention.',
+        bannedClaims: GUARDRAILS_DEFAULTS.bannedClaims,
+        fallbackCopy: GUARDRAILS_DEFAULTS.fallbackCopy,
+      },
+      rate: {
+        perStudentDaily: Number(
+          config.get<string>('AI_RATE_LIMIT_DAILY') ??
+            GUARDRAILS_DEFAULTS.perStudentDaily,
+        ),
+        perStudentPerMinute: Number(
+          config.get<string>('AI_RATE_LIMIT_PER_MINUTE') ??
+            GUARDRAILS_DEFAULTS.perStudentPerMinute,
+        ),
+        limitMessage:
+          'You have sent quite a few messages in a short time — let us take a short pause so I can give each one proper attention. You can always reach a school counsellor right away through Support; they are there for you even while I rest.',
+      },
     },
   };
 }
