@@ -325,6 +325,12 @@ services:
   postgres-exporter:
     image: prometheuscommunity/postgres-exporter:v0.15.0
     restart: unless-stopped
+    # v0.15.x ignores the old EXTEND_QUERY_PATH env var — pass the (deprecated
+    # but working) flag explicitly. stat_bgwriter is disabled: PG17 dropped
+    # checkpoints_timed and that collector errors on every scrape otherwise.
+    command:
+      - --extend.query-path=/queries.yaml
+      - --no-collector.stat_bgwriter
     environment:
       DATA_SOURCE_NAME: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
     ports: ["127.0.0.1:9187:9187"]
@@ -353,6 +359,8 @@ volumes:
   grafana-data:
   loki-data:
 ```
+
+> **Before `docker compose up`**: write `/opt/infra/postgres-exporter/queries.yaml` first (content in §8). If the file is missing, Docker silently creates a *directory* at the bind-mount path and the custom metrics never load — this bit us on first bring-up.
 
 Bring it up:
 
@@ -642,7 +650,7 @@ curl -s http://127.0.0.1:3000/api/health/auth   # {"authenticated":true,...}
 sudo journalctl -u natlas -f                    # live logs (deploy isn't in systemd-journal)
 ```
 
-**Release procedure** (repeatable, rollback-safe):
+**Release procedure** (repeatable, rollback-safe) — automated on merge to `main` by CI/CD (§12); this is the manual equivalent:
 
 ```bash
 cd /opt/natlas
@@ -833,7 +841,7 @@ natlas_custom:
     - support_requests_escalated: {usage: "GAUGE"}
 ```
 
-(Enable via `postgres-exporter`'s `EXTEND_QUERY_PATH: /queries.yaml` env if your image version requires it.)
+Loaded by the `command:` flags on the compose service (§3) — v0.15.x **ignores** the old `EXTEND_QUERY_PATH` env var. Exported names carry the collector prefix: `natlas_custom_ai_jobs_pending`, `natlas_custom_ai_jobs_failed`, `natlas_custom_support_flags_open`, `natlas_custom_support_requests_escalated` — use the prefixed names in dashboards and alerts.
 
 ### Grafana provisioning
 
@@ -846,7 +854,7 @@ datasources:
   - { name: Loki, type: loki, url: http://loki:3100 }
 ```
 
-Import dashboards: **Node Exporter Full (ID 1860)**, **PostgreSQL Database (9628)**, **cAdvisor (14282)** — plus a small custom panel row fed by the `natlas_custom` metrics above (`ai_jobs_pending`, `support_flags_open`).
+Import dashboards: **Node Exporter Full (ID 1860)**, **PostgreSQL Database (9628)**, **cAdvisor (14282)** — plus a small custom panel row fed by the `natlas_custom` metrics above (e.g. `natlas_custom_ai_jobs_pending`, `natlas_custom_support_flags_open`). The full operator's guide — dashboards, the seven alert rules with exact setup steps, log queries, incident triage — is **`docs/MONITORING.md`**.
 
 ### Logs (Loki + Promtail)
 
@@ -877,8 +885,8 @@ Minimum viable rules (evaluate every 1m, notify via the SMTP contact point):
 | Ollama down | `probe_success{job="blackbox-ollama"} == 0 for 5m` |
 | Disk filling | `node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes < 0.15` |
 | Memory pressure | `node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10` |
-| AI queue stuck | `ai_jobs_pending > 10 for 15m` |
-| Safeguarding backlog | `support_flags_open > 5 for 30m` |
+| AI queue stuck | `natlas_custom_ai_jobs_pending > 10 for 15m` |
+| Safeguarding backlog | `natlas_custom_support_flags_open > 5 for 30m` |
 
 That last pair turns the model pipeline and the safeguarding flow into operational first-class citizens.
 
@@ -941,4 +949,112 @@ Final checks: Grafana shows all scrape targets UP · alert test notification arr
 | Disk usage triage | `docker system df` · `df -h /` · journal size: `journalctl --disk-usage` |
 | Update N-ATLaS model | re-run `hf download` → `ollama create natlas -f Modelfile` (zero-downtime: the worker retries while Ollama reloads) |
 | DB backup restore | see §3 restore drill |
-| New release | §6 release procedure |
+| New release | merge to `main` — CI/CD deploys automatically (§12); manual: §6 |
+
+---
+
+## 12. CI/CD — deploy on merge to `main`
+
+`.github/workflows/deploy.yml` (in the repo) drives the lane:
+
+```
+push/PR   → CI job: npm ci → oxlint → vitest → build
+main push → deploy job: SSH :2222 (forced command) → /usr/local/bin/natlas-deploy
+```
+
+The deploy job checks out nothing and holds no server password — the GitHub secret can do exactly one thing: trigger the deploy script.
+
+### One-time server setup
+
+**1. `/usr/local/bin/natlas-deploy`** (root-owned, 755) — single-flight, health-gated, auto-rollback:
+
+```bash
+#!/usr/bin/env bash
+# natlas-deploy — production deploy lane. Invoked by GitHub Actions over SSH as a
+# forced command (§12) or manually: /usr/local/bin/natlas-deploy
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+if [ "$(id -un)" = "root" ]; then
+  echo "run as deploy, not root (npm output must stay deploy-owned)" >&2
+  exit 1
+fi
+
+cd /opt/natlas
+exec 9>/tmp/natlas-deploy.lock
+flock -n 9 || { echo "another deploy is already running; aborting"; exit 1; }
+
+git fetch origin
+git checkout -f main
+OLD=$(git rev-parse HEAD)
+# deterministic: server tree is exactly origin/main (local junk is discarded;
+# .env and node_modules are untracked and survive)
+git reset --hard origin/main
+NEW=$(git rev-parse HEAD)
+if [ "$OLD" = "$NEW" ]; then
+  echo "already deployed at $(git rev-parse --short "$NEW"); nothing to do"
+  exit 0
+fi
+
+npm ci
+npx prisma generate --config prisma7.config.ts
+npm run build
+npx prisma migrate deploy --config prisma7.config.ts
+npm run seed
+sudo systemctl restart natlas
+
+# health gate: the deploy only counts if the API comes back up
+for _ in $(seq 1 20); do
+  sleep 2
+  if curl -sf -m 5 http://127.0.0.1:3000/api/health/auth >/dev/null; then
+    echo "DEPLOY OK: $(git rev-parse --short "$OLD") -> $(git rev-parse --short "$NEW")"
+    exit 0
+  fi
+done
+
+echo "HEALTH GATE FAILED after deploying $(git rev-parse --short "$NEW"); rolling code back to $(git rev-parse --short "$OLD")" >&2
+# Migrations are additive-only and stay applied; old code tolerates the newer schema.
+git reset --hard "$OLD"
+npm ci
+npx prisma generate --config prisma7.config.ts
+npm run build
+sudo systemctl restart natlas
+exit 1
+```
+
+Properties worth knowing: `flock` prevents overlapping deploys (CI additionally queues with a `concurrency` group — belt and suspenders); the health gate gives the API ~40s to answer `/api/health/auth` before rolling back; rollback keeps newer migrations applied (additive-only, old code tolerates the newer schema); `npm run seed` is idempotent upserts, safe on every deploy.
+
+**2. Forced-command key for GitHub Actions** — last line of `~deploy/.ssh/authorized_keys`:
+
+```
+restrict,command="/usr/local/bin/natlas-deploy" ssh-ed25519 AAAA… natlas-github-actions
+```
+
+`restrict` + forced `command` means the key can *only* ever run the deploy — no shell, no forwarding, no sftp — even if `VPS_SSH_KEY` leaks out of GitHub.
+
+**3. Read-only pull key** — `~deploy/.ssh/natlas_github` plus `~deploy/.ssh/config`:
+
+```
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/natlas_github
+  IdentitiesOnly yes
+```
+
+`/opt/natlas` remote: `git@github.com:Brobot64/soulnurture.git`.
+
+### One-time GitHub setup
+
+1. **Deploy key (pull access)**: repo Settings → Deploy keys → add the server's `~/.ssh/natlas_github.pub` (`ssh -p 2222 deploy@169.58.86.169 'cat ~/.ssh/natlas_github.pub'`). Read-only — do **not** tick "Allow write access".
+2. **Secret (deploy trigger)**: Settings → Secrets and variables → Actions → new secret **`VPS_SSH_KEY`** = the private half of the `natlas-actions` keypair (laptop: `~/.ssh/natlas-actions`).
+3. The workflow pins the VPS host key in `known_hosts`, so CI refuses to connect if the server key ever changes.
+4. Optional hardening: give the `production` environment (Settings → Environments) a required reviewer to get a manual approval gate before deploys.
+
+### Operating it
+
+- Merge to `main` → CI gates run on the pushed commit → deploy job fires → look for `DEPLOY OK: <old> -> <new>` in the Actions log (https://github.com/Brobot64/soulnurture/actions).
+- Manual deploy: `ssh -p 2222 deploy@169.58.86.169` then `/usr/local/bin/natlas-deploy` — same script, same guarantees.
+- Roll back a bad-but-healthy release by reverting the commit on `main` and pushing; CI deploys the revert.
+- `/opt/natlas` tracks `origin/main`; pushes that don't change the commit are no-ops ("already deployed at <sha>; nothing to do").
+- **First deploy after enabling the lane**: `/opt/natlas` sits at the pre-Phase-C baseline, so the first merge of the feature branches jumps it forward — expect a long deploy (fresh `npm ci` + all pending migrations + seed). The pgvector `SessionSummary` migration is fine: `natlas` is the superuser inside the Postgres container.

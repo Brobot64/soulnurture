@@ -1,0 +1,50 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Lint, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  deploy:
+    name: Deploy to production VPS
+    needs: ci
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: production
+      cancel-in-progress: false
+    environment: production
+    steps:
+      # No checkout needed: the VPS pulls origin/main itself (read-only deploy key).
+      # The SSH key is restricted server-side (authorized_keys forced command),
+      # so this secret can ONLY ever run /usr/local/bin/natlas-deploy — never a shell.
+      - name: Deploy over SSH (forced command runs natlas-deploy)
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/natlas-actions
+          chmod 600 ~/.ssh/natlas-actions
+          printf '%s\n' '[169.58.86.169]:2222 ssh-ed25519 AAAAB3NzaC1lZDI1NTE5AAAAIGgVDzxvjFFHOE4/HhMtfjhpvjee+FYQLrgAvs7rOSAl' >> ~/.ssh/known_hosts
+          ssh -i ~/.ssh/natlas-actions -o BatchMode=yes -o ConnectTimeout=15 -p 2222 deploy@169.58.86.169
