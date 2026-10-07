@@ -435,11 +435,12 @@ curl -fsSL https://ollama.com/install.sh | sh
 #     the account that owns the token, then authenticate
 sudo apt install -y python3-pip python3-venv
 python3 -m venv /opt/hfenv && /opt/hfenv/bin/pip install -U huggingface_hub
-/opt/hfenv/bin/huggingface-cli login        # paste the hf_... token (account has accepted NCAIR1 terms)
+# huggingface_hub ≥ 0.34 dropped the `huggingface-cli` entrypoint; the binary is `hf`
+/opt/hfenv/bin/hf auth login           # paste the hf_... token (account has accepted NCAIR1 terms)
 
 # --- download the CPU quant (Q4_K_M ≈ 5 GB; Q8_0 ≈ 8.5 GB if RAM allows)
 sudo mkdir -p /opt/models/natlas && sudo chown deploy:deploy /opt/models/natlas
-/opt/hfenv/bin/huggingface-cli download tosinamuda/N-ATLaS-GGUF \
+/opt/hfenv/bin/hf download tosinamuda/N-ATLaS-GGUF \
   --include "*Q4_K_M*" --local-dir /opt/models/natlas
 
 # --- import with N-ATLaS-recommended generation params
@@ -638,7 +639,7 @@ WantedBy=multi-user.target
 ```bash
 sudo systemctl daemon-reload && sudo systemctl enable --now natlas
 curl -s http://127.0.0.1:3000/api/health/auth   # {"authenticated":true,...}
-journalctl -u natlas -f                          # live logs
+sudo journalctl -u natlas -f                    # live logs (deploy isn't in systemd-journal)
 ```
 
 **Release procedure** (repeatable, rollback-safe):
@@ -698,6 +699,7 @@ server {
 }
 
 # --- RustFS (S3 API + console) — client_max_body_size raised for direct PUTs
+# (one SAN cert covers all three hostnames → every block loads the api. lineage)
 server {
   listen 80;
   server_name s3.YOUR_VPS_IP.sslip.io;
@@ -707,8 +709,8 @@ server {
 server {
   listen 443 ssl http2;
   server_name s3.YOUR_VPS_IP.sslip.io;
-  ssl_certificate     /etc/letsencrypt/live/s3.YOUR_VPS_IP.sslip.io/fullchain.pem;
-  ssl_certificate_key /etc/letsencrypt/live/s3.YOUR_VPS_IP.sslip.io/privkey.pem;
+  ssl_certificate     /etc/letsencrypt/live/api.YOUR_VPS_IP.sslip.io/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/api.YOUR_VPS_IP.sslip.io/privkey.pem;
   client_max_body_size 512m;
 
   # blocklist: deny public bucket listings, allow presigned ops
@@ -731,8 +733,8 @@ server {
 server {
   listen 443 ssl http2;
   server_name monitor.YOUR_VPS_IP.sslip.io;
-  ssl_certificate     /etc/letsencrypt/live/monitor.YOUR_VPS_IP.sslip.io/fullchain.pem;
-  ssl_certificate_key /etc/letsencrypt/live/monitor.YOUR_VPS_IP.sslip.io/privkey.pem;
+  ssl_certificate     /etc/letsencrypt/live/api.YOUR_VPS_IP.sslip.io/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/api.YOUR_VPS_IP.sslip.io/privkey.pem;
   location / {
     proxy_pass http://127.0.0.1:3001;
     proxy_set_header Host $host;
@@ -931,12 +933,12 @@ Final checks: Grafana shows all scrape targets UP · alert test notification arr
 
 | Task | Command |
 |---|---|
-| API logs | `journalctl -u natlas -f` |
+| API logs | `sudo journalctl -u natlas -f` |
 | Ollama status / loaded models | `ollama ps` · `curl -s localhost:11434/api/tags` |
 | Restart API | `sudo systemctl restart natlas` |
 | Restart infra | `cd /opt/infra && docker compose restart` |
 | Upgrade all containers | `docker compose pull && docker compose up -d` |
 | Disk usage triage | `docker system df` · `df -h /` · journal size: `journalctl --disk-usage` |
-| Update N-ATLaS model | re-run `huggingface-cli download` → `ollama create natlas -f Modelfile` (zero-downtime: the worker retries while Ollama reloads) |
+| Update N-ATLaS model | re-run `hf download` → `ollama create natlas -f Modelfile` (zero-downtime: the worker retries while Ollama reloads) |
 | DB backup restore | see §3 restore drill |
 | New release | §6 release procedure |
