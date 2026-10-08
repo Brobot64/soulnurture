@@ -30,6 +30,11 @@ class EnvironmentVariables {
   @IsUrl({ require_tld: false })
   BETTER_AUTH_URL!: string;
 
+  /** Web app origin that verification links redirect into; defaults to the first concrete trusted origin. */
+  @IsOptional()
+  @IsUrl({ require_tld: false })
+  WEB_APP_URL?: string;
+
   @IsString()
   ALLOWED_ORIGINS!: string;
 

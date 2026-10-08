@@ -14,6 +14,18 @@ import { MailerService } from '../mailer/mailer.service.js';
  */
 export const DevVerificationLinks = new Map<string, string>();
 
+/**
+ * better-auth builds the verify link as `{baseURL}/verify-email?token=…&callbackURL=…`
+ * and, after consuming the token, redirects to that callbackURL (default "/" —
+ * the API root). Point it at the web app so clicking the emailed link lands the
+ * freshly signed-in user in the app instead of on the API.
+ */
+function withWebAppCallback(url: string, webAppUrl: string): string {
+    const target = new URL(url);
+    target.searchParams.set('callbackURL', `${webAppUrl}/welcome`);
+    return target.toString();
+}
+
 export function createAuth(
     prisma: PrismaService,
     mailer: MailerService
@@ -31,6 +43,15 @@ export function createAuth(
         .split(',')
         .map((origin) => origin.trim())
         .filter(Boolean);
+
+    // Where the verify link drops the user after the API consumes the token.
+    // Falls back to the first concrete trusted origin (the deployed frontend
+    // in production); a wildcard entry can never be a redirect target.
+    const webAppUrl = (
+        process.env.WEB_APP_URL ??
+        envTrustedOrigins.find((origin) => !origin.includes('*')) ??
+        ''
+    ).replace(/\/+$/, '');
 
     const rejectExistingEmailSignup = {
         id: 'reject-existing-email-signup',
@@ -112,10 +133,11 @@ export function createAuth(
             autoSignInAfterVerification: true,
 
             sendVerificationEmail: async ({ user, url }) => {
+                const verificationUrl = webAppUrl ? withWebAppCallback(url, webAppUrl) : url;
                 if (process.env.NODE_ENV !== 'production') {
                     // Dev/test aid: the journey reads links via the dev-links
                     // endpoint; production never records them.
-                    DevVerificationLinks.set(user.email, url);
+                    DevVerificationLinks.set(user.email, verificationUrl);
                 }
                 await mailer.sendMail({
                     to: user.email,
@@ -123,7 +145,7 @@ export function createAuth(
                     template: 'verify-email',
                     context: {
                         name: user.name,
-                        verificationUrl: url
+                        verificationUrl
                     },
                 });
             },
