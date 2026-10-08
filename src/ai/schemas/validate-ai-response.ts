@@ -10,9 +10,13 @@ import { AiGenerationResultSchema } from './ai-response.schema.js';
 export function validateAiResponse(raw: unknown): AiGenerationResult {
   const parsed = AiGenerationResultSchema.safeParse(raw);
   if (!parsed.success) {
-    throw new AiGenerationError('AI output failed schema validation', {
-      cause: parsed.error,
-    });
+    const issues = parsed.error.issues
+      .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+      .join('; ');
+    throw new AiGenerationError(
+      `AI output failed schema validation (${issues})`,
+      { cause: parsed.error },
+    );
   }
   return parsed.data as unknown as AiGenerationResult;
 }

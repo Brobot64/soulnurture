@@ -30,8 +30,11 @@ export const SUMMARY_JSON_SCHEMA = {
 export function validateSessionSummary(raw: unknown): SessionSummaryResult {
   const parsed = SessionSummaryResultSchema.safeParse(raw);
   if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+      .join('; ');
     throw new AiGenerationError(
-      'AI session summary failed schema validation',
+      `AI session summary failed schema validation (${issues})`,
       { cause: parsed.error },
     );
   }

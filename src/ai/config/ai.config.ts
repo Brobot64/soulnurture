@@ -3,6 +3,7 @@ import {
   GUARDRAILS_DEFAULTS,
   type GuardrailsConfig,
 } from '../guardrails/guardrails.config.js';
+import type { QuickReplyValue } from '../../conversations/dto/send-message.dto.js';
 import {
   ASR_VERNACULAR_LANGUAGES,
   DEFAULT_VERNACULAR_REPLY_MODE,
@@ -132,6 +133,24 @@ export interface AiConfig {
      */
     persistModelCandidates: boolean;
   };
+  /** Guided check-in replies: quick-reply directives + the free-text turn
+   * budget. Non-secret; exposed via GET /api/v1/ai/config so the guided
+   * behaviour is explainable to professional roles. */
+  guided: {
+    /** Free-text turns allowed before wrap-up when no extension was used. */
+    maxBaseTurns: number;
+    /** Free-text turns allowed once the student tapped "Tell more". */
+    maxExtendedTurns: number;
+    /** The quick reply that extends the budget base → extended. */
+    extension: QuickReplyValue;
+    /** Per-quick-reply system-prompt directives. */
+    directives: Record<QuickReplyValue, string>;
+    /** Appended on the final free-text turn of a guided check-in. */
+    wrapUpDirective: string;
+    /** REPLACES every guided directive while a support flag is OPEN on the
+     * conversation — safeguarding outranks the guided experience. */
+    flagDirective: string;
+  };
   /** Reviewer surface for the configurable guardrail layer (see
    * guardrails/guardrails.config.ts). Non-secret; exposed via
    * GET /api/v1/ai/config so behaviour is explainable. */
@@ -146,6 +165,23 @@ export const AI_CONFIG_DEFAULTS = {
   retryDelaysMs: [5_000, 30_000, 120_000],
   holdingMessage:
     'Thank you for sharing that with me — I am still thinking about it and will be right here.',
+  guided: {
+    maxBaseTurns: 3,
+    maxExtendedTurns: 5,
+    extension: 'TELL_MORE' as QuickReplyValue,
+    directives: {
+      TELL_MORE:
+        'The student chose "Tell more". Invite them to share in their own words about their check-in. Reference what they told you. Ask exactly one gentle question. Never probe safeguarding details.',
+      SHOW_IDEA:
+        'The student asked for an idea. Offer one short, concrete, age-appropriate idea or encouragement tied to what they shared. Put it in reflection.insight.',
+      TALK_TO_SOMEONE:
+        'The student wants to talk to a person. Respond with the approved human-support bridge: praise the step, point to school counsellor / trusted adult. Keep it brief.',
+    } satisfies Record<QuickReplyValue, string>,
+    wrapUpDirective:
+      "This is the student's final turn of this reflection. Close warmly, summarise what they shared, ask no further questions.",
+    flagDirective:
+      'A safeguarding concern is open for this student. Do not explore or probe. Use only the approved support and routing language.',
+  },
 } as const;
 
 // Non-chat override defaults: reasoning models need room for thinking + JSON.
@@ -166,7 +202,7 @@ export function buildAiConfig(config: ConfigService): AiConfig {
     .filter((name) => name.length > 0);
 
   return {
-    promptVersion: 'v2',
+    promptVersion: 'v3',
     chat: {
       model: config.get<string>('GROQ_CHAT_MODEL') ?? 'openai/gpt-oss-20b',
       maxOutputTokens: Number(
@@ -269,6 +305,20 @@ export function buildAiConfig(config: ConfigService): AiConfig {
     },
     safeguarding: {
       persistModelCandidates: true,
+    },
+    guided: {
+      maxBaseTurns: Number(
+        config.get<string>('AI_GUIDED_MAX_BASE_TURNS') ??
+          AI_CONFIG_DEFAULTS.guided.maxBaseTurns,
+      ),
+      maxExtendedTurns: Number(
+        config.get<string>('AI_GUIDED_MAX_EXTENDED_TURNS') ??
+          AI_CONFIG_DEFAULTS.guided.maxExtendedTurns,
+      ),
+      extension: AI_CONFIG_DEFAULTS.guided.extension,
+      directives: AI_CONFIG_DEFAULTS.guided.directives,
+      wrapUpDirective: AI_CONFIG_DEFAULTS.guided.wrapUpDirective,
+      flagDirective: AI_CONFIG_DEFAULTS.guided.flagDirective,
     },
     guardrails: {
       input: {

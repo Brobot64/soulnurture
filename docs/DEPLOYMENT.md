@@ -594,6 +594,11 @@ AI_MAX_REPLY_CHARS=700
 AI_RATE_LIMIT_DAILY=20
 AI_RATE_LIMIT_PER_MINUTE=6
 
+# Guided check-in replies — free-text turn budget before wrap-up
+# (3 base; a single "Tell more" tap extends to 5; quick-reply taps are free)
+AI_GUIDED_MAX_BASE_TURNS=3
+AI_GUIDED_MAX_EXTENDED_TURNS=5
+
 # Session-summary memory (requires the pgvector image from §3)
 AI_SESSION_IDLE_MINUTES=120
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small

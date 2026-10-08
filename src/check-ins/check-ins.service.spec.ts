@@ -98,4 +98,84 @@ describe('CheckInsService', () => {
       ForbiddenException,
     );
   });
+
+  describe('history', () => {
+    it('returns closed-conversation check-ins newest first with summaries', async () => {
+      prisma.emotionalCheckIn.findMany.mockResolvedValue([
+        {
+          id: 'ci-2',
+          feeling: 'CALM',
+          triggers: ['music'],
+          createdAt: new Date('2026-10-07T09:00:00Z'),
+          conversations: [
+            {
+              id: 'conv-2',
+              summary: { summary: 'Talked through exam nerves' },
+            },
+          ],
+        },
+        {
+          id: 'ci-1',
+          feeling: 'OVERWHELMED',
+          triggers: ['exams'],
+          createdAt: new Date('2026-10-05T18:30:00Z'),
+          conversations: [{ id: 'conv-1', summary: null }],
+        },
+      ]);
+
+      const result = await service.history('user-1');
+
+      expect(prisma.emotionalCheckIn.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            studentId: student.id,
+            conversations: { some: { status: 'CLOSED' } },
+          },
+        }),
+      );
+      expect(result.items).toEqual([
+        {
+          checkInId: 'ci-2',
+          feeling: 'CALM',
+          triggers: ['music'],
+          createdAt: new Date('2026-10-07T09:00:00Z'),
+          conversationId: 'conv-2',
+          summary: 'Talked through exam nerves',
+        },
+        {
+          checkInId: 'ci-1',
+          feeling: 'OVERWHELMED',
+          triggers: ['exams'],
+          createdAt: new Date('2026-10-05T18:30:00Z'),
+          conversationId: 'conv-1',
+          summary: null,
+        },
+      ]);
+    });
+
+    it('falls back to a null summary and conversation id when absent', async () => {
+      prisma.emotionalCheckIn.findMany.mockResolvedValue([
+        {
+          id: 'ci-3',
+          feeling: 'SAD',
+          triggers: [],
+          createdAt: new Date('2026-10-06T12:00:00Z'),
+          conversations: [],
+        },
+      ]);
+
+      const result = await service.history('user-1');
+
+      expect(result.items).toEqual([
+        {
+          checkInId: 'ci-3',
+          feeling: 'SAD',
+          triggers: [],
+          createdAt: new Date('2026-10-06T12:00:00Z'),
+          conversationId: null,
+          summary: null,
+        },
+      ]);
+    });
+  });
 });

@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   ForbiddenException,
   Inject,
   Injectable,
@@ -6,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { MessageRole, Prisma } from '@prisma/client';
 import { AiService } from '../ai/ai.service.js';
+import type { AiOrchestrationInput } from '../ai/ai.service.js';
 import type { AiOrchestrationOutcome } from '../ai/ai.service.js';
 import { IntentEngineService } from '../ai/intents/intent-engine.service.js';
 import { GuardrailService } from '../ai/guardrails/guardrail.service.js';
@@ -147,6 +149,14 @@ export class ConversationsService {
   async sendMessage(userId: string, id: string, dto: SendMessageDto) {
     const { student, conversation } = await this.owned(userId, id);
 
+    // Closed conversations are read-only (history sidebar opens them for
+    // viewing). Reject before any write or rate-gate consumption.
+    if (conversation.status !== 'ACTIVE') {
+      throw new ConflictException(
+        'This conversation is closed. Start a new check-in to keep talking.',
+      );
+    }
+
     // Rate gate — runs before any DB write so a rejected turn leaves no trace
     // and consumes no budget. Guards AI chat turns only; the human support
     // route (support-requests) never passes through here.
@@ -170,8 +180,28 @@ export class ConversationsService {
         conversationId: conversation.id,
         role: MessageRole.USER,
         content: dto.content,
+        quickReply: dto.quickReply ?? null,
       },
     });
+
+    // Guided turn budget: only free-text USER messages (quickReply null)
+    // count. A single "Tell more" tap anywhere in the conversation extends
+    // the budget base → extended. The current message counts when it is
+    // free text (quick replies never consume budget).
+    const guided = this.aiConfig.guided;
+    const priorUserMessages = conversation.messages.filter(
+      (m) => m.role === MessageRole.USER,
+    );
+    const freeTextTurns =
+      priorUserMessages.filter((m) => m.quickReply === null).length +
+      (dto.quickReply ? 0 : 1);
+    const hadTellMore =
+      priorUserMessages.some((m) => m.quickReply === guided.extension) ||
+      dto.quickReply === guided.extension;
+    const turnBudget = hadTellMore
+      ? guided.maxExtendedTurns
+      : guided.maxBaseTurns;
+    const finalTurn = !dto.quickReply && freeTextTurns >= turnBudget;
 
     const orchestrationInput = {
       studentId: student.id,
@@ -181,6 +211,10 @@ export class ConversationsService {
       language: dto.language ?? student.preferredLanguage,
       studentRef: student.displayName ?? student.firstName ?? 'Student',
       classLabel: student.classLabel ?? null,
+      quickReply: dto.quickReply ?? null,
+      freeTextTurns,
+      turnBudget,
+      finalTurn,
     } as const;
 
     // Full orchestration on the happy path; on provider failure the student
@@ -322,15 +356,7 @@ export class ConversationsService {
    * the model is down) so acute flags are never delayed.
    */
   private async holdAndQueue(
-    input: {
-      studentId: string;
-      conversationId: string;
-      checkInId?: string | null;
-      userContent: string;
-      language?: string;
-      studentRef: string;
-      classLabel: string | null;
-    },
+    input: AiOrchestrationInput,
   ): Promise<LaneOutcome> {
     const placeholder = holdingResult(this.aiConfig.async.holdingMessage);
     const verdict = this.intentEngine.evaluate({

@@ -318,6 +318,10 @@ model ConversationMessage {
   conversationId      String      @db.Uuid
   role                MessageRole
   content             String
+  /// Guided-reply marker when the student tapped a quick reply instead of
+  /// typing free text (TELL_MORE | SHOW_IDEA | TALK_TO_SOMEONE). null = the
+  /// student typed; the turn budget counts only these free-text messages.
+  quickReply          String?
   aiPayload           Json?
   activeExerciseLabel String?
   createdAt           DateTime @default(now())

@@ -69,8 +69,9 @@ export class OpenAiProvider implements AiProvider {
     }
 
     if (!res.ok) {
+      const detail = (await res.text().catch(() => '')).slice(0, 300);
       throw new AiGenerationError(
-        `OpenAI provider rejected the request with status ${res.status}`,
+        `OpenAI provider rejected the request with status ${res.status}: ${detail}`,
       );
     }
 

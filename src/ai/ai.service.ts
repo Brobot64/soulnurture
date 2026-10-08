@@ -29,6 +29,7 @@ import {
 } from './memory/summarize.prompt.js';
 import { AuditService } from '../audit/audit.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import type { QuickReplyValue } from '../conversations/dto/send-message.dto.js';
 import { AI_CONFIG } from './config/ai.config.js';
 import type { AiConfig } from './config/ai.config.js';
 import {
@@ -65,6 +66,14 @@ export interface AiOrchestrationInput {
   language?: string;
   studentRef: string;
   classLabel: string | null;
+  /** Guided-reply marker from the DTO; drives the directive selection. */
+  quickReply?: QuickReplyValue | null;
+  /** Free-text USER turns so far in this conversation. */
+  freeTextTurns?: number;
+  /** Free-text turn budget (base or extended). */
+  turnBudget?: number;
+  /** True when freeTextTurns reached the budget — wrap-up directive applies. */
+  finalTurn?: boolean;
 }
 
 export interface AiOrchestrationOutcome {
@@ -177,6 +186,33 @@ export class AiService {
       currentMessageText: input.userContent,
     });
 
+    // Guided-mode directives. An OPEN support flag on the conversation
+    // REPLACES every guided line — safeguarding outranks the guided
+    // experience. Guardrails, the intent floor and the resource whitelist
+    // below are untouched: this only shapes the reply, never the safety net.
+    const openFlag = await this.prisma.supportFlag.findFirst({
+      where: { conversationId: input.conversationId, status: 'OPEN' },
+      select: { id: true },
+    });
+    const guidedLines: string[] = [];
+    if (openFlag) {
+      guidedLines.push(this.aiConfig.guided.flagDirective);
+    } else {
+      if (input.quickReply) {
+        const directive = this.aiConfig.guided.directives[input.quickReply];
+        if (directive) guidedLines.push(directive);
+      }
+      if (input.turnBudget != null && input.freeTextTurns != null) {
+        guidedLines.push(
+          `Guided check-in budget: ${input.freeTextTurns}/${input.turnBudget} free-text turns used` +
+            (input.finalTurn ? ' — this is the final turn.' : '.'),
+        );
+      }
+      if (input.finalTurn) {
+        guidedLines.push(this.aiConfig.guided.wrapUpDirective);
+      }
+    }
+
     // Input guardrail: the model sees the truncated message; the intent floor
     // below still evaluates the RAW userContent — safety is never truncated.
     const sanitized = this.guardrail.sanitizeInput(input.userContent);
@@ -187,6 +223,7 @@ export class AiService {
       languagePromptDirective(
         input.language ?? ctx.student.preferredLanguage ?? 'en',
       ),
+      ...guidedLines,
       `Valid supportFlag.category values: ${CANONICAL_CATEGORIES.join(', ')}`,
       `Valid supportFlag.severity values: ${CANONICAL_SEVERITIES.join(', ')}`,
       `Approved context JSON: ${JSON.stringify(ctx)}`,

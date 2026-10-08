@@ -41,6 +41,17 @@ export class CheckInsController {
     return this.checkInsService.listMine(session.user.id);
   }
 
+  @Get('history')
+  @ApiSessionAuth()
+  @ApiStandardErrors()
+  @ApiOperation({
+    summary: 'Guided check-in history (closed conversations + summaries)',
+  })
+  @ApiEnvelopeOk(Object)
+  history(@Session() session: UserSession) {
+    return this.checkInsService.history(session.user.id);
+  }
+
   @Get(':id')
   @ApiSessionAuth()
   @ApiStandardErrors()

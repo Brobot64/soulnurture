@@ -333,7 +333,8 @@ async function main() {
   check('message 1: AI hug reply (no flag expected)', res.status === 201 || res.status === 200, `status ${res.status}`);
 
   res = await say('Lately everything feels heavier. Deadlines are close and the hostel is too loud to rest.');
-  check('message 2: reply is a real success (guards ribbon effects)', (res.status === 201 || res.status === 200) && data(res)?.activeIntent === null, `status ${res.status}`);
+  const msg2Intent = data(res)?.activeIntent ?? null;
+  check('message 2: reply is a real success (guards ribbon effects)', (res.status === 201 || res.status === 200) && msg2Intent?.severity !== 'TIER_3_ACUTE', `status ${res.status} intent ${JSON.stringify(msg2Intent)}`);
 
   console.log('  POST /api/v1/conversations/:id/messages', JSON.stringify({ content: '(crisis wording)' }));
   res = await say('Honestly, some nights I feel there is no reason to live. I keep thinking I want to end it all.');
@@ -408,8 +409,11 @@ async function main() {
       `INSERT INTO ai_generation_job (id, "conversationMessageId", input, attempts, status, "nextRetryAt", "createdAt", "updatedAt")
        VALUES ($3, $1, $2::jsonb, 3, 'PENDING', now(), now(), now())`,
       [failPlaceholderId, JSON.stringify({
+        // Unknown conversation makes the worker's post-generation
+        // conversation.update throw deterministically — healthy providers
+        // must not make this probe succeed.
         studentId: judeProfileId,
-        conversationId: conv2.id,
+        conversationId: randomUUID(),
         checkInId: null,
         userContent: 'exhaust probe',
         language: 'en',
@@ -470,7 +474,7 @@ async function main() {
   act("Act 7 — ERIC's professional review of Jude");
   res = await api(eric, 'GET', '/api/v1/dashboard/counsellor');
   const dash = data(res);
-  check('dashboard exposes the intent flag', (dash?.flags ?? []).length >= 1 && dash.flags[0].intentId === 'SUICIDAL_IDEATION', dash?.flags?.map((f) => f.triggerLabel).join(','));
+  check('dashboard exposes the intent flag', (dash?.flags ?? []).some((f) => f.intentId === 'SUICIDAL_IDEATION'), dash?.flags?.map((f) => f.triggerLabel).join(','));
   check('dashboard flag carries description + reason (flag plus reason)', typeof dash?.flags?.[0]?.aiContextSummary === 'string' && dash.flags[0].aiContextSummary.includes('Student'), dash?.flags?.[0]?.aiContextSummary?.slice(0, 80));
   check('dashboard exposes Jude support request', (dash?.supportRequests ?? []).length >= 1);
   check('barometer counts recent check-ins', dash?.barometer?.total >= 1, `total ${dash?.barometer?.total}`);

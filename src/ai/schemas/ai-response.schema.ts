@@ -47,6 +47,9 @@ export const AiGenerationResultSchema = z.object({
       outputTokens: z.number().int().positive().optional(),
       latencyMs: z.number().int().positive().optional(),
       audioDuration: z.number().int().positive().optional(),
+      // Server-stamped by the provider chain after serving (explainability);
+      // never part of the model-facing contract, which omits `usage` entirely.
+      provider: z.string().optional(),
     })
     .strict()
     .optional(),

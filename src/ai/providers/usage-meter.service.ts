@@ -61,9 +61,9 @@ export class AiUsageMeterService {
     try {
       const rows = await this.prisma.$queryRaw<{ requests: number }[]>`
         INSERT INTO "ai_usage_daily"
-          (id, day, provider, requests, "inputTokens", "outputTokens", "estimatedUsdCents")
+          (id, day, provider, requests, "inputTokens", "outputTokens", "estimatedUsdCents", "updatedAt")
         VALUES
-          (gen_random_uuid(), CURRENT_DATE, ${provider}, 1, ${inputTokens}, ${outputTokens}, ${estimatedUsdCents})
+          (gen_random_uuid(), CURRENT_DATE, ${provider}, 1, ${inputTokens}, ${outputTokens}, ${estimatedUsdCents}, NOW())
         ON CONFLICT (day, provider) DO UPDATE SET
           requests = "ai_usage_daily".requests + 1,
           "inputTokens" = "ai_usage_daily"."inputTokens" + ${inputTokens},
