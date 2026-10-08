@@ -474,7 +474,28 @@ describe('ConversationsService', () => {
       );
     });
 
-    it('extends the budget to 5 once any TELL_MORE exists in the conversation', async () => {
+    it('extends the free-text budget to 5 once any TELL_MORE exists in the conversation', async () => {
+      mockActiveConversation([
+        { id: 'm1', role: MessageRole.USER, quickReply: null },
+        { id: 'm2', role: MessageRole.USER, quickReply: 'TELL_MORE' },
+        { id: 'm3', role: MessageRole.USER, quickReply: null },
+      ]);
+
+      await service.sendMessage('user-1', 'conv-1', {
+        content: 'third free turn',
+      });
+
+      const sent = ai.generateAndApply.mock.calls[0][0];
+      expect(sent).toEqual(
+        expect.objectContaining({
+          freeTextTurns: 3,
+          turnBudget: 5,
+          finalTurn: false,
+        }),
+      );
+    });
+
+    it('wraps at 5 total turns even when the free-text budget was extended', async () => {
       mockActiveConversation([
         { id: 'm1', role: MessageRole.USER, quickReply: null },
         { id: 'm2', role: MessageRole.USER, quickReply: 'TELL_MORE' },
@@ -491,16 +512,39 @@ describe('ConversationsService', () => {
         expect.objectContaining({
           freeTextTurns: 4,
           turnBudget: 5,
+          finalTurn: true,
+        }),
+      );
+    });
+
+    it('quick-reply taps skip the free-text budget but count toward the total cap', async () => {
+      mockActiveConversation([
+        { id: 'm1', role: MessageRole.USER, quickReply: null },
+        { id: 'm2', role: MessageRole.USER, quickReply: null },
+      ]);
+
+      await service.sendMessage('user-1', 'conv-1', {
+        content: 'Show me an idea',
+        quickReply: 'SHOW_IDEA',
+      });
+
+      const sent = ai.generateAndApply.mock.calls[0][0];
+      expect(sent).toEqual(
+        expect.objectContaining({
+          quickReply: 'SHOW_IDEA',
+          freeTextTurns: 2,
+          turnBudget: 3,
           finalTurn: false,
         }),
       );
     });
 
-    it('quick-reply taps never consume budget or trigger wrap-up', async () => {
+    it('a fifth-turn tap wraps the conversation up', async () => {
       mockActiveConversation([
         { id: 'm1', role: MessageRole.USER, quickReply: null },
-        { id: 'm2', role: MessageRole.USER, quickReply: null },
+        { id: 'm2', role: MessageRole.USER, quickReply: 'TELL_MORE' },
         { id: 'm3', role: MessageRole.USER, quickReply: null },
+        { id: 'm4', role: MessageRole.USER, quickReply: null },
       ]);
 
       await service.sendMessage('user-1', 'conv-1', {
@@ -513,8 +557,32 @@ describe('ConversationsService', () => {
         expect.objectContaining({
           quickReply: 'SHOW_IDEA',
           freeTextTurns: 3,
-          turnBudget: 3,
-          finalTurn: false,
+          turnBudget: 5,
+          finalTurn: true,
+        }),
+      );
+    });
+
+    it('a tap-only conversation still wraps at 5 total turns', async () => {
+      mockActiveConversation([
+        { id: 'm1', role: MessageRole.USER, quickReply: 'SHOW_IDEA' },
+        { id: 'm2', role: MessageRole.USER, quickReply: 'SHOW_IDEA' },
+        { id: 'm3', role: MessageRole.USER, quickReply: 'SHOW_IDEA' },
+        { id: 'm4', role: MessageRole.USER, quickReply: 'TELL_MORE' },
+      ]);
+
+      await service.sendMessage('user-1', 'conv-1', {
+        content: 'Tell you more',
+        quickReply: 'TELL_MORE',
+      });
+
+      const sent = ai.generateAndApply.mock.calls[0][0];
+      expect(sent).toEqual(
+        expect.objectContaining({
+          quickReply: 'TELL_MORE',
+          freeTextTurns: 0,
+          turnBudget: 5,
+          finalTurn: true,
         }),
       );
     });

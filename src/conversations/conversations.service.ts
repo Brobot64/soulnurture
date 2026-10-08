@@ -184,10 +184,11 @@ export class ConversationsService {
       },
     });
 
-    // Guided turn budget: only free-text USER messages (quickReply null)
-    // count. A single "Tell more" tap anywhere in the conversation extends
-    // the budget base → extended. The current message counts when it is
-    // free text (quick replies never consume budget).
+    // Guided turn budget. Free-text turns (quickReply null) wrap at the
+    // base budget unless a "Tell more" tap extended it. Quick-reply taps
+    // never consume the free-text budget, but EVERY student turn counts
+    // toward the hard total cap — the chat can never exceed maxExtendedTurns
+    // turns, however the student got there.
     const guided = this.aiConfig.guided;
     const priorUserMessages = conversation.messages.filter(
       (m) => m.role === MessageRole.USER,
@@ -195,13 +196,16 @@ export class ConversationsService {
     const freeTextTurns =
       priorUserMessages.filter((m) => m.quickReply === null).length +
       (dto.quickReply ? 0 : 1);
+    const totalTurns = priorUserMessages.length + 1;
     const hadTellMore =
       priorUserMessages.some((m) => m.quickReply === guided.extension) ||
       dto.quickReply === guided.extension;
     const turnBudget = hadTellMore
       ? guided.maxExtendedTurns
       : guided.maxBaseTurns;
-    const finalTurn = !dto.quickReply && freeTextTurns >= turnBudget;
+    const finalTurn =
+      totalTurns >= guided.maxExtendedTurns ||
+      (!dto.quickReply && freeTextTurns >= turnBudget);
 
     const orchestrationInput = {
       studentId: student.id,
