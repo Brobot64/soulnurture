@@ -35,6 +35,8 @@ export class HttpExceptionFilter
     let error =
       'Internal Server Error';
 
+    let code: string | undefined;
+
     if (exception instanceof HttpException) {
       status = exception.getStatus();
 
@@ -52,6 +54,7 @@ export class HttpExceptionFilter
         const body = exceptionResponse as {
           message?: string | string[];
           error?: string;
+          code?: string;
         };
 
         message =
@@ -59,6 +62,8 @@ export class HttpExceptionFilter
 
         error =
           body.error ?? error;
+
+        code = body.code ?? code;
       }
     } else {
       this.logger.error(
@@ -74,6 +79,8 @@ export class HttpExceptionFilter
       message,
 
       error,
+
+      ...(code ? { code } : {}),
 
       path: request.url,
 

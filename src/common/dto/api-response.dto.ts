@@ -36,6 +36,13 @@ export class ApiErrorResponseDto {
   @ApiProperty({ example: 'Bad Request' })
   error!: string;
 
+  @ApiPropertyOptional({
+    example: 'CONSENT_REQUIRED',
+    description:
+      'Machine-readable discriminator for clients that must branch on more than the HTTP status',
+  })
+  code?: string;
+
   @ApiProperty({ example: '/api/check-ins' })
   path!: string;
 

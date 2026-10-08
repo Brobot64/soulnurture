@@ -11,7 +11,10 @@ import {
   GuardrailService,
   RateLimitExceededException,
 } from '../ai/guardrails/guardrail.service.js';
+import { AI_DISCLOSURE_CONSENT_VERSION } from '../ai/disclosure/ai-disclosure.js';
 import { AuditService } from '../audit/audit.service.js';
+import { ConsentRequiredException } from '../consent/consent.errors.js';
+import { ConsentService } from '../consent/consent.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
 import { ConversationsService } from './conversations.service.js';
@@ -66,6 +69,9 @@ describe('ConversationsService', () => {
   let guardrail: { assertMessageAllowed: ReturnType<typeof vi.fn> };
   let auditService: { log: ReturnType<typeof vi.fn> };
   let studentsService: { ensureProfile: ReturnType<typeof vi.fn> };
+  let consentService: {
+    hasAcceptedForStudent: ReturnType<typeof vi.fn>;
+  };
 
   const student = {
     id: 'student-1',
@@ -129,6 +135,9 @@ describe('ConversationsService', () => {
     studentsService = {
       ensureProfile: vi.fn().mockResolvedValue(student),
     };
+    consentService = {
+      hasAcceptedForStudent: vi.fn().mockResolvedValue(true),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -140,6 +149,7 @@ describe('ConversationsService', () => {
         LanguageDetectorService,
         { provide: GuardrailService, useValue: guardrail },
         { provide: AuditService, useValue: auditService },
+        { provide: ConsentService, useValue: consentService },
         { provide: AI_CONFIG, useValue: aiConfigStub },
       ],
     }).compile();
@@ -388,6 +398,69 @@ describe('ConversationsService', () => {
       expect.objectContaining({ show: true }),
     );
     expect(result.assistantMessage.content).toContain('connect');
+  });
+
+  describe('consent gate', () => {
+    const openConversation = () => {
+      prisma.conversation.findUnique.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        checkInId: null,
+        status: 'ACTIVE',
+        messages: [],
+      });
+    };
+
+    it('blocks conversation creation when the disclosure is not accepted', async () => {
+      consentService.hasAcceptedForStudent.mockResolvedValue(false);
+
+      await expect(
+        service.create('user-1', { source: 'chat' }),
+      ).rejects.toThrow(ConsentRequiredException);
+
+      expect(consentService.hasAcceptedForStudent).toHaveBeenCalledWith(
+        student.id,
+        AI_DISCLOSURE_CONSENT_VERSION,
+      );
+      expect(prisma.conversation.create).not.toHaveBeenCalled();
+    });
+
+    it('blocks a message before the rate gate and before any write', async () => {
+      openConversation();
+      consentService.hasAcceptedForStudent.mockResolvedValue(false);
+
+      const error = await service
+        .sendMessage('user-1', 'conv-1', { content: 'hi' })
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ConsentRequiredException);
+      expect((error as ConsentRequiredException).getStatus()).toBe(403);
+      expect(guardrail.assertMessageAllowed).not.toHaveBeenCalled();
+      expect(prisma.conversationMessage.create).not.toHaveBeenCalled();
+      expect(ai.generateAndApply).not.toHaveBeenCalled();
+      expect(prisma.aiGenerationJob.create).not.toHaveBeenCalled();
+    });
+
+    it('lets an accepted disclosure through to the AI turn', async () => {
+      openConversation();
+      prisma.conversationMessage.create.mockResolvedValue({
+        id: 'msg-1',
+        role: MessageRole.ASSISTANT,
+        content: 'I hear you.',
+      });
+      prisma.conversation.update.mockResolvedValue({ id: 'conv-1' });
+      ai.generateAndApply.mockResolvedValue(orchestratedOutcome);
+
+      const result = await service.sendMessage('user-1', 'conv-1', {
+        content: 'I feel overwhelmed',
+      });
+
+      expect(consentService.hasAcceptedForStudent).toHaveBeenCalledWith(
+        student.id,
+        AI_DISCLOSURE_CONSENT_VERSION,
+      );
+      expect(result.assistantMessage.content).toBe('I hear you.');
+    });
   });
 
   describe('guided replies', () => {

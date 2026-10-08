@@ -18,7 +18,10 @@ import type { AiConfig } from '../ai/config/ai.config.js';
 import type { AiGenerationResult } from '../ai/providers/ai-provider.interface.js';
 import type { AiContext } from '../ai/context/ai-context.service.js';
 import { AiGenerationError } from '../ai/ai.errors.js';
+import { AI_DISCLOSURE_CONSENT_VERSION } from '../ai/disclosure/ai-disclosure.js';
 import { AuditService } from '../audit/audit.service.js';
+import { ConsentRequiredException } from '../consent/consent.errors.js';
+import { ConsentService } from '../consent/consent.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
 import type { CreateConversationDto } from './dto/create-conversation.dto.js';
@@ -60,8 +63,23 @@ export class ConversationsService {
     private readonly guardrail: GuardrailService,
     private readonly languageDetector: LanguageDetectorService,
     private readonly auditService: AuditService,
+    private readonly consentService: ConsentService,
     @Inject(AI_CONFIG) private readonly aiConfig: AiConfig,
   ) {}
+
+  /**
+   * AI consent gate. Enforced here, not only in the client modal: opening the
+   * chat is never consent, so no AI conversation may be created or continued
+   * without an accepted ConsentRecord for the CURRENT disclosure version.
+   * Bumping the version re-prompts every student once.
+   */
+  private async assertDisclosureAccepted(studentId: string) {
+    const accepted = await this.consentService.hasAcceptedForStudent(
+      studentId,
+      AI_DISCLOSURE_CONSENT_VERSION,
+    );
+    if (!accepted) throw new ConsentRequiredException();
+  }
 
   private async owned(userId: string, conversationId: string) {
     const student = await this.studentsService.ensureProfile(userId);
@@ -76,6 +94,7 @@ export class ConversationsService {
 
   async create(userId: string, dto: CreateConversationDto) {
     const student = await this.studentsService.ensureProfile(userId);
+    await this.assertDisclosureAccepted(student.id);
     return this.prisma.conversation.create({
       data: {
         studentId: student.id,
@@ -148,6 +167,10 @@ export class ConversationsService {
 
   async sendMessage(userId: string, id: string, dto: SendMessageDto) {
     const { student, conversation } = await this.owned(userId, id);
+
+    // AI consent gate — checked before the rate gate and before any write, so
+    // a student who has not accepted the current explanation leaves no trace.
+    await this.assertDisclosureAccepted(student.id);
 
     // Closed conversations are read-only (history sidebar opens them for
     // viewing). Reject before any write or rate-gate consumption.
