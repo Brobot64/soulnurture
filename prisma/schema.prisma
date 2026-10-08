@@ -11,6 +11,25 @@ enum UserRole {
   COUNSELLOR
   PSYCHOLOGIST
   SUPPORT_STAFF
+  SCHOOL_ADMIN
+  PLATFORM_ADMIN
+}
+
+enum SchoolStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum ChatThreadStatus {
+  PENDING
+  ACTIVE
+  CLOSED
+}
+
+enum ChatMessageRole {
+  STUDENT
+  PROFESSIONAL
+  SYSTEM
 }
 
 enum FeelingLabel {
@@ -134,22 +153,52 @@ enum FollowUpStatus {
   CANCELLED
 }
 
+/// A tenant school. Soft delete = status SUSPENDED: sign-in is blocked and all
+/// school users are cut off (see tenant.guard.ts + the school-status-guard
+/// Better Auth plugin in auth.config.ts).
+model School {
+  id        String       @id @default(uuid()) @db.Uuid
+  name      String
+  shortCode String       @unique
+  status    SchoolStatus @default(ACTIVE)
+  /// Precomputed scrypt hash (better-auth/crypto) of the school's default
+  /// password. Reused as the credential for every onboarded account until the
+  /// user's forced first change; never returned by any endpoint.
+  defaultPasswordHash String?
+  settings  Json?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  users         User[]
+  chatThreads   ChatThread[]
+
+  @@map("school")
+}
+
 model User {
-  id            String   @id @default(uuid()) @db.Uuid
-  name          String
-  phone         String?  @unique
-  email         String   @unique
-  emailVerified Boolean  @default(false)
-  image         String?
-  role          UserRole @default(STUDENT)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id                  String    @id @default(uuid()) @db.Uuid
+  name                String
+  phone               String?   @unique
+  email               String    @unique
+  emailVerified       Boolean   @default(false)
+  image               String?
+  role                UserRole  @default(STUDENT)
+  schoolId            String?   @db.Uuid
+  /// Set when onboarded with the school default password; cleared by
+  /// POST /api/v1/auth/first-password. Blocks all other routes (tenant.guard).
+  mustChangePassword  Boolean   @default(false)
+  deactivatedAt       DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   sessions            Session[]
   accounts            Account[]
   studentProfile      StudentProfile?
   professionalProfile ProfessionalProfile?
   auditLogs           AuditLog[]
+  school              School?         @relation(fields: [schoolId], references: [id], onDelete: SetNull)
+  notifications       Notification[]
+  sentChatMessages    ChatMessage[]
 
   @@map("user")
 }
@@ -206,6 +255,8 @@ model StudentProfile {
   displayName       String?
   classLabel        String?
   studentRef        String?  @unique
+  /// System-assigned onboarding code: <SCHOOL_SHORTCODE>-<4 digits>.
+  studentCode       String?  @unique
   preferredLanguage String   @default("en")
   vibe              String?
   createdAt         DateTime @default(now())
@@ -223,6 +274,7 @@ model StudentProfile {
   privacyPreference PrivacyPreference?
   sessionSummaries  SessionSummary[]
   activitySessions  ActivitySession[]
+  chatThreads       ChatThread[]
 
   @@map("student_profile")
 }
@@ -241,6 +293,7 @@ model ProfessionalProfile {
   supportPeople SupportPerson[]
   assignedFlags SupportFlag[]   @relation("FlagAssignee")
   followUps     FollowUp[]
+  chatThreads   ChatThread[]    @relation("ChatProfessional")
 
   @@map("professional_profile")
 }
@@ -595,4 +648,72 @@ model ActivitySession {
 
   @@index([studentId, startedAt])
   @@map("activity_session")
+}
+
+/// In-app human chat between a student and a professional of the same school.
+/// Lifecycle: PENDING (sits in the school request pool) → ACTIVE (a
+/// professional claimed it) → CLOSED. Deliberately separate from Conversation
+/// (the AI Reflect lane) — no AI runs inside the thread after the entry note.
+model ChatThread {
+  id             String           @id @default(uuid()) @db.Uuid
+  schoolId       String           @db.Uuid
+  studentId      String           @db.Uuid
+  professionalId String?          @db.Uuid
+  status         ChatThreadStatus @default(PENDING)
+  entryCheckInId String?          @db.Uuid
+  /// AI-composed opening note shown to professionals in the request pool.
+  aiEntrySummary String?
+  /// Per-participant read markers backing the unread badge.
+  studentReadAt       DateTime?
+  professionalReadAt  DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  school       School               @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student      StudentProfile       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  professional ProfessionalProfile? @relation("ChatProfessional", fields: [professionalId], references: [id], onDelete: SetNull)
+  messages     ChatMessage[]
+
+  @@index([schoolId, status])
+  @@index([studentId, status])
+  @@index([professionalId])
+  @@map("chat_thread")
+}
+
+model ChatMessage {
+  id           String          @id @default(uuid()) @db.Uuid
+  threadId     String          @db.Uuid
+  /// Null for SYSTEM rows (the AI-composed entry note).
+  senderUserId String?         @db.Uuid
+  role         ChatMessageRole
+  content      String
+  /// True when the text originated from a voice transcription.
+  viaVoice     Boolean         @default(false)
+  meta         Json?
+  createdAt    DateTime        @default(now())
+
+  thread     ChatThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  senderUser User?      @relation(fields: [senderUserId], references: [id], onDelete: SetNull)
+
+  @@index([threadId, createdAt])
+  @@map("chat_message")
+}
+
+/// Per-user notification (chat pool events, replies, suspension notices).
+/// `data` carries ids so clients can deep-link (e.g. {threadId}).
+/// Unread badge = rows with readAt null; pushed over Socket.IO in realtime.
+model Notification {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  type      String
+  title     String
+  body      String?
+  data      Json?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@map("notification")
 }

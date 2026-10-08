@@ -38,7 +38,9 @@
     "@nestjs/core": "^12.0.1",
     "@nestjs/mapped-types": "*",
     "@nestjs/platform-fastify": "^12.1.1",
+    "@nestjs/platform-socket.io": "^12.1.2",
     "@nestjs/swagger": "^12.0.2",
+    "@nestjs/websockets": "^12.1.2",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "@thallesp/nestjs-better-auth": "^2.8.0",
@@ -51,6 +53,7 @@
     "pg": "^8.23.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "socket.io": "^4.8.4",
     "zod": "^3.25.76",
     "zod-to-json-schema": "^3.25.2"
   },

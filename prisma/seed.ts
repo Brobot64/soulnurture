@@ -6,7 +6,10 @@ import {
   PrismaClient,
   ResourceCategory,
   ResourceType,
+  UserRole,
 } from '@prisma/client';
+import { hashPassword } from 'better-auth/crypto';
+import { randomBytes } from 'node:crypto';
 import { ACTIVITY_CATALOG } from '../src/ai/activities/activities.config.js';
 
 const connectionString =
@@ -18,6 +21,8 @@ const adapter = new PrismaPg({ connectionString });
 const prisma = new PrismaClient({ adapter });
 
 async function main() {
+  await ensurePlatformAdmin();
+
   const resources = [
     {
       title: 'Navigating Exam Stress Without Cracking',
