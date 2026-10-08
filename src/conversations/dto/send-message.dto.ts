@@ -28,7 +28,8 @@ export class SendMessageDto {
 
   /** Guided-reply marker: the student tapped a quick reply instead of typing
    * free text. The label is sent as `content`; this marker drives the reply
-   * directive and is excluded from the free-text turn budget. */
+   * directive and is excluded from the free-text turn budget — though every
+   * tap still counts toward the hard total turn cap. */
   @ApiPropertyOptional({ enum: QUICK_REPLY_VALUES })
   @IsOptional()
   @IsIn(QUICK_REPLY_VALUES)

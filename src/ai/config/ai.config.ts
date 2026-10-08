@@ -133,19 +133,22 @@ export interface AiConfig {
      */
     persistModelCandidates: boolean;
   };
-  /** Guided check-in replies: quick-reply directives + the free-text turn
-   * budget. Non-secret; exposed via GET /api/v1/ai/config so the guided
-   * behaviour is explainable to professional roles. */
+  /** Guided check-in replies: quick-reply directives + the turn budget.
+   * Non-secret; exposed via GET /api/v1/ai/config so the guided behaviour
+   * is explainable to professional roles. */
   guided: {
     /** Free-text turns allowed before wrap-up when no extension was used. */
     maxBaseTurns: number;
-    /** Free-text turns allowed once the student tapped "Tell more". */
+    /** Free-text turns allowed once the student tapped "Tell more" — and
+     * the hard cap on TOTAL student turns (free text + quick replies):
+     * the chat always wraps by this turn however the student got there. */
     maxExtendedTurns: number;
     /** The quick reply that extends the budget base → extended. */
     extension: QuickReplyValue;
-    /** Per-quick-reply system-prompt directives. */
+    /** Per-quick-reply system-prompt directives (TELL_MORE is skipped on
+     * the final turn — wrap-up outranks it). */
     directives: Record<QuickReplyValue, string>;
-    /** Appended on the final free-text turn of a guided check-in. */
+    /** Appended on the final turn of a guided check-in. */
     wrapUpDirective: string;
     /** REPLACES every guided directive while a support flag is OPEN on the
      * conversation — safeguarding outranks the guided experience. */

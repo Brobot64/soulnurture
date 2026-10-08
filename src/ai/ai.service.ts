@@ -72,7 +72,8 @@ export interface AiOrchestrationInput {
   freeTextTurns?: number;
   /** Free-text turn budget (base or extended). */
   turnBudget?: number;
-  /** True when freeTextTurns reached the budget — wrap-up directive applies. */
+  /** True when freeTextTurns reached the budget OR total turns (free text +
+   * quick replies) hit the maxExtendedTurns cap — wrap-up directive applies. */
   finalTurn?: boolean;
 }
 
@@ -198,7 +199,14 @@ export class AiService {
     if (openFlag) {
       guidedLines.push(this.aiConfig.guided.flagDirective);
     } else {
-      if (input.quickReply) {
+      // On the final turn the TELL_MORE directive is skipped — its "invite
+      // them to share / ask one gentle question" would contradict the
+      // wrap-up. SHOW_IDEA / TALK_TO_SOMEONE still apply: their reply can
+      // deliver the idea or hand-off while closing warmly.
+      if (
+        input.quickReply &&
+        !(input.finalTurn && input.quickReply === this.aiConfig.guided.extension)
+      ) {
         const directive = this.aiConfig.guided.directives[input.quickReply];
         if (directive) guidedLines.push(directive);
       }

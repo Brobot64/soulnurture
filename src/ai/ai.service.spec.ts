@@ -463,6 +463,36 @@ describe('AiService.generateAndApply', () => {
       expect(sent.systemPrompt).toContain('DIRECTIVE_WRAP_UP');
     });
 
+    it('skips the TELL_MORE directive on the final turn — wrap-up wins', async () => {
+      const { service, generateResponse } = await serviceWithSpy();
+      await service.generateAndApply({
+        ...orchestrationInput,
+        quickReply: 'TELL_MORE',
+        freeTextTurns: 0,
+        turnBudget: 5,
+        finalTurn: true,
+      });
+
+      const sent = generateResponse.mock.calls[0][0] as { systemPrompt: string };
+      expect(sent.systemPrompt).not.toContain('DIRECTIVE_TELL_MORE');
+      expect(sent.systemPrompt).toContain('DIRECTIVE_WRAP_UP');
+    });
+
+    it('keeps the SHOW_IDEA directive on a final tap', async () => {
+      const { service, generateResponse } = await serviceWithSpy();
+      await service.generateAndApply({
+        ...orchestrationInput,
+        quickReply: 'SHOW_IDEA',
+        freeTextTurns: 3,
+        turnBudget: 5,
+        finalTurn: true,
+      });
+
+      const sent = generateResponse.mock.calls[0][0] as { systemPrompt: string };
+      expect(sent.systemPrompt).toContain('DIRECTIVE_SHOW_IDEA');
+      expect(sent.systemPrompt).toContain('DIRECTIVE_WRAP_UP');
+    });
+
     it('an OPEN support flag replaces every guided directive', async () => {
       prisma.supportFlag.findFirst.mockResolvedValue({ id: 'flag-open' });
       const { service, generateResponse } = await serviceWithSpy();
