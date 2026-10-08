@@ -1,4 +1,4 @@
-export const REFLECTION_PROMPT_VERSION = 'v2';
+export const REFLECTION_PROMPT_VERSION = 'v3';
 
 export const SYSTEM_PROMPT = `You are Soul Nurture AI.
 You are a supportive wellbeing guide.

@@ -1,4 +1,4 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { MessageRole } from '@prisma/client';
 import { AiService } from '../ai/ai.service.js';
@@ -20,7 +20,7 @@ const HOLDING_MESSAGE =
   'Thank you for sharing that with me — I am still thinking about it and will be right here.';
 
 const aiConfigStub = {
-  promptVersion: 'v2',
+  promptVersion: 'v3',
   chat: { model: 'm', maxOutputTokens: 1000, temperature: 0.2, attemptTimeoutMs: 20_000 },
   transcription: { model: 't' },
   context: { messageLimit: 12, characterLimit: 12_000 },
@@ -31,6 +31,18 @@ const aiConfigStub = {
     holdingMessage: HOLDING_MESSAGE,
   },
   safeguarding: { persistModelCandidates: true },
+  guided: {
+    maxBaseTurns: 3,
+    maxExtendedTurns: 5,
+    extension: 'TELL_MORE',
+    directives: {
+      TELL_MORE: 'DIRECTIVE_TELL_MORE',
+      SHOW_IDEA: 'DIRECTIVE_SHOW_IDEA',
+      TALK_TO_SOMEONE: 'DIRECTIVE_TALK_TO_SOMEONE',
+    },
+    wrapUpDirective: 'DIRECTIVE_WRAP_UP',
+    flagDirective: 'DIRECTIVE_FLAG',
+  },
   language: {
     offerEnabled: true,
     supported: ['en', 'pcm', 'yo', 'ha', 'ig'],
@@ -139,6 +151,7 @@ describe('ConversationsService', () => {
     prisma.conversation.findUnique.mockResolvedValue({
       id: 'conv-1',
       studentId: student.id,
+      status: 'ACTIVE',
       messages: [],
     });
     guardrail.assertMessageAllowed.mockImplementation(() => {
@@ -180,6 +193,7 @@ describe('ConversationsService', () => {
       id: 'conv-1',
       studentId: student.id,
       checkInId: null,
+      status: 'ACTIVE',
       messages: [],
     });
     prisma.conversationMessage.create.mockImplementation(async (args: {
@@ -227,6 +241,7 @@ describe('ConversationsService', () => {
       id: 'conv-1',
       studentId: student.id,
       checkInId: null,
+      status: 'ACTIVE',
       messages: [],
     });
     prisma.conversationMessage.create.mockImplementation(async (args: {
@@ -265,6 +280,7 @@ describe('ConversationsService', () => {
       id: 'conv-1',
       studentId: student.id,
       checkInId: null,
+      status: 'ACTIVE',
       messages: [],
     });
     prisma.conversationMessage.create.mockImplementation(async (args: {
@@ -300,6 +316,7 @@ describe('ConversationsService', () => {
       id: 'conv-1',
       studentId: student.id,
       checkInId: null,
+      status: 'ACTIVE',
       messages: [],
     });
     prisma.conversationMessage.create.mockImplementation(async (args: {
@@ -336,6 +353,7 @@ describe('ConversationsService', () => {
       id: 'conv-1',
       studentId: student.id,
       checkInId: null,
+      status: 'ACTIVE',
       messages: [],
     });
     prisma.conversationMessage.create.mockImplementation(async (args: {
@@ -372,12 +390,143 @@ describe('ConversationsService', () => {
     expect(result.assistantMessage.content).toContain('connect');
   });
 
+  describe('guided replies', () => {
+    function mockActiveConversation(messages: unknown[] = []) {
+      prisma.conversation.findUnique.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        checkInId: null,
+        status: 'ACTIVE',
+        messages,
+      });
+      prisma.conversationMessage.create.mockImplementation(async (args: {
+        data: { role: MessageRole; content: string; quickReply?: string | null };
+      }) => ({
+        id: `msg-${Math.random().toString(16).slice(2)}`,
+        role: args.data.role,
+        content: args.data.content,
+        quickReply: args.data.quickReply ?? null,
+      }));
+      prisma.conversation.update.mockResolvedValue({ id: 'conv-1' });
+      ai.generateAndApply.mockResolvedValue(orchestratedOutcome);
+    }
+
+    it('rejects sends on a closed conversation with 409 before any write', async () => {
+      prisma.conversation.findUnique.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        checkInId: null,
+        status: 'CLOSED',
+        messages: [],
+      });
+
+      await expect(
+        service.sendMessage('user-1', 'conv-1', { content: 'hi' }),
+      ).rejects.toThrow(ConflictException);
+
+      expect(prisma.conversationMessage.create).not.toHaveBeenCalled();
+      expect(guardrail.assertMessageAllowed).not.toHaveBeenCalled();
+      expect(ai.generateAndApply).not.toHaveBeenCalled();
+    });
+
+    it('persists the quickReply marker and grants the TELL_MORE extension', async () => {
+      mockActiveConversation();
+
+      const result = await service.sendMessage('user-1', 'conv-1', {
+        content: 'Tell me more',
+        quickReply: 'TELL_MORE',
+      });
+
+      expect(result.userMessage.quickReply).toBe('TELL_MORE');
+      expect(prisma.conversationMessage.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ quickReply: 'TELL_MORE' }),
+        }),
+      );
+      const sent = ai.generateAndApply.mock.calls[0][0];
+      expect(sent).toEqual(
+        expect.objectContaining({
+          quickReply: 'TELL_MORE',
+          freeTextTurns: 0,
+          turnBudget: 5,
+          finalTurn: false,
+        }),
+      );
+    });
+
+    it('counts free-text turns against the base budget and flags the final turn', async () => {
+      mockActiveConversation([
+        { id: 'm1', role: MessageRole.USER, quickReply: null },
+        { id: 'm2', role: MessageRole.ASSISTANT, quickReply: null },
+        { id: 'm3', role: MessageRole.USER, quickReply: null },
+      ]);
+
+      await service.sendMessage('user-1', 'conv-1', { content: 'third turn' });
+
+      const sent = ai.generateAndApply.mock.calls[0][0];
+      expect(sent).toEqual(
+        expect.objectContaining({
+          quickReply: null,
+          freeTextTurns: 3,
+          turnBudget: 3,
+          finalTurn: true,
+        }),
+      );
+    });
+
+    it('extends the budget to 5 once any TELL_MORE exists in the conversation', async () => {
+      mockActiveConversation([
+        { id: 'm1', role: MessageRole.USER, quickReply: null },
+        { id: 'm2', role: MessageRole.USER, quickReply: 'TELL_MORE' },
+        { id: 'm3', role: MessageRole.USER, quickReply: null },
+        { id: 'm4', role: MessageRole.USER, quickReply: null },
+      ]);
+
+      await service.sendMessage('user-1', 'conv-1', {
+        content: 'fourth free turn',
+      });
+
+      const sent = ai.generateAndApply.mock.calls[0][0];
+      expect(sent).toEqual(
+        expect.objectContaining({
+          freeTextTurns: 4,
+          turnBudget: 5,
+          finalTurn: false,
+        }),
+      );
+    });
+
+    it('quick-reply taps never consume budget or trigger wrap-up', async () => {
+      mockActiveConversation([
+        { id: 'm1', role: MessageRole.USER, quickReply: null },
+        { id: 'm2', role: MessageRole.USER, quickReply: null },
+        { id: 'm3', role: MessageRole.USER, quickReply: null },
+      ]);
+
+      await service.sendMessage('user-1', 'conv-1', {
+        content: 'Show me an idea',
+        quickReply: 'SHOW_IDEA',
+      });
+
+      const sent = ai.generateAndApply.mock.calls[0][0];
+      expect(sent).toEqual(
+        expect.objectContaining({
+          quickReply: 'SHOW_IDEA',
+          freeTextTurns: 3,
+          turnBudget: 3,
+          finalTurn: false,
+        }),
+      );
+    });
+  });
+
   describe('language layer', () => {
     function mockHappyPath(userMessageId: string, assistantMessageId: string) {
       prisma.conversation.findUnique.mockResolvedValue({
         id: 'conv-1',
         studentId: student.id,
         checkInId: null,
+        status: 'ACTIVE',
         messages: [],
       });
       prisma.conversationMessage.create

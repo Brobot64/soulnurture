@@ -36,6 +36,18 @@ const aiConfigStub = {
       limitMessage: 'limit reached',
     },
   },
+  guided: {
+    maxBaseTurns: 3,
+    maxExtendedTurns: 5,
+    extension: 'TELL_MORE',
+    directives: {
+      TELL_MORE: 'DIRECTIVE_TELL_MORE',
+      SHOW_IDEA: 'DIRECTIVE_SHOW_IDEA',
+      TALK_TO_SOMEONE: 'DIRECTIVE_TALK_TO_SOMEONE',
+    },
+    wrapUpDirective: 'DIRECTIVE_WRAP_UP',
+    flagDirective: 'DIRECTIVE_FLAG',
+  },
 } as unknown as AiConfig;
 
 const ctx = {
@@ -396,6 +408,78 @@ describe('AiService.generateAndApply', () => {
     const sent = generateResponse.mock.calls[0][0] as { systemPrompt: string };
     expect(sent.systemPrompt).toContain('REPLY FULLY in Yoruba');
     expect(sent.systemPrompt).toContain('culturally grounded Yoruba');
+  });
+
+  describe('guided directives', () => {
+    function serviceWithSpy() {
+      const generateResponse = vi.fn().mockResolvedValue(validModelResult());
+      return createModule({
+        generateResponse,
+        transcribeAudio: async () => ({ text: 'x' }),
+      }).then((module) => ({
+        service: module.get(AiService),
+        generateResponse,
+      }));
+    }
+
+    it('adds no guided lines for a plain mid-budget turn', async () => {
+      const { service, generateResponse } = await serviceWithSpy();
+      await service.generateAndApply(orchestrationInput);
+
+      const sent = generateResponse.mock.calls[0][0] as { systemPrompt: string };
+      expect(sent.systemPrompt).not.toContain('DIRECTIVE_');
+      expect(sent.systemPrompt).not.toContain('Guided check-in budget');
+    });
+
+    it('appends the quick-reply directive for a guided tap', async () => {
+      const { service, generateResponse } = await serviceWithSpy();
+      await service.generateAndApply({
+        ...orchestrationInput,
+        quickReply: 'SHOW_IDEA',
+        freeTextTurns: 1,
+        turnBudget: 3,
+        finalTurn: false,
+      });
+
+      const sent = generateResponse.mock.calls[0][0] as { systemPrompt: string };
+      expect(sent.systemPrompt).toContain('DIRECTIVE_SHOW_IDEA');
+      expect(sent.systemPrompt).toContain('Guided check-in budget: 1/3');
+      expect(sent.systemPrompt).not.toContain('DIRECTIVE_WRAP_UP');
+    });
+
+    it('appends the budget state line and wrap-up directive on the final turn', async () => {
+      const { service, generateResponse } = await serviceWithSpy();
+      await service.generateAndApply({
+        ...orchestrationInput,
+        quickReply: null,
+        freeTextTurns: 3,
+        turnBudget: 3,
+        finalTurn: true,
+      });
+
+      const sent = generateResponse.mock.calls[0][0] as { systemPrompt: string };
+      expect(sent.systemPrompt).toContain('Guided check-in budget: 3/3');
+      expect(sent.systemPrompt).toContain('this is the final turn');
+      expect(sent.systemPrompt).toContain('DIRECTIVE_WRAP_UP');
+    });
+
+    it('an OPEN support flag replaces every guided directive', async () => {
+      prisma.supportFlag.findFirst.mockResolvedValue({ id: 'flag-open' });
+      const { service, generateResponse } = await serviceWithSpy();
+      await service.generateAndApply({
+        ...orchestrationInput,
+        quickReply: 'SHOW_IDEA',
+        freeTextTurns: 3,
+        turnBudget: 3,
+        finalTurn: true,
+      });
+
+      const sent = generateResponse.mock.calls[0][0] as { systemPrompt: string };
+      expect(sent.systemPrompt).toContain('DIRECTIVE_FLAG');
+      expect(sent.systemPrompt).not.toContain('DIRECTIVE_SHOW_IDEA');
+      expect(sent.systemPrompt).not.toContain('DIRECTIVE_WRAP_UP');
+      expect(sent.systemPrompt).not.toContain('Guided check-in budget');
+    });
   });
 
   describe('understandMessage', () => {
