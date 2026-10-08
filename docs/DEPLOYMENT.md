@@ -552,6 +552,9 @@ ALLOWED_ORIGINS=https://app.example.com
 # and the browser blocks cross-origin sign-up/sign-in before it even starts).
 BETTER_AUTH_TRUSTED_ORIGINS=https://app.example.com
 BETTER_AUTH_CROSS_SITE_COOKIES=true
+# Where emailed verification links land the user after the API consumes the
+# token (optional — defaults to the first concrete trusted origin above)
+WEB_APP_URL=https://app.example.com
 
 # SMTP (verification + password reset emails)
 SMTP_HOST=<smtp-host>
