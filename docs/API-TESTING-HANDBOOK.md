@@ -1718,6 +1718,89 @@ provisioning → admin minting → forced first password, student onboarding
 feeds with kind filters, settings + the reset-password roundtrip, enriched
 registers, and the §10 rows 17–19 fences.
 
+### 14.10 Pilot analytics & aggregate report (`PILOT_ANALYTICS_001`)
+
+Aggregate-first pilot view for the owner — “how is Soul Nurture performing
+across the pilot?”, never at students. Every number rolls up a shared events
+union (check-ins, AI turns, human chat, activities, toolbox saves, support
+requests) over **active** students; spoken AI turns are split out via the new
+`conversation_message.viaVoice` flag.
+
+**Requests** (owner):
+
+```http
+GET /api/v1/admin/pilot
+GET /api/v1/admin/pilot?days=30
+GET /api/v1/admin/pilot?from=2026-09-01&to=2026-09-30
+GET /api/v1/admin/pilot?days=90&schoolId=<schoolId>
+GET /api/v1/admin/pilot/report?from=2026-09-01&to=2026-09-30
+```
+
+**Window** — `days` presets run 1–366 (default **30**, clamped; junk falls
+back) and end at UTC today; a `from`/`to` pair (YYYY-MM-DD, **inclusive**)
+covers custom and pilot-period ranges. The pair must be supplied together, be
+calendar-valid, not invert and not span more than 366 days — violations are
+`400`s before any query runs. Optional `schoolId` (UUID) scopes every block to
+one school; unknown or non-UUID ids are `404`s.
+
+**Expected** `200` envelope; `data`:
+
+- `window` = `{from, to, days}`; `school` = `{id, name, shortCode}` or
+  `null`; `suppression` = `{threshold: 5, note}`.
+- `overview` KPI cards: `studentsOnboarded` (all-time), `newStudents`,
+  `activeStudents`, `checkIns`, `aiInteractions`, `voiceInteractions`
+  (AI + human spoken turns), `resourcesAccessed` (toolbox saves),
+  `supportRequests`, `completedReferrals` (closed chat threads + completed
+  follow-ups); `avgSatisfaction` = `{available: false, reason}` until survey
+  data exists.
+- `engagement`: `{active, dau, wau, mau, new, returning, returnRate,
+  checkInsPerActiveStudent, avgSessionsPerStudent, avgSessionMinutes,
+  textVsVoice: {text, voice}, series}` — DAU is the last window day, WAU/MAU
+  clamp to the window; `returnRate` (%, prior actives seen again) is `null`
+  without a prior baseline; `series` is one zero-filled
+  `{date, activeUsers, checkIns}` row per UTC day.
+- `featureUsage`: exactly seven rows (`check_in`, `ai_chat`, `voice`,
+  `reflection`, `resources`, `human_support`, `profile`) carrying
+  `{uses, students, suppressed}`; `profile` reports `{available: false, note}`
+  (no server-side event yet).
+- `wellbeingThemes`: the eight self-reported themes (`academic_pressure`,
+  `social_peer`, `family`, `loneliness`, `self_confidence`, `overwhelm`,
+  `relationships`, `other`) with `{mentions, students, suppressed}` folded from
+  check-in triggers and summary topics — themes, never diagnoses.
+- `resources`: `mostSaved` (top 8), `byCategory`, `savesSeries`, and
+  `activities` `{started, completed, completionRate}`; the `note` records that
+  views are not instrumented yet.
+- `support`: `requests` `{total, urgent, byStatus}` (all seven statuses
+  zero-filled), `referrals` `{created, claimed, closed, avgClaimHours}`,
+  `followUps` `{completed, open}`, `unresolved` (not COMPLETED/CANCELLED) and
+  a daily `series`.
+- `safeguarding`: `flags` `{total, bySeverity, byStatus}` (zero-filled),
+  `escalations`, `urgentRequests`, `followUpStatus` `{open, resolved}` and
+  `avgResolutionHours`.
+- `outcomes`: `{available: false, reason}` — pre/post deltas appear only once
+  comparable survey baselines exist.
+
+**Suppression** — any breakdown cell backed by **1–4 distinct students**
+answers `{students: null, suppressed: true}`; `0` stays `0` and totals are
+never suppressed.
+
+**CSV export** — `GET /api/v1/admin/pilot/report` with the same query params
+answers a raw `text/csv` attachment (`soul-nurture-pilot-<from>_<to>
+[-<shortCode>].csv`) **bypassing the JSON envelope**: a
+`Section,Metric,Value` table for Window / Pilot Reach / Engagement / Feature
+Usage / Wellbeing Trends / Resources / Support / Safeguarding / Outcomes,
+suppressed cells rendered `suppressed (<5)`, unavailable metrics as
+`not available — …`. Aggregate only — no PII.
+
+**Negatives**: `from` without `to` (or the reverse), inverted dates,
+`2026-02-31`-style dates and > 366-day spans → `400`; unknown or malformed
+`schoolId` → `404`; a school-admin session → `403` (the tree is
+`@Roles('PLATFORM_ADMIN')`).
+
+**Live note** — the voice KPIs only move once clients post spoken turns with
+`viaVoice: true` (transcript in `content`; §13.5 does this for human chat, the
+AI journey client sends it from the pilot build onward).
+
 ---
 
 ## Appendix A — Enum reference
@@ -1736,6 +1819,7 @@ registers, and the §10 rows 17–19 fences.
 | `AiJobKind` | `REPLY`, `SUMMARY`, `VERNACULAR` |
 | `ActivityStepType` (renderer contract) | `breath-pacing`, `timer`, `prompt-list`, `body-scan` |
 | `MoodId` (dashboard render contract) | `GREAT`, `NORMAL`, `SAD`, `ANGRY`, `CONFUSED`, `INDIFFERENT`, `STRANGE`, `DISTRAUGHT` |
+| `PilotTheme` (pilot dashboard contract) | `academic_pressure`, `social_peer`, `family`, `loneliness`, `self_confidence`, `overwhelm`, `relationships`, `other` |
 | `FollowUpStatus` | `PENDING`, `SCHEDULED`, `COMPLETED`, `CANCELLED` |
 | `SchoolStatus` | `ACTIVE`, `SUSPENDED` |
 | `ChatThreadStatus` | `PENDING`, `ACTIVE`, `CLOSED` |
@@ -1789,3 +1873,4 @@ registers, and the §10 rows 17–19 fences.
 | 2026-10-09 | `NATLAS_LLM_014` — the vernacular lane trades the VPS Ollama for the hosted N-ATLaS endpoint: OpenAI chat shape + env-only `NATLAS_LLM_API_KEY` (never in `GET /api/v1/ai/config`), every failure path throws `NatlasUnavailableError` so the n-atlas-local→openai chain is untouched, `NATLAS_LLM_TIMEOUT_MS` (45s default), model default `NCAIR1/N-ATLaS`. |
 | 2026-10-09 | `VERNACULAR_REPLY_015` — per-message language following: lexicon detection replaces franc for yo/ha/ig (franc only classifies long English), and the `n-atlas-translate` reply mode renders the finished English reply into the turn's language within the same request (N-ATLaS → OpenAI render → English fallback; scripted safety copy never rendered); `aiPayload.render`, `NATLAS_RENDER_TIMEOUT_MS`; §5.3 + §9.5 + `.env.example` updated. |
 | 2026-10-09 | `LANG_ID_016` — language from the input itself: when every heuristic is silent the detector asks N-ATLaS to name the turn's language (`IDENTIFY_MIN_CHARS` 8, strict `NATLAS_IDENTIFY_TIMEOUT_MS` 4s, fail-open to the standing preference on cold/unparsable), and the detected language — `en` included — always beats the preference for that turn; §5.3 + §9.5 + `.env.example` updated. |
+| 2026-10-10 | `PILOT_ANALYTICS_001` — owner pilot analytics: aggregate-first payload (reach KPIs, DAU/WAU/MAU + return rate, 7-row feature usage, 8 self-reported wellbeing themes, resources, support, safeguarding, outcomes placeholder) with 1–4-student breakdown suppression, preset/custom window + school scope, and a CSV report export that bypasses the JSON envelope; `conversation_message.viaVoice` flag splits spoken AI turns; §14.10 + Appendix A `PilotTheme` row. |

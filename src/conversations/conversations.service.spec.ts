@@ -532,6 +532,30 @@ describe('ConversationsService', () => {
       );
     });
 
+    it('persists viaVoice on spoken turns and defaults it to false', async () => {
+      mockActiveConversation();
+
+      await service.sendMessage('user-1', 'conv-1', {
+        content: 'spoken transcript',
+        viaVoice: true,
+      });
+      expect(prisma.conversationMessage.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ viaVoice: true }),
+        }),
+      );
+
+      await service.sendMessage('user-1', 'conv-1', { content: 'typed' });
+      expect(prisma.conversationMessage.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            role: MessageRole.USER,
+            viaVoice: false,
+          }),
+        }),
+      );
+    });
+
     it('counts free-text turns against the base budget and flags the final turn', async () => {
       mockActiveConversation([
         { id: 'm1', role: MessageRole.USER, quickReply: null },
