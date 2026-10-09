@@ -34,11 +34,12 @@ export interface UnderstandOutcome {
 
 /**
  * Vernacular understanding lane (translation chain `n-atlas-local,openai`).
- * Local N-ATLaS (Ollama, free) is tried first whenever NATLAS_LLM_BASE_URL
- * is configured; any local failure — not configured, VPS down, invalid
- * JSON — falls back to OpenAI translation on the development/degraded
- * path. Both lanes are metered best-effort. Throws AiGenerationError only
- * when every lane fails, which the worker treats as a retryable job error.
+ * The N-ATLaS endpoint is tried first whenever NATLAS_LLM_BASE_URL is
+ * configured; any N-ATLaS failure — not configured, endpoint unreachable,
+ * invalid JSON — falls back to OpenAI translation on the development/
+ * degraded path. Both lanes are metered best-effort. Throws AiGenerationError
+ * only when every lane fails, which the worker treats as a retryable job
+ * error.
  */
 @Injectable()
 export class NatlasTranslationProvider {

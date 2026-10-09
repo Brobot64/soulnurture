@@ -63,7 +63,7 @@ describe('NatlasTranslationProvider', () => {
     );
   }
 
-  it('returns the local N-ATLaS understanding and meters n-atlas-local', async () => {
+  it('returns the N-ATLaS understanding and meters n-atlas-local', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     completeJson.mockResolvedValue({
@@ -89,7 +89,7 @@ describe('NatlasTranslationProvider', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('falls back to OpenAI when the local model fails and meters with latency', async () => {
+  it('falls back to OpenAI when the N-ATLaS endpoint fails and meters with latency', async () => {
     completeJson.mockRejectedValue(new NatlasUnavailableError('VPS down'));
     let capturedUrl: string | undefined;
     let capturedBody: Record<string, unknown> | undefined;
@@ -136,7 +136,7 @@ describe('NatlasTranslationProvider', () => {
     expect(messages[0].content).toContain('Language: Hausa');
   });
 
-  it('falls back when the local model returns an invalid payload', async () => {
+  it('falls back when the N-ATLaS endpoint returns an invalid payload', async () => {
     completeJson.mockResolvedValue({
       raw: { englishTranslation: '' },
       usage: {},
@@ -156,7 +156,7 @@ describe('NatlasTranslationProvider', () => {
     expect(meter.record).toHaveBeenCalledWith('openai', expect.anything());
   });
 
-  it('skips the local lane entirely when N-ATLaS is not configured', async () => {
+  it('skips the N-ATLaS lane entirely when it is not configured', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => jsonResponse(openAiBody(JSON.stringify(validUnderstanding)))),
@@ -190,7 +190,7 @@ describe('NatlasTranslationProvider', () => {
     expect(meter.record).not.toHaveBeenCalled();
   });
 
-  it('rejects when no OpenAI key is present and the local lane is unavailable', async () => {
+  it('rejects when no OpenAI key is present and the N-ATLaS lane is unavailable', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     const provider = new NatlasTranslationProvider(

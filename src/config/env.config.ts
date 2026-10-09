@@ -181,6 +181,14 @@ class EnvironmentVariables {
 
   @IsOptional()
   @IsString()
+  NATLAS_LLM_API_KEY?: string;
+
+  @IsOptional()
+  @IsNumber()
+  NATLAS_LLM_TIMEOUT_MS?: number;
+
+  @IsOptional()
+  @IsString()
   NATLAS_ASR_BASE_URL?: string;
 
   @IsOptional()

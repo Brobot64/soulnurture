@@ -101,13 +101,20 @@ export interface AiConfig {
      * default; 'n-atlas-translate' is pre-wired for the post-pilot local
      * model and currently behaves as openai-native. */
     vernacularReplyMode: VernacularReplyMode;
-    /** Local N-ATLaS (Ollama) endpoint for the async understanding lane;
-     * null → straight to the OpenAI translation fallback. */
+    /** OpenAI-compatible N-ATLaS chat endpoint for the vernacular lane —
+     * the hosted Hugging Face Inference Endpoint (vLLM) in production, any
+     * OpenAI-shape server in dev; null → straight to the OpenAI fallback.
+     * Auth key NATLAS_LLM_API_KEY is read via ConfigService in
+     * natlas-llm.provider.ts and never stored here (AiConfig is public). */
     natlasBaseUrl: string | null;
     natlasModel: string;
+    /** Per-attempt timeout for the N-ATLaS lane (ms) — generous on purpose:
+     * the hosted endpoint scales to zero and cold starts queue; the worker
+     * retry ladder covers whatever exceeds this. */
+    natlasTimeoutMs: number;
     /** Strict output budget for the understanding contract (small JSON). */
     understandingMaxOutputTokens: number;
-    /** Per-attempt timeout for the understanding lane (ms). */
+    /** Per-attempt timeout for the OpenAI translation fallback (ms). */
     understandingTimeoutMs: number;
   };
   context: {
@@ -288,7 +295,10 @@ export function buildAiConfig(config: ConfigService): AiConfig {
         config.get<string>('AI_VERNACULAR_REPLY_MODE'),
       ),
       natlasBaseUrl: config.get<string>('NATLAS_LLM_BASE_URL')?.trim() || null,
-      natlasModel: config.get<string>('NATLAS_LLM_MODEL') ?? 'n-atlas',
+      natlasModel: config.get<string>('NATLAS_LLM_MODEL') ?? 'NCAIR1/N-ATLaS',
+      natlasTimeoutMs: Number(
+        config.get<string>('NATLAS_LLM_TIMEOUT_MS') ?? 45_000,
+      ),
       understandingMaxOutputTokens: 120,
       understandingTimeoutMs: 15_000,
     },

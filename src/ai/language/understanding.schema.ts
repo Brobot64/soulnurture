@@ -28,7 +28,8 @@ export interface MessageUnderstanding extends UnderstandingResult {
   via: UnderstandingVia;
 }
 
-/** Structured-output override for OpenAI (local Ollama gets `format: json`). */
+/** Structured-output override for OpenAI (the N-ATLaS lane gets
+ * `response_format: json_object`). */
 export const UNDERSTANDING_JSON_SCHEMA = {
   name: 'message_understanding',
   strict: true,
