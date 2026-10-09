@@ -1193,7 +1193,9 @@ every write here; Socket.IO (§13.8) is push-only.
 
 The owner account is created by `prisma/seed.ts` from `PLATFORM_ADMIN_EMAIL` /
 `PLATFORM_ADMIN_NAME` / `PLATFORM_ADMIN_PASSWORD` (env; the bootstrap is
-skipped entirely when unset). Sign in normally
+skipped entirely when unset). `EMAIL` and `NAME` accept comma-separated
+lists — matched by position, an entry without a name falls back to a generic
+one — so a single seed run enrolls several owners. Sign in normally
 (`POST /api/auth/sign-in/email`, own cookie jar) and assert
 `role === "PLATFORM_ADMIN"`.
 
@@ -1761,3 +1763,4 @@ registers, and the §10 rows 17–19 fences.
 | 2026-10-09 | `ADMIN_API_010` — dashboard admin APIs: school settings read/update (§14.4), owner-only school-admin provisioning (§14.5), reset-to-default password (§14.6), enriched `GET /schools` gauges + `GET /admin/users` filters, chat-thread register (§14.7, §14.3). |
 | 2026-10-09 | `SIGNUP_LOCK_011` — public sign-up closed with a uniform 400 `EMAIL_PASSWORD_SIGN_UP_DISABLED` (§14.8). |
 | 2026-10-09 | `DASH_DOCS_012` — Chapter 14 (this lane) + §10 rows 17–19 + Appendix B placeholder note; README dashboard routes; e2e `test/e2e-dashboards.mjs` (`npm run test:e2e:dashboards`). |
+| 2026-10-09 | `PLATFORM_ADMIN_013` — seed bootstrap accepts comma-separated `PLATFORM_ADMIN_EMAIL`/`PLATFORM_ADMIN_NAME` lists (positional names, generic fallback) so one seed run enrolls several owners; §13.1 + `.env.example` updated. |

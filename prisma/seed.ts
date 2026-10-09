@@ -20,23 +20,44 @@ const adapter = new PrismaPg({ connectionString });
 const prisma = new PrismaClient({ adapter });
 
 /**
- * Bootstrap-only owner account: creates the PLATFORM_ADMIN from env
- * credentials when missing. The password is applied on first creation and
- * then never touched again, so a seed re-run can not clobber a password the
- * owner changed in-app. Missing env vars skip the step, keeping the seed
- * safe for environments that do not run the platform console.
+ * Bootstrap-only owner accounts: creates the PLATFORM_ADMIN(s) from env
+ * credentials when missing. PLATFORM_ADMIN_EMAIL and PLATFORM_ADMIN_NAME
+ * accept comma-separated lists, matched by position (an entry without a
+ * name falls back to a generic one). Each password is applied on first
+ * creation and then never touched again, so a seed re-run can not clobber a
+ * password the owner changed in-app. Missing env vars skip the step, keeping
+ * the seed safe for environments that do not run the platform console.
  */
 async function ensurePlatformAdmin() {
-  const email = process.env.PLATFORM_ADMIN_EMAIL?.trim();
+  const emails = (process.env.PLATFORM_ADMIN_EMAIL ?? '')
+    .split(',')
+    .map((email) => email.trim())
+    .filter(Boolean);
   const password = process.env.PLATFORM_ADMIN_PASSWORD;
-  if (!email || !password) {
+  if (emails.length === 0 || !password) {
     console.log(
       'Platform admin bootstrap skipped (PLATFORM_ADMIN_EMAIL/PASSWORD unset).',
     );
     return;
   }
-  const name = process.env.PLATFORM_ADMIN_NAME?.trim() || 'Soul Nurture Admin';
+  const names = (process.env.PLATFORM_ADMIN_NAME ?? '')
+    .split(',')
+    .map((name) => name.trim());
 
+  for (const [index, email] of emails.entries()) {
+    await ensurePlatformAdminAccount(
+      email,
+      names[index] || 'Soul Nurture Admin',
+      password,
+    );
+  }
+}
+
+async function ensurePlatformAdminAccount(
+  email: string,
+  name: string,
+  password: string,
+) {
   const existing = await prisma.user.findFirst({
     where: { email: { equals: email, mode: 'insensitive' } },
     select: { id: true, role: true, emailVerified: true },
