@@ -209,6 +209,19 @@ describe('LanguageDetectorService', () => {
       });
     });
 
+    it('parses a language name wearing its own diacritics', async () => {
+      natlasLlm.completeLabel.mockResolvedValue({
+        text: 'Èdè Yorùbá',
+        usage: {},
+      });
+
+      expect(await detector.detect('Mo ri e ni oko')).toEqual({
+        lang: 'yo',
+        confidence: 'medium',
+        method: 'model',
+      });
+    });
+
     it("an 'unknown' answer keeps the fallback verdict", async () => {
       natlasLlm.completeLabel.mockResolvedValue({
         text: 'unknown',

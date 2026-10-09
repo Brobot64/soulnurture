@@ -50,7 +50,13 @@ const LANGUAGE_NAME_ALIASES: ReadonlyArray<[string, SupportedLanguage]> = [
 ];
 
 function parseIdentifiedLanguage(raw: string): SupportedLanguage | null {
-  const lowered = raw.trim().toLowerCase();
+  // NFD-strip combining marks first: N-ATLaS may name the language with its
+  // own diacritics ("Yorùbá", "Èdè Yorùbá") — the ASCII codes are unaffected.
+  const lowered = raw
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
   const code = lowered.match(IDENTIFIED_CODE_PATTERN);
   if (code) return code[1] as SupportedLanguage;
   for (const [name, lang] of LANGUAGE_NAME_ALIASES) {
