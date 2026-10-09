@@ -125,7 +125,8 @@ export interface AiConfig {
     understandingMaxOutputTokens: number;
     /** Output budget for a rendered reply (the reply in another language). */
     renderMaxOutputTokens: number;
-    /** Output budget for the language-ID label (one code word). */
+    /** Output budget for the language-ID reply (language header line plus a
+     * short translation; the header prints first, so truncation is safe). */
     identifyMaxOutputTokens: number;
     /** Per-attempt timeout for the OpenAI translation fallback (ms). */
     understandingTimeoutMs: number;
@@ -320,7 +321,7 @@ export function buildAiConfig(config: ConfigService): AiConfig {
       ),
       understandingMaxOutputTokens: 120,
       renderMaxOutputTokens: 400,
-      identifyMaxOutputTokens: 8,
+      identifyMaxOutputTokens: 64,
       understandingTimeoutMs: 15_000,
     },
     context: {

@@ -67,7 +67,7 @@ describe('buildAiConfig language block', () => {
     const config = buildAiConfig(new ConfigService({}));
 
     expect(config.language.natlasIdentifyTimeoutMs).toBe(4_000);
-    expect(config.language.identifyMaxOutputTokens).toBe(8);
+    expect(config.language.identifyMaxOutputTokens).toBe(64);
   });
 
   it('honours NATLAS_IDENTIFY_TIMEOUT_MS', () => {

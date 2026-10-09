@@ -108,11 +108,13 @@ export class NatlasLlmProvider {
     return { text, usage };
   }
 
-  /** One-word label completion for the detector's model language-ID stage
-   * (LANG_ID_016). No response_format — the caller's parse is tolerant of
-   * stray punctuation either way. Strictest timeout of the three lanes:
-   * this runs inside sendMessage while the student waits on their turn, so
-   * a cold endpoint must give up fast and let the preference fallback win. */
+  /** Translation-header completion for the detector's model language-ID
+   * stage (LANG_ID_016; prompt v2 — the model translates the message and
+   * prints a "Language: …" line the caller parses). No response_format:
+   * guided JSON decoding degraded quality on the live endpoint. Strictest
+   * timeout of the three lanes: this runs inside sendMessage while the
+   * student waits on their turn, so a cold endpoint must give up fast and
+   * let the preference fallback win. */
   async completeLabel(
     systemPrompt: string,
     userContent: string,

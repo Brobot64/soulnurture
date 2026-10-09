@@ -14,7 +14,7 @@ const aiConfig = {
     natlasIdentifyTimeoutMs: 4_000,
     understandingMaxOutputTokens: 120,
     renderMaxOutputTokens: 400,
-    identifyMaxOutputTokens: 8,
+    identifyMaxOutputTokens: 64,
     understandingTimeoutMs: 15_000,
   },
 } as unknown as AiConfig;
@@ -210,16 +210,16 @@ describe('NatlasLlmProvider', () => {
   });
 
   describe('completeLabel (language ID)', () => {
-    it('POSTs the one-word shape with temperature 0 and the identify budget', async () => {
+    it('POSTs the translation-header shape with temperature 0 and the identify budget', async () => {
       let capturedInit: RequestInit | undefined;
       vi.stubGlobal(
         'fetch',
         vi.fn(async (_url: string, init: RequestInit) => {
           capturedInit = init;
           return jsonResponse(
-            chatBody('ha', {
+            chatBody('Language: Hausa\nMeaning: I am happy.', {
               prompt_tokens: 9,
-              completion_tokens: 1,
+              completion_tokens: 12,
             }),
           );
         }),
@@ -232,15 +232,15 @@ describe('NatlasLlmProvider', () => {
         model: 'NCAIR1/N-ATLaS',
         stream: false,
         temperature: 0,
-        max_tokens: 8,
+        max_tokens: 64,
         messages: [
           { role: 'system', content: 'SYSTEM' },
           { role: 'user', content: 'USER' },
         ],
       });
       expect(outcome).toEqual({
-        text: 'ha',
-        usage: { inputTokens: 9, outputTokens: 1 },
+        text: 'Language: Hausa\nMeaning: I am happy.',
+        usage: { inputTokens: 9, outputTokens: 12 },
       });
     });
 

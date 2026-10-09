@@ -37,9 +37,12 @@ export interface LanguageDetection {
   method: LanguageDetectionMethod;
 }
 
-/** The model answers one code word ('unknown' when unsure); the parse also
- * tolerates punctuation and spelled-out language names, so a stray sentence
- * from the model still lands on a language instead of being discarded. */
+/** The model replies with a "Language: …" header above a "Meaning: …" line
+ * (see identify.prompt.ts v2); the parse is tolerant of stray punctuation,
+ * codes and spelled-out names. When the header is present it is the ONLY
+ * thing parsed — the English meaning text may legitimately contain something
+ * that looks like a code ("Yo, I am happy…"). */
+const LANGUAGE_LINE_PATTERN = /language\s*:\s*([^\n]+)/i;
 const IDENTIFIED_CODE_PATTERN = /\b(en|pcm|yo|ha|ig)\b/;
 const LANGUAGE_NAME_ALIASES: ReadonlyArray<[string, SupportedLanguage]> = [
   ['english', 'en'],
@@ -49,10 +52,10 @@ const LANGUAGE_NAME_ALIASES: ReadonlyArray<[string, SupportedLanguage]> = [
   ['igbo', 'ig'],
 ];
 
-function parseIdentifiedLanguage(raw: string): SupportedLanguage | null {
+function parseLanguageValue(candidate: string): SupportedLanguage | null {
   // NFD-strip combining marks first: N-ATLaS may name the language with its
   // own diacritics ("Yorùbá", "Èdè Yorùbá") — the ASCII codes are unaffected.
-  const lowered = raw
+  const lowered = candidate
     .trim()
     .toLowerCase()
     .normalize('NFD')
@@ -63,6 +66,15 @@ function parseIdentifiedLanguage(raw: string): SupportedLanguage | null {
     if (lowered.includes(name)) return lang;
   }
   return null;
+}
+
+function parseIdentifiedLanguage(raw: string): SupportedLanguage | null {
+  const header = raw.match(LANGUAGE_LINE_PATTERN);
+  // 'Other'/'French' on the header parses to null — an explicit non-answer
+  // is honoured (fallback keeps the preference), never back-filled from the
+  // meaning line.
+  if (header) return parseLanguageValue(header[1]);
+  return parseLanguageValue(raw);
 }
 
 /**
@@ -87,7 +99,8 @@ function parseIdentifiedLanguage(raw: string): SupportedLanguage | null {
  *      scoring; franc is unusable for these (see language.config.ts).
  *   4. franc       — long English text only; its yo/ha/ig/pcm verdicts are
  *      discarded outright.
- *   5. model       — N-ATLaS classifies the message (short texts skip).
+ *   5. model       — N-ATLaS translates the message and its language header
+ *      is read (short texts skip; see identify.prompt.ts).
  *   6. fallback    — lang null → callers keep the current preference.
  */
 @Injectable()

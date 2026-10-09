@@ -148,7 +148,7 @@ describe('LanguageDetectorService', () => {
     it('asks N-ATLaS when every heuristic is silent — Hausa without diacritics', async () => {
       const text = 'Ina jin dadi amma ba zan iya sanya jin dadi ba';
       natlasLlm.completeLabel.mockResolvedValue({
-        text: 'ha',
+        text: 'Language: Hausa\nMeaning: I am happy but I cannot hide my happiness.',
         usage: {},
       });
 
@@ -158,9 +158,31 @@ describe('LanguageDetectorService', () => {
         method: 'model',
       });
       expect(natlasLlm.completeLabel).toHaveBeenCalledWith(
-        expect.stringContaining('exactly one code word'),
+        expect.stringContaining('Language: <the language'),
         text,
       );
+    });
+
+    it('reads the language header, never the meaning line’s stray codes', async () => {
+      natlasLlm.completeLabel.mockResolvedValue({
+        text: 'Language: Hausa\nMeaning: Yo, I am happy but I cannot hide my happiness. Ha!',
+        usage: {},
+      });
+
+      expect(
+        await detector.detect('Ina jin dadi amma ba zan iya sanya jin dadi ba'),
+      ).toEqual({ lang: 'ha', confidence: 'medium', method: 'model' });
+    });
+
+    it("an 'Other' header is an explicit non-answer — kept as fallback", async () => {
+      natlasLlm.completeLabel.mockResolvedValue({
+        text: 'Language: French\nMeaning: I am happy.',
+        usage: {},
+      });
+
+      expect(
+        await detector.detect('Ina jin dadi amma ba zan iya sanya jin dadi ba'),
+      ).toEqual({ lang: null, confidence: 'low', method: 'fallback' });
     });
 
     it('detects Igbo typed without diacritics via the model', async () => {
