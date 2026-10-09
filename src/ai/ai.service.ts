@@ -27,6 +27,14 @@ import {
   SUMMARY_SYSTEM_PROMPT,
   SUMMARY_PROMPT_VERSION,
 } from './memory/summarize.prompt.js';
+import {
+  HANDOFF_ENTRY_JSON_SCHEMA,
+  validateHandoffEntry,
+} from './chat/handoff-entry.schema.js';
+import {
+  HANDOFF_ENTRY_SYSTEM_PROMPT,
+  HANDOFF_ENTRY_PROMPT_VERSION,
+} from './chat/handoff.prompt.js';
 import { AuditService } from '../audit/audit.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { QuickReplyValue } from '../conversations/dto/send-message.dto.js';
@@ -93,6 +101,16 @@ export interface SummarizeConversationOutcome {
   summaryId: string;
   notes: string[];
   embedded: boolean;
+}
+
+export interface ComposeHandoffEntryInput {
+  firstName: string;
+  classLabel: string | null;
+  feelingLabel: string | null;
+  intensity: string | null;
+  triggers: string[];
+  /** The student's optional note attached to the chat request. */
+  note: string | null;
 }
 
 export interface UnderstandMessageInput {
@@ -401,6 +419,51 @@ export class AiService {
     );
 
     return { summaryId: row.id, notes, embedded };
+  }
+
+  /**
+   * Chat hand-off composer (Phase 6). Produces the professional-facing entry
+   * note for a human-chat request: who the student is, how their latest
+   * check-in read, and the gist of their note — never verbatim sensitive or
+   * crisis wording. Output passes the same low-sensitivity summary guard as
+   * session summaries; when the guard leaves nothing, this throws so the
+   * caller falls back to deterministic copy (thread creation must never
+   * depend on AI being available).
+   */
+  async composeHandoffEntry(
+    input: ComposeHandoffEntryInput,
+  ): Promise<string> {
+    const contextLines = [
+      `Student first name: ${input.firstName}`,
+      input.classLabel ? `Class: ${input.classLabel}` : null,
+      input.feelingLabel
+        ? `Latest check-in: feeling ${input.feelingLabel}, intensity ${input.intensity ?? 'unspecified'}`
+        : 'No emotional check-in recorded.',
+      input.triggers.length > 0
+        ? `Topics they mentioned: ${input.triggers.join(', ')}`
+        : null,
+      input.note ? `Student's note: ${input.note}` : null,
+    ].filter((line): line is string => line !== null);
+
+    const systemPrompt = [
+      HANDOFF_ENTRY_SYSTEM_PROMPT,
+      `Prompt version: ${HANDOFF_ENTRY_PROMPT_VERSION}`,
+    ].join('\n\n');
+
+    const raw: unknown = await this.provider.generateResponse({
+      systemPrompt,
+      messages: [{ role: 'user', content: contextLines.join('\n') }],
+      jsonSchema: HANDOFF_ENTRY_JSON_SCHEMA,
+    });
+
+    const parsed = validateHandoffEntry(raw);
+    const filtered = filterSummaryText(parsed.message);
+    if (!filtered.text) {
+      throw new AiGenerationError(
+        'Summary guard dropped every handoff sentence',
+      );
+    }
+    return filtered.text;
   }
 
   /**

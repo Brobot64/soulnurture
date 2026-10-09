@@ -11,6 +11,7 @@ import { AuthModule } from './auth/auth.module.js';
 import { APP_GUARD } from '@nestjs/core';
 import { RolesGuard } from './common/guards/roles.guard.js';
 import { TenantGuard } from './common/guards/tenant.guard.js';
+import { ChatModule } from './chat/chat.module.js';
 import { CheckInsModule } from './check-ins/check-ins.module.js';
 import { ConsentModule } from './consent/consent.module.js';
 import { ConversationsModule } from './conversations/conversations.module.js';
@@ -77,6 +78,7 @@ import { UsersModule } from './users/users.module.js';
     ConsentModule,
     CheckInsModule,
     ConversationsModule,
+    ChatModule,
     AiModule,
     ResourcesModule,
     ActivitiesModule,

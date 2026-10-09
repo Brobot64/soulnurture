@@ -97,6 +97,11 @@ class EnvironmentVariables {
   @IsNumber()
   AI_RATE_LIMIT_PER_MINUTE?: number;
 
+  /** Per-user cap for chat message sends; defaults to 30/min when unset. */
+  @IsOptional()
+  @IsNumber()
+  CHAT_RATE_LIMIT_PER_MINUTE?: number;
+
   @IsOptional()
   @IsString()
   OPENAI_API_KEY?: string;
