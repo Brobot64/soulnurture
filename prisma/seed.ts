@@ -9,7 +9,6 @@ import {
   UserRole,
 } from '@prisma/client';
 import { hashPassword } from 'better-auth/crypto';
-import { randomBytes } from 'node:crypto';
 import { ACTIVITY_CATALOG } from '../src/ai/activities/activities.config.js';
 
 const connectionString =
@@ -19,6 +18,74 @@ const connectionString =
 
 const adapter = new PrismaPg({ connectionString });
 const prisma = new PrismaClient({ adapter });
+
+/**
+ * Bootstrap-only owner account: creates the PLATFORM_ADMIN from env
+ * credentials when missing. The password is applied on first creation and
+ * then never touched again, so a seed re-run can not clobber a password the
+ * owner changed in-app. Missing env vars skip the step, keeping the seed
+ * safe for environments that do not run the platform console.
+ */
+async function ensurePlatformAdmin() {
+  const email = process.env.PLATFORM_ADMIN_EMAIL?.trim();
+  const password = process.env.PLATFORM_ADMIN_PASSWORD;
+  if (!email || !password) {
+    console.log(
+      'Platform admin bootstrap skipped (PLATFORM_ADMIN_EMAIL/PASSWORD unset).',
+    );
+    return;
+  }
+  const name = process.env.PLATFORM_ADMIN_NAME?.trim() || 'Soul Nurture Admin';
+
+  const existing = await prisma.user.findFirst({
+    where: { email: { equals: email, mode: 'insensitive' } },
+    select: { id: true, role: true, emailVerified: true },
+  });
+
+  let userId: string;
+  if (existing) {
+    userId = existing.id;
+    if (
+      existing.role !== UserRole.PLATFORM_ADMIN ||
+      !existing.emailVerified
+    ) {
+      await prisma.user.update({
+        where: { id: userId },
+        data: { role: UserRole.PLATFORM_ADMIN, emailVerified: true },
+      });
+    }
+  } else {
+    const created = await prisma.user.create({
+      data: {
+        name,
+        email,
+        role: UserRole.PLATFORM_ADMIN,
+        emailVerified: true,
+      },
+      select: { id: true },
+    });
+    userId = created.id;
+  }
+
+  // Better Auth credential model: sign-in looks the account up by
+  // providerId='credential' and accountId=<user id> (see UsersService).
+  const credential = await prisma.account.findFirst({
+    where: { userId, providerId: 'credential' },
+    select: { id: true },
+  });
+  if (!credential) {
+    await prisma.account.create({
+      data: {
+        userId,
+        providerId: 'credential',
+        accountId: userId,
+        password: await hashPassword(password),
+      },
+    });
+  }
+
+  console.log(`Platform admin ready: ${email}`);
+}
 
 async function main() {
   await ensurePlatformAdmin();

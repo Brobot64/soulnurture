@@ -102,6 +102,19 @@ class EnvironmentVariables {
   @IsNumber()
   CHAT_RATE_LIMIT_PER_MINUTE?: number;
 
+  /** Seed-only: bootstraps the PLATFORM_ADMIN owner account (prisma/seed.ts). */
+  @IsOptional()
+  @IsString()
+  PLATFORM_ADMIN_EMAIL?: string;
+
+  @IsOptional()
+  @IsString()
+  PLATFORM_ADMIN_NAME?: string;
+
+  @IsOptional()
+  @IsString()
+  PLATFORM_ADMIN_PASSWORD?: string;
+
   @IsOptional()
   @IsString()
   OPENAI_API_KEY?: string;
