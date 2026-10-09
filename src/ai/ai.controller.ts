@@ -25,6 +25,7 @@ import {
   CANONICAL_SEVERITIES,
   CANONICAL_TOPICS,
   INTENTS,
+  SAFETY_COPY_REVIEW_STATUS,
 } from './intents/intents.config.js';
 import {
   VERNACULAR_KEYWORDS,
@@ -60,7 +61,7 @@ export class AiController {
   @ApiOperation({
     summary: 'Explain current AI configuration and safeguarding intents',
     description:
-      'Non-secret explanation surface for professionals and the clinical reviewer: chat/transcription/embedding models, session-summary memory settings (idle close, recall windows), context bounds, async pipeline settings, the guardrail configuration (input/output/rate), the language layer (supported languages, reply mode, detection-driven offer), every registered intent with its detection signals and actions, and the vernacular keyword packs with their clinical-review status. Secrets (API keys) are never included.',
+      'Non-secret explanation surface for professionals and the clinical reviewer: chat/transcription/embedding models, session-summary memory settings (idle close, recall windows), context bounds, async pipeline settings, the guardrail configuration (input/output/rate), the language layer (supported languages, reply mode, detection-driven offer), every registered intent with its detection signals and actions, and the vernacular keyword packs with their clinical-review status plus the native-language safety-copy review status. Secrets (API keys) are never included.',
   })
   @ApiEnvelopeOk(Object)
   config() {
@@ -91,6 +92,7 @@ export class AiController {
       })),
       vernacularKeywords: VERNACULAR_KEYWORDS,
       vernacularReviewStatus: VERNACULAR_KEYWORD_REVIEW_STATUS,
+      safetyCopyReviewStatus: SAFETY_COPY_REVIEW_STATUS,
       canonicalCategories: CANONICAL_CATEGORIES,
       canonicalSeverities: CANONICAL_SEVERITIES,
       canonicalTopics: CANONICAL_TOPICS,

@@ -1,5 +1,8 @@
 import { SupportFlagSeverity } from '@prisma/client';
-import { vernacularKeywordsFor } from './vernacular-keywords.js';
+import {
+  vernacularKeywordsFor,
+  type VernacularLanguageCode,
+} from './vernacular-keywords.js';
 
 /**
  * ---------------------------------------------------------------------------
@@ -25,6 +28,10 @@ import { vernacularKeywordsFor } from './vernacular-keywords.js';
  *
  * Server keywords include the vernacular starter packs (Yoruba/Hausa/Igbo/
  * Nigerian Pidgin) from vernacular-keywords.ts — PENDING_CLINICAL_REVIEW.
+ * TIER_3 SAFETY_MESSAGE actions carry native-language drafts too
+ * (`messages`, VERNACULAR_SAFETY_017) — PENDING_NATIVE_REVIEW; the executor
+ * picks the copy for the turn's reply language and falls back to the
+ * approved English wording when a language is missing.
  *
  * The flag rows produced by SUPPORT_FLAG carry `description + reason` so
  * professionals see why each student was referred (report requirement:
@@ -40,10 +47,22 @@ export type IntentActionType =
   | 'RECOMMEND_RESOURCE'
   | 'RECOMMEND_ACTIVITY';
 
+/**
+ * Native-language crisis copy, keyed by language code. The SAFETY_MESSAGE
+ * executor picks the copy for the turn's reply language; when a language is
+ * missing the approved English wording ships instead (never a render — crisis
+ * copy is used verbatim). REVIEW STATUS: PENDING_NATIVE_REVIEW — same bar as
+ * the vernacular keyword packs; the clinical reviewer must sign off (or
+ * amend) every translation before they are treated as approved copy.
+ */
+export type SafetyMessageCopies = Partial<Record<VernacularLanguageCode, string>>;
+
+export const SAFETY_COPY_REVIEW_STATUS = 'PENDING_NATIVE_REVIEW';
+
 export type IntentAction =
   | { type: 'SUPPORT_FLAG' }
   | { type: 'HUMAN_SUPPORT_PROMPT'; reason: string }
-  | { type: 'SAFETY_MESSAGE'; message: string }
+  | { type: 'SAFETY_MESSAGE'; message: string; messages?: SafetyMessageCopies }
   | { type: 'GROUNDING'; exerciseLabel: string }
   | { type: 'RECOMMEND_RESOURCE'; category?: string }
   | { type: 'RECOMMEND_ACTIVITY'; activitySlugs: string[] };
@@ -57,7 +76,8 @@ export interface IntentDefinition {
   description: string;
   severity: SupportFlagSeverity;
   serverSignals: {
-    /** Lowercase substrings checked against every user message. */
+    /** Lowercase substrings checked against every user message — both sides
+     * are diacritic-folded first (see foldDiacritics). */
     keywords: string[];
     /** Canonical AI-suggested categories that confirm this intent. */
     aiCategories: string[];
@@ -142,6 +162,13 @@ export const INTENTS: IntentDefinition[] = [
         type: 'SAFETY_MESSAGE',
         message:
           "I'm really glad you told me this, and I want you to know you matter. Talking to a person who can truly help you right now is important, so I'm connecting you with someone today.",
+        // PENDING_NATIVE_REVIEW — drafts mirroring the approved English copy.
+        messages: {
+          yo: 'Inú mi dùn gan-an pé o sọ fún mi, mo sì fẹ́ kí o mọ̀ pé o ṣe pàtàkì. Bíbá ẹnìkan tí yóò ràn ọ́ lọ́wọ́ sọ̀rọ̀ báyìí ṣe pàtàkì, nítorí náà mo ń gbé ọ sí ọ̀dọ̀ ẹnìkan lónìí.',
+          ha: 'Na gode sosai da ka gaya mini wannan, kuma ina so ka sani cewa kana da muhimmanci. Yana da muhimmanci ka yi magana da wanda zai iya taimaka maka da gaske yanzu, saboda haka ina haɗa ka da wani a yau.',
+          ig: 'Obi dị m ụtọ nke ukwuu na ị gwara m nke a, ma m chọrọ ka ị mara na ị dị mkpa. Ọ dị mkpa ka ị gwa onye ga-enyere gị aka n’ezie ugbu a, ya mere m na-ejikọ gị na mmadụ taa.',
+          pcm: 'I really happy say you tell me this, and I want you know say you matter well well. E important make you talk to person wey go really help you now, so I dey connect you with somebody today.',
+        },
       },
       {
         type: 'HUMAN_SUPPORT_PROMPT',
@@ -178,6 +205,13 @@ export const INTENTS: IntentDefinition[] = [
         type: 'SAFETY_MESSAGE',
         message:
           "Thank you for being honest with me — that takes courage. Because of what you shared, I'm bringing in someone who can support you properly, and you can also reach out to a person at any time.",
+        // PENDING_NATIVE_REVIEW — drafts mirroring the approved English copy.
+        messages: {
+          yo: 'Ó ṣeun fún sísọ òtítọ́ fún mi — ìgboyà ni. Nítorí ohun tí o sọ, mo ń mú ẹnìkan wá tí yóò tọ́jú rẹ dáadáa, o sì lè kan ẹnìkan nígbàkigbà.',
+          ha: 'Na gode da ka faɗi gaskiya gare ni — wannan yana buƙatar ƙarfin hali. Saboda abin da ka faɗa, ina kawo wanda zai iya tallafa maka da kyau, kuma za ka iya tuntuɓar wani a kowane lokaci.',
+          ig: 'Daalụ maka ịgwa m eziokwu — nke ahụ chọrọ obi ike. N’ihi ihe ị gwara m, m na-akpọta onye ga-enyere gị aka nke ọma, ị pụkwara ịkpọtụrụ mmadụ n’oge ọ bụla.',
+          pcm: 'Thank you for tell me true true — e take courage. Because of wetin you share, I dey bring person wey go support you well, and you fit still reach out to person anytime.',
+        },
       },
       {
         type: 'HUMAN_SUPPORT_PROMPT',

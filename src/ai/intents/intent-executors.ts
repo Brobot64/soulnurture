@@ -4,6 +4,8 @@ import type { PrismaService } from '../../prisma/prisma.service.js';
 import type { AuditService } from '../../audit/audit.service.js';
 import type { AiGenerationResult } from '../providers/ai-provider.interface.js';
 import type { AiContext } from '../context/ai-context.service.js';
+import type { SupportedLanguage } from '../language/language.config.js';
+import type { VernacularLanguageCode } from './vernacular-keywords.js';
 import type { IntentAction } from './intents.config.js';
 import type { IntentVerdict } from './intent-engine.service.js';
 
@@ -32,6 +34,10 @@ export interface IntentApplyContext {
   conversationId: string;
   userContent: string;
   relevantResources: AiContext['relevantResources'];
+  /** Reply language for this turn (detected from the message, never
+   * client-supplied). The SAFETY_MESSAGE executor ships the reviewed
+   * vernacular copy when one exists for this language. */
+  replyLanguage?: SupportedLanguage | null;
   /** Overrides the derived flag source — the vernacular second pass flags on
    * translated text (SERVER_KEYWORDS match) but must stay AI_CANDIDATE. */
   flagSourceOverride?: 'SERVER_POLICY' | 'AI_CANDIDATE';
@@ -121,8 +127,24 @@ const SAFETY_MESSAGE_EXECUTOR: IntentExecutor = {
   type: 'SAFETY_MESSAGE',
   async execute(action, _verdict, ctx, notes) {
     if (action.type !== 'SAFETY_MESSAGE') return;
-    ctx.result.message = action.message;
-    notes.push('Scripted safety message applied (server-side, model wording not trusted for acute risk).');
+    const language: VernacularLanguageCode | null =
+      ctx.replyLanguage && ctx.replyLanguage !== 'en' ? ctx.replyLanguage : null;
+    const localized = language ? action.messages?.[language] : undefined;
+    ctx.result.message = localized ?? action.message;
+    if (localized) {
+      notes.push(
+        `Scripted safety message applied from the reviewed ${language} copy (server-side; never model wording).`,
+      );
+    } else {
+      notes.push(
+        'Scripted safety message applied (server-side, model wording not trusted for acute risk).',
+      );
+      if (language) {
+        notes.push(
+          `No reviewed ${language} safety copy yet; the approved English wording shipped for this reply.`,
+        );
+      }
+    }
   },
 };
 

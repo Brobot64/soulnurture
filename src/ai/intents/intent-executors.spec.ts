@@ -117,6 +117,59 @@ describe('applyIntentVerdict', () => {
     expect(ctx.result.message).toContain('You matter');
   });
 
+  it("picks the reviewed vernacular safety copy for the turn's reply language", async () => {
+    const ctx = context(prisma, auditService, { replyLanguage: 'yo' });
+    const notes = await applyIntentVerdict(
+      verdict({
+        actions: [
+          {
+            type: 'SAFETY_MESSAGE',
+            message: 'You matter.',
+            messages: { yo: 'O ṣe pàtàkì gan-an.' },
+          },
+        ],
+      }),
+      ctx,
+    );
+    expect(ctx.result.message).toBe('O ṣe pàtàkì gan-an.');
+    expect(notes.join(' ')).toContain('reviewed yo copy');
+  });
+
+  it('keeps the approved English copy on an English turn even when vernacular copies exist', async () => {
+    const ctx = context(prisma, auditService, { replyLanguage: 'en' });
+    await applyIntentVerdict(
+      verdict({
+        actions: [
+          {
+            type: 'SAFETY_MESSAGE',
+            message: 'You matter.',
+            messages: { yo: 'O ṣe pàtàkì gan-an.' },
+          },
+        ],
+      }),
+      ctx,
+    );
+    expect(ctx.result.message).toBe('You matter.');
+  });
+
+  it('falls back to the English copy and notes the gap when the language has no reviewed copy', async () => {
+    const ctx = context(prisma, auditService, { replyLanguage: 'ha' });
+    const notes = await applyIntentVerdict(
+      verdict({
+        actions: [
+          {
+            type: 'SAFETY_MESSAGE',
+            message: 'You matter.',
+            messages: { yo: 'O ṣe pàtàkì gan-an.' },
+          },
+        ],
+      }),
+      ctx,
+    );
+    expect(ctx.result.message).toBe('You matter.');
+    expect(notes.join(' ')).toContain('No reviewed ha safety copy yet');
+  });
+
   it('human support prompt flips humanSupport and forces the HUMAN_SUPPORT action', async () => {
     const ctx = context(prisma, auditService);
     await applyIntentVerdict(
@@ -298,5 +351,23 @@ describe('RECOMMEND_ACTIVITY catalogue integrity', () => {
     expect(activitySlugsByIntent('PROLONGED_LOW_MOOD')).toContain(
       'thought-recap',
     );
+  });
+});
+
+describe('SAFETY_MESSAGE catalogue integrity', () => {
+  const safetyMessages = INTENTS.flatMap((i) =>
+    i.actions.filter(
+      (a): a is Extract<IntentAction, { type: 'SAFETY_MESSAGE' }> =>
+        a.type === 'SAFETY_MESSAGE',
+    ),
+  );
+
+  it('every scripted safety message ships a non-empty vernacular copy for all four languages', () => {
+    expect(safetyMessages.length).toBeGreaterThan(0);
+    for (const action of safetyMessages) {
+      for (const lang of ['yo', 'ha', 'ig', 'pcm'] as const) {
+        expect(action.messages?.[lang]?.trim().length ?? 0).toBeGreaterThan(0);
+      }
+    }
   });
 });

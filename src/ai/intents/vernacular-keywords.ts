@@ -4,9 +4,10 @@
  *
  * Starter safeguarding keywords for Yoruba, Hausa, Igbo and Nigerian
  * Pidgin, merged into the intent engine's server layer (intents.config.ts).
- * The engine matches these as lowercase substrings of the raw user message,
- * so every term is stored lowercase and diacritic + ASCII spellings are
- * listed separately — students type with and without diacritics.
+ * The engine folds diacritics (see foldDiacritics) before substring
+ * matching, so marked and unmarked spellings of a term both hit — the
+ * explicit ASCII variants below stay listed so the clinical reviewer sees
+ * both spellings side by side. Every term is stored lowercase.
  *
  * REVIEW STATUS: PENDING_CLINICAL_REVIEW — the clinical reviewer must sign
  * off (or amend) every term and gloss. Until then these act as a safety
@@ -143,8 +144,9 @@ export const VERNACULAR_KEYWORDS: Record<string, VernacularKeyword[]> = {
   ],
 };
 
-// The intent engine lowercases userContent before substring matching, so an
-// uppercase term here would be silently dead — fail loud at module load.
+// The engine folds case on both sides, so this is config hygiene, not a
+// match guard — fail loud at module load anyway: a mixed-case term reads
+// as a typo in the pack the clinical reviewer signs off.
 for (const [intentId, entries] of Object.entries(VERNACULAR_KEYWORDS)) {
   for (const entry of entries) {
     if (entry.term !== entry.term.toLowerCase()) {
@@ -153,6 +155,23 @@ for (const [intentId, entries] of Object.entries(VERNACULAR_KEYWORDS)) {
       );
     }
   }
+}
+
+/**
+ * Case- and diacritic-insensitive fold applied to both the message and the
+ * keywords before matching: "Mo fẹ́ kú" and "mo fe ku" must land on the same
+ * term. NFD + combining-mark strip (U+0300–U+036F) erases tone marks and
+ * the dotted-under letters (ẹ ọ ị ụ); the hooked Hausa letters (ƙ ɓ ɗ)
+ * have no canonical decomposition and are mapped explicitly.
+ */
+export function foldDiacritics(text: string): string {
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/ƙ/g, 'k')
+    .replace(/ɓ/g, 'b')
+    .replace(/ɗ/g, 'd');
 }
 
 /** Terms merged into the given intent's server keyword list. */

@@ -34,8 +34,17 @@ export interface AiGenerationResult {
   asyncState?: 'COMPLETE' | 'PENDING_AI' | 'FAILED';
   /** Server-owned: the reply was rendered into a vernacular language by the
    * render lane (n-atlas-translate mode); englishSource keeps the original
-   * English text for audit. Null/absent = the reply shipped as generated. */
-  render?: { language: string; via: string; englishSource: string } | null;
+   * English text for audit. `verified` is the heuristics-only output check
+   * (false = the render did not read back as the requested language, kept
+   * best-effort); `attempts` is the render attempt that produced it. Null or
+   * absent = the reply shipped as generated. */
+  render?: {
+    language: string;
+    via: string;
+    englishSource: string;
+    verified?: boolean;
+    attempts?: number;
+  } | null;
   usage?: {
     inputTokens?: number;
     outputTokens?: number;

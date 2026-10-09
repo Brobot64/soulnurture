@@ -479,6 +479,8 @@ describe('AiService.generateAndApply', () => {
       replyRenderer.render.mockResolvedValue({
         rendered: 'Mo wà níbí pẹ̀lú rẹ.',
         via: 'n-atlas-local',
+        verified: true,
+        attempts: 1,
       });
       const { service } = await serviceWithSpy();
       const outcome = await service.generateAndApply({
@@ -497,8 +499,36 @@ describe('AiService.generateAndApply', () => {
         language: 'yo',
         via: 'n-atlas-local',
         englishSource: 'hello',
+        verified: true,
+        attempts: 1,
       });
       expect(outcome.notes.join(' ')).toContain('Reply rendered in Yoruba via n-atlas-local');
+    });
+
+    it('keeps an unverified render as best-effort and says so on the payload', async () => {
+      replyRenderer.render.mockResolvedValue({
+        rendered: 'Rendered anyway.',
+        via: 'openai',
+        verified: false,
+        attempts: 2,
+      });
+      const { service } = await serviceWithSpy();
+      const outcome = await service.generateAndApply({
+        ...orchestrationInput,
+        messageLanguage: 'yo',
+      });
+
+      expect(outcome.result.message).toBe('Rendered anyway.');
+      expect(outcome.result.render).toEqual({
+        language: 'yo',
+        via: 'openai',
+        englishSource: 'hello',
+        verified: false,
+        attempts: 2,
+      });
+      expect(outcome.notes.join(' ')).toContain(
+        'Reply render did not verify as Yoruba (via openai); best-effort render kept.',
+      );
     });
 
     it('a language detected in this message beats the standing preference', async () => {
@@ -583,7 +613,7 @@ describe('AiService.generateAndApply', () => {
       expect(sent.systemPrompt).not.toContain('REPLY FULLY in Yoruba');
     });
 
-    it('never renders scripted safety copy — approved wording stays English', async () => {
+    it("never renders scripted safety copy — the turn's reviewed copy ships verbatim", async () => {
       prisma.supportFlag.findFirst = vi.fn().mockResolvedValue(null);
       prisma.supportFlag.create = vi.fn().mockResolvedValue({ id: 'flag-1' });
       const { service } = await serviceWithSpy();
@@ -594,8 +624,9 @@ describe('AiService.generateAndApply', () => {
       });
 
       expect(replyRenderer.render).not.toHaveBeenCalled();
-      expect(outcome.result.message).toContain('you matter');
-      expect(outcome.notes.join(' ')).toContain('scripted safety message stays in its approved English wording');
+      expect(outcome.result.message).toContain('Inú mi dùn gan-an');
+      expect(outcome.notes.join(' ')).toContain('reviewed yo copy');
+      expect(outcome.notes.join(' ')).toContain('scripted safety copy ships verbatim');
     });
   });
 

@@ -5,6 +5,7 @@ import {
   NatlasLlmProvider,
   NatlasUnavailableError,
 } from '../providers/natlas/natlas-llm.provider.js';
+import type { LanguageDetectorService } from './language-detector.service.js';
 import type { AiUsageMeterService } from '../providers/usage-meter.service.js';
 
 const aiConfig = {
@@ -45,10 +46,19 @@ const renderInput = {
 describe('ReplyRendererService', () => {
   let completeText: ReturnType<typeof vi.fn>;
   let meter: { record: ReturnType<typeof vi.fn> };
+  let detector: { detect: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
     completeText = vi.fn();
     meter = { record: vi.fn().mockResolvedValue(1) };
+    // Silent heuristics by default: verification passes, no retry.
+    detector = {
+      detect: vi.fn().mockResolvedValue({
+        lang: null,
+        confidence: 'low',
+        method: 'fallback',
+      }),
+    };
   });
 
   afterEach(() => {
@@ -60,16 +70,22 @@ describe('ReplyRendererService', () => {
       configWith({ OPENAI_API_KEY: 'sk-test' }),
       { configured: natlasConfigured, completeText } as unknown as NatlasLlmProvider,
       meter as unknown as AiUsageMeterService,
+      detector as unknown as LanguageDetectorService,
       aiConfig,
     );
   }
 
-  it('renders via N-ATLaS and meters n-atlas-local with latency', async () => {
+  it('renders via N-ATLaS, verifies heuristics-only and meters n-atlas-local with latency', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     completeText.mockResolvedValue({
       text: 'Inu mi dùn pé o sọ fun mi.',
       usage: { inputTokens: 30, outputTokens: 15 },
+    });
+    detector.detect.mockResolvedValue({
+      lang: 'yo',
+      confidence: 'high',
+      method: 'diacritics',
     });
 
     const outcome = await buildService().render(renderInput);
@@ -77,7 +93,13 @@ describe('ReplyRendererService', () => {
     expect(outcome).toMatchObject({
       rendered: 'Inu mi dùn pé o sọ fun mi.',
       via: 'n-atlas-local',
+      verified: true,
+      attempts: 1,
     });
+    expect(detector.detect).toHaveBeenCalledWith('Inu mi dùn pé o sọ fun mi.', {
+      allowModel: false,
+    });
+    expect(completeText).toHaveBeenCalledTimes(1);
     expect(meter.record).toHaveBeenCalledWith('n-atlas-local', {
       inputTokens: 30,
       outputTokens: 15,
@@ -90,6 +112,77 @@ describe('ReplyRendererService', () => {
     expect(userContent).toContain('English reply to render:');
     expect(userContent).toContain(renderInput.englishReply);
     expect(userContent).toContain('The student just wrote: mi o ti jeun lati aaro');
+  });
+
+  it('retries once when the render reads back as another language, keeping the verified retry', async () => {
+    completeText
+      .mockResolvedValueOnce({
+        text: 'I am right here with you.',
+        usage: { inputTokens: 30, outputTokens: 12 },
+      })
+      .mockResolvedValueOnce({
+        text: 'Mo wà níbí pẹ̀lú rẹ.',
+        usage: { inputTokens: 30, outputTokens: 11 },
+      });
+    detector.detect
+      .mockResolvedValueOnce({ lang: 'en', confidence: 'medium', method: 'franc' })
+      .mockResolvedValueOnce({ lang: 'yo', confidence: 'high', method: 'diacritics' });
+
+    const outcome = await buildService().render(renderInput);
+
+    expect(completeText).toHaveBeenCalledTimes(2);
+    expect(outcome).toMatchObject({
+      rendered: 'Mo wà níbí pẹ̀lú rẹ.',
+      verified: true,
+      attempts: 2,
+    });
+  });
+
+  it('keeps the best-effort render and reports unverified when both attempts read back wrong', async () => {
+    completeText.mockResolvedValue({
+      text: 'I am right here with you.',
+      usage: {},
+    });
+    detector.detect.mockResolvedValue({
+      lang: 'en',
+      confidence: 'medium',
+      method: 'franc',
+    });
+
+    const outcome = await buildService().render(renderInput);
+
+    expect(completeText).toHaveBeenCalledTimes(2);
+    expect(outcome).toMatchObject({
+      rendered: 'I am right here with you.',
+      verified: false,
+      attempts: 2,
+    });
+  });
+
+  it('keeps an unverified first attempt when the retry produces nothing', async () => {
+    completeText
+      .mockResolvedValueOnce({ text: 'I am right here with you.', usage: {} })
+      .mockRejectedValueOnce(new NatlasUnavailableError('cold again'));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('network down');
+      }),
+    );
+    detector.detect.mockResolvedValue({
+      lang: 'en',
+      confidence: 'medium',
+      method: 'franc',
+    });
+
+    const outcome = await buildService().render(renderInput);
+
+    expect(completeText).toHaveBeenCalledTimes(2);
+    expect(outcome).toMatchObject({
+      rendered: 'I am right here with you.',
+      verified: false,
+      attempts: 1,
+    });
   });
 
   it('strips quotes the model wrapped around the rendered text', async () => {
@@ -169,6 +262,7 @@ describe('ReplyRendererService', () => {
       configWith({}),
       { configured: false, completeText } as unknown as NatlasLlmProvider,
       meter as unknown as AiUsageMeterService,
+      detector as unknown as LanguageDetectorService,
       aiConfig,
     );
 

@@ -56,6 +56,7 @@ import {
   type SupportedLanguage,
 } from './language/language.config.js';
 import { interimEnglishDirective } from './language/render.prompt.js';
+import { pivotTurnText } from './language/history-pivot.js';
 import { ReplyRendererService } from './language/reply-renderer.service.js';
 import { NAtlasAsrProvider } from './providers/natlas/natlas-asr.provider.js';
 
@@ -164,29 +165,6 @@ function noFlagResult(): AiGenerationResult {
     supportFlag: { candidate: false, category: null, severity: null },
     action: 'NONE',
   };
-}
-
-/** USER messages sent in a Nigerian language summarize from their English
- * understanding (when the VERNACULAR lane produced one) so the summary model
- * reads meaning, not untranslated content. */
-function transcriptText(m: {
-  role: string;
-  content: string;
-  aiPayload: unknown;
-}): string {
-  if (m.role !== 'USER') return m.content;
-  const payload =
-    m.aiPayload && typeof m.aiPayload === 'object'
-      ? (m.aiPayload as Record<string, unknown>)
-      : null;
-  const understanding =
-    payload?.understanding && typeof payload.understanding === 'object'
-      ? (payload.understanding as Record<string, unknown>)
-      : null;
-  const translation = understanding?.englishTranslation;
-  return typeof translation === 'string' && translation.length > 0
-    ? translation
-    : m.content;
 }
 
 @Injectable()
@@ -328,6 +306,7 @@ export class AiService {
           conversationId: input.conversationId,
           userContent: input.userContent,
           relevantResources: ctx.relevantResources,
+          replyLanguage,
         })),
       );
     }
@@ -348,15 +327,18 @@ export class AiService {
     // Render lane (n-atlas-translate): the finished English reply is rendered
     // into the turn's language within this same request, so the student's
     // next reply already comes back in their language. Scripted safety copy
-    // is never rendered — that wording is approved verbatim. Total render
-    // failure keeps the English reply (enhancement, never a blocker).
+    // is never rendered — that wording is approved verbatim. Every render is
+    // verified heuristics-only and retried once when it reads back as the
+    // wrong language; the best-effort render is kept either way and the
+    // verdict is recorded on the payload. Total render failure keeps the
+    // English reply (enhancement, never a blocker).
     if (renderActive) {
       const scriptedSafety = verdict?.actions.some(
         (action) => action.type === 'SAFETY_MESSAGE',
       );
       if (scriptedSafety) {
         notes.push(
-          'Reply render skipped: scripted safety message stays in its approved English wording.',
+          'Reply render skipped: scripted safety copy ships verbatim (never rendered).',
         );
       } else {
         const rendered = await this.replyRenderer.render({
@@ -372,10 +354,14 @@ export class AiService {
             language: replyLanguage,
             via: rendered.via,
             englishSource: result.message,
+            verified: rendered.verified,
+            attempts: rendered.attempts,
           };
           result.message = rendered.rendered;
           notes.push(
-            `Reply rendered in ${LANGUAGE_DISPLAY_NAMES[replyLanguage]} via ${rendered.via}.`,
+            rendered.verified
+              ? `Reply rendered in ${LANGUAGE_DISPLAY_NAMES[replyLanguage]} via ${rendered.via}.`
+              : `Reply render did not verify as ${LANGUAGE_DISPLAY_NAMES[replyLanguage]} (via ${rendered.via}); best-effort render kept.`,
           );
         } else {
           notes.push('Reply render unavailable; kept the English reply.');
@@ -443,7 +429,7 @@ export class AiService {
     let used = 0;
     const transcript: string[] = [];
     for (const m of messages) {
-      const text = transcriptText(m);
+      const text = pivotTurnText(m);
       if (used + text.length > charLimit) break;
       transcript.push(`${m.role === 'USER' ? 'Student' : 'Soul Nurture'}: ${text}`);
       used += text.length;

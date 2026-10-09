@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { MessageRole } from '@prisma/client';
 import { AI_CONFIG } from '../config/ai.config.js';
 import type { AiConfig } from '../config/ai.config.js';
+import { pivotTurnText } from '../language/history-pivot.js';
 import { MemoryRepository } from '../memory/memory.repository.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
 
@@ -12,6 +13,11 @@ export interface AiContext {
     intensity: string | null;
     description: string | null;
   } | null;
+  /**
+   * Recent turns pivoted to English (history_en): USER from their
+   * VERNACULAR understanding, ASSISTANT from the render's English source.
+   * Raw content when no pivot exists.
+   */
   recentConversation: { role: 'USER' | 'ASSISTANT'; content: string }[];
   relevantReflection: { content: string } | null;
   relevantResources: {
@@ -77,12 +83,12 @@ export class AiContextService {
       },
       orderBy: { createdAt: 'desc' },
       take: messageLimit,
-      select: { role: true, content: true },
+      select: { role: true, content: true, aiPayload: true },
     });
 
     const recent = messages.reverse().map((m) => ({
       role: m.role as 'USER' | 'ASSISTANT',
-      content: m.content,
+      content: pivotTurnText(m),
     }));
 
     let used = 0;

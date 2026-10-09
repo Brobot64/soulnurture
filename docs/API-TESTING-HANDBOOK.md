@@ -525,8 +525,7 @@ POST /api/v1/conversations/<conversationId>/messages
 
 ```json
 {
-  "content": "Good morning. I am a 300 level Sociology student at Miva University, Nigeria. Today was rough — lectures, then assignments back to back.",
-  "language": "en"
+  "content": "Good morning. I am a 300 level Sociology student at Miva University, Nigeria. Today was rough — lectures, then assignments back to back."
 }
 ```
 
@@ -570,13 +569,28 @@ in English — generation stays English (context, guardrails and the intent
 floor all run on the English lane) and a vernacular turn's finished reply is
 rendered by local N-ATLaS **within the same request**, whatever the standing
 preference (per-message following; a voice note follows the same rule once
-its transcript is sent). The forced `dto.language` and then the preference
-fill in only when the message text itself yields no signal. Render fallback
+its transcript is sent). The request's legacy `language` field is accepted
+for compatibility but deprecated and ignored (LANG_ID_016): the reply-language
+chain is exactly `[detected message language, standing preference] → "en"` —
+detection from the message text is the sole input; the preference only fills
+detection silence. Render fallback
 chain: N-ATLaS → OpenAI render → the English reply (total render failure
-never blocks the turn); scripted safety copy is never rendered — that wording
-is approved verbatim. Finally a `VERNACULAR` job (see §6.6) is queued to
+never blocks the turn). Every render is verified heuristics-only before it
+ships: a confident read of a different language — typically an un-translated
+echo of the English input — triggers one retry, and the latest best-effort
+render is kept either way (`render.verified: false` still beats no reply;
+`render.attempts` records 1 or 2). Scripted safety copy is never rendered —
+that wording is approved verbatim; on a vernacular turn it ships in the
+student's language from the per-language crisis-copy set (`messages` on each
+TIER_3 `SAFETY_MESSAGE` action, yo/ha/ig/pcm — review state surfaced as
+`safetyCopyReviewStatus`, §9.5), falling back to the approved English wording
+when a language is missing a copy, with a note in the turn's
+`applicationNotes`. Crisis keywords match diacritic-folded on both sides
+(VERNACULAR_SAFETY_017), so marked and unmarked spellings land on the same
+term. Finally a `VERNACULAR` job (see §6.7) is queued to
 translate the message and run a second safeguarding sweep on the English
-translation.
+translation; that stored translation doubles as the English pivot history
+reads through (history_en, §5.5).
 
 **Vernacular probe** (optional — run after §5.4 so the 6-message assertion
 above stays valid). Send (omit `language`):
@@ -594,7 +608,10 @@ Assert:
   neither `NATLAS_LLM_BASE_URL` nor `OPENAI_API_KEY` configured it stays
   English — the turn is never blocked); the assistant turn's `aiPayload`
   gains `render: { language: "yo", via: "n-atlas-local" | "openai",
-  englishSource }`
+  englishSource, verified, attempts }` — `verified: true` when the
+  heuristics-only output check agreed with the requested language; `false`
+  for the best-effort render kept after a mismatched read (one retry, then
+  `attempts: 2`)
 
 Then within ~1 worker poll cycle (translation requires `OPENAI_API_KEY` or
 `NATLAS_LLM_BASE_URL`; see §9.5):
@@ -611,6 +628,25 @@ conversation as in §5.4 to see it; and the audit trail contains
 job retries then lands `FAILED` (audit `ai_generation.exhausted`, entity
 `ConversationMessage`) — detection, the offer, and the synchronous keyword
 sweep are unaffected either way.
+
+**Vernacular crisis probe** (optional — run after §5.4 as well, so the
+6-message assertion above stays valid; one more turn). Send:
+
+```json
+{ "content": "Mo fẹ́ kú jare, ẹ̀mí mi ti tán." }
+```
+
+Assert:
+
+- `data.activeIntent.id === "SUICIDAL_IDEATION"` — the keyword floor matched
+  the diacritic-folded text; the same sentence without diacritics
+  (`Mo fe ku jare, emi mi ti tan.`) must fire identically
+- `data.assistantMessage.content` is the **Yoruba** crisis copy
+  (`messages.yo` in `intents.config.ts`) — never the English wording, never
+  a render; `aiPayload.applicationNotes` contains "reviewed yo copy"
+- `aiPayload.supportFlag.candidate === true` with
+  `category === "SUICIDAL_IDEATION"` (the human pathway is reachable as in
+  §5.3 message 3)
 
 ### 5.4 Inspect the persisted conversation
 
@@ -655,9 +691,12 @@ every sentence, fallback copy is stored instead.
 > days) + top-2 vector-similar summaries when embeddings exist — carried into
 > the model context as `carriedContext`.
 
-> Vernacular USER messages are summarized from their stored English
-> `understanding.englishTranslation` (written by the §5.3 worker lane) when
-> present, never from the untranslated raw text.
+> History is read in English (history_en, VERNACULAR_SAFETY_017): the summary
+> transcript and the model's context window both pivot USER turns to their
+> stored `understanding.englishTranslation` (written by the §5.3 worker lane)
+> and ASSISTANT turns to the render's `englishSource`; turns without a pivot
+> (English, pre-feature rows) read as stored. The model never re-reads
+> untranslated vernacular.
 
 > Idle close: any `ACTIVE` conversation with at least one message, untouched
 > for `AI_SESSION_IDLE_MINUTES` (default 120 min), is closed automatically by
@@ -717,7 +756,8 @@ of reply regeneration (no message rewrite); success flips the job to
 `conversationMessageId` = that user message. The worker loads the raw message
 content, translates it (local N-ATLaS first when `NATLAS_LLM_BASE_URL` is
 set, OpenAI fallback, both lanes metered), stores the understanding onto the
-message's `aiPayload`, and — when the synchronous pass did not already flag —
+message's `aiPayload` (its `englishTranslation` becomes the English pivot for
+history_en, §5.5), and — when the synchronous pass did not already flag —
 re-runs the intent engine on the **English translation** as a second safety
 sweep. A hit persists an `AI_CANDIDATE` support flag and audits
 `safety_flag.lang_refine` (entity `ConversationMessage`). Terminal failure
@@ -1017,6 +1057,10 @@ Follow-up statuses: `PENDING | SCHEDULED | COMPLETED | CANCELLED`.
 - `data.vernacularKeywords` lists every vernacular term with its language and
   English gloss, and `data.vernacularReviewStatus === "PENDING_CLINICAL_REVIEW"`
   — the clinical reviewer signs off (or amends) these terms before go-live
+- `data.safetyCopyReviewStatus === "PENDING_NATIVE_REVIEW"` — same bar for the
+  per-language crisis copies (`messages` on each TIER_3 `SAFETY_MESSAGE`
+  action: yo/ha/ig/pcm drafts the executor picks by reply language, English
+  wording as fallback — §5.3)
 
 > With `OPENAI_API_KEY` empty in `.env`, the chain serves Groq; once a real
 > key is set, chat generations serve from OpenAI and each generation stamps
@@ -1789,3 +1833,4 @@ registers, and the §10 rows 17–19 fences.
 | 2026-10-09 | `NATLAS_LLM_014` — the vernacular lane trades the VPS Ollama for the hosted N-ATLaS endpoint: OpenAI chat shape + env-only `NATLAS_LLM_API_KEY` (never in `GET /api/v1/ai/config`), every failure path throws `NatlasUnavailableError` so the n-atlas-local→openai chain is untouched, `NATLAS_LLM_TIMEOUT_MS` (45s default), model default `NCAIR1/N-ATLaS`. |
 | 2026-10-09 | `VERNACULAR_REPLY_015` — per-message language following: lexicon detection replaces franc for yo/ha/ig (franc only classifies long English), and the `n-atlas-translate` reply mode renders the finished English reply into the turn's language within the same request (N-ATLaS → OpenAI render → English fallback; scripted safety copy never rendered); `aiPayload.render`, `NATLAS_RENDER_TIMEOUT_MS`; §5.3 + §9.5 + `.env.example` updated. |
 | 2026-10-09 | `LANG_ID_016` — language from the input itself: when every heuristic is silent the detector asks N-ATLaS to name the turn's language (`IDENTIFY_MIN_CHARS` 8, strict `NATLAS_IDENTIFY_TIMEOUT_MS` 4s, fail-open to the standing preference on cold/unparsable), and the detected language — `en` included — always beats the preference for that turn; §5.3 + §9.5 + `.env.example` updated. |
+| 2026-10-09 | `VERNACULAR_SAFETY_017` — vernacular safety hardening: per-language crisis copy (yo/ha/ig/pcm drafts on every scripted `SAFETY_MESSAGE`, English wording as fallback, never rendered; `safetyCopyReviewStatus` = `PENDING_NATIVE_REVIEW` in §9.5), render output verification (`render.verified`/`render.attempts`; heuristics-only check, one retry, best-effort kept — §5.3), diacritic-folded crisis keyword scan (§5.3 probe), history_en pivot — context window + summary transcript read English (§5.5, §6.7); manual harness `test/language-harness/` (text + voice turns against a local backend). |

@@ -5,6 +5,7 @@ import type { AiConfig } from '../config/ai.config.js';
 import { OPENAI_CHAT_URL } from '../providers/openai/openai.constants.js';
 import { AiUsageMeterService } from '../providers/usage-meter.service.js';
 import { NatlasLlmProvider } from '../providers/natlas/natlas-llm.provider.js';
+import { LanguageDetectorService } from './language-detector.service.js';
 import type { SupportedLanguage } from './language.config.js';
 import { renderSystemPrompt } from './render.prompt.js';
 
@@ -20,8 +21,17 @@ export interface ReplyRenderInput {
 export interface ReplyRenderOutcome {
   rendered: string;
   via: 'n-atlas-local' | 'openai';
+  /** Heuristic output check: true when the detector either agreed with the
+   * requested language or stayed silent; false when it confidently read a
+   * DIFFERENT language (typically an un-translated English reply). */
+  verified: boolean;
+  /** Which render attempt produced this text (1, or 2 after a mismatched
+   * first attempt triggered the single retry). */
+  attempts: number;
   usage?: { inputTokens?: number; outputTokens?: number; latencyMs?: number };
 }
+
+type RenderAttempt = Omit<ReplyRenderOutcome, 'verified' | 'attempts'>;
 
 /**
  * Reply-render lane for VERNACULAR_REPLY_015: when the student's turn is in
@@ -30,6 +40,13 @@ export interface ReplyRenderOutcome {
  * their language immediately. Same chain pattern as the understanding lane
  * (`n-atlas-local` → `openai`) but never throws: rendering is an
  * enhancement, so on total failure the caller keeps the English reply.
+ *
+ * VERNACULAR_SAFETY_017 adds an output verification: every render is checked
+ * by the heuristics-only detector (no model call), and a confident read of a
+ * different language — typically the model echoing the English input —
+ * triggers one retry. The latest best-effort render is kept regardless:
+ * a possibly-mismatched vernacular reply still beats no reply, and the
+ * caller records `verified` for audit.
  */
 @Injectable()
 export class ReplyRendererService {
@@ -39,6 +56,7 @@ export class ReplyRendererService {
     private readonly config: ConfigService,
     private readonly natlasLlm: NatlasLlmProvider,
     private readonly meter: AiUsageMeterService,
+    private readonly languageDetector: LanguageDetectorService,
     @Inject(AI_CONFIG) private readonly aiConfig: AiConfig,
   ) {}
 
@@ -55,6 +73,35 @@ export class ReplyRendererService {
       input.englishReply,
     ].join('\n');
 
+    let best: ReplyRenderOutcome | null = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const outcome = await this.attempt(systemPrompt, userContent);
+      // No lane produced anything: retrying the same broken chain adds
+      // latency, not a reply. Keep the previous attempt (if any).
+      if (!outcome) break;
+
+      const detection = await this.languageDetector.detect(outcome.rendered, {
+        allowModel: false,
+      });
+      const verified =
+        detection.lang === null || detection.lang === input.language;
+      best = { ...outcome, verified, attempts: attempt };
+      if (verified) return best;
+
+      this.logger.warn(
+        `Render verification: attempt ${attempt} reads as ${detection.lang} (${detection.method}) but ${input.language} was requested.` +
+          (attempt === 1
+            ? ' Retrying once.'
+            : ' Keeping the best-effort render.'),
+      );
+    }
+    return best;
+  }
+
+  private async attempt(
+    systemPrompt: string,
+    userContent: string,
+  ): Promise<RenderAttempt | null> {
     if (this.natlasLlm.configured) {
       try {
         const started = Date.now();
@@ -91,7 +138,7 @@ export class ReplyRendererService {
   private async viaOpenAi(
     systemPrompt: string,
     userContent: string,
-  ): Promise<ReplyRenderOutcome> {
+  ): Promise<RenderAttempt> {
     if (!this.apiKey) {
       throw new Error('OpenAI render fallback is not configured');
     }

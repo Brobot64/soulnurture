@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import type { AiGenerationResult } from '../providers/ai-provider.interface.js';
 import { IntentEngineService } from './intent-engine.service.js';
+import { foldDiacritics } from './vernacular-keywords.js';
 
 function aiResult(overrides: Partial<AiGenerationResult> = {}): AiGenerationResult {
   return {
@@ -142,6 +143,25 @@ describe('IntentEngineService', () => {
     expect(verdict!.keywordEvidence).toContain('i wan die');
   });
 
+  it('folds fully marked Yoruba onto the pack — diacritics never hide a disclosure', () => {
+    const verdict = engine.evaluate({
+      userContent: 'Mo fẹ́ kú jare',
+      aiResult: aiResult(),
+    });
+    expect(verdict).not.toBeNull();
+    expect(verdict!.intentId).toBe('SUICIDAL_IDEATION');
+    expect(verdict!.keywordEvidence).toContain('mo fẹ́ kú');
+  });
+
+  it('folds partial diacritics — a mixed spelling still hits the pack', () => {
+    const verdict = engine.evaluate({
+      userContent: 'Mo fẹ ku, o ti su mi gan',
+      aiResult: aiResult(),
+    });
+    expect(verdict!.intentId).toBe('SUICIDAL_IDEATION');
+    expect(verdict!.keywordEvidence).toContain('mo fe ku');
+  });
+
   it('benign vernacular chat does not trip the packs', () => {
     expect(
       engine.evaluate({
@@ -149,5 +169,19 @@ describe('IntentEngineService', () => {
         aiResult: aiResult(),
       }),
     ).toBeNull();
+  });
+});
+
+describe('foldDiacritics', () => {
+  it('strips tone marks and dotted-under letters', () => {
+    expect(foldDiacritics('Mo fẹ́ kú, ọkàn mi ń lù')).toBe(
+      'mo fe ku, okan mi n lu',
+    );
+  });
+
+  it('maps the hooked Hausa letters to their plain bases', () => {
+    expect(foldDiacritics('Ƙarƙashin ɓangare ɗaya')).toBe(
+      'karkashin bangare daya',
+    );
   });
 });

@@ -37,6 +37,13 @@ export interface LanguageDetection {
   method: LanguageDetectionMethod;
 }
 
+export interface DetectOptions {
+  /** false = heuristics only, never the N-ATLaS identify call. The render
+   * lane uses this to verify its own output without adding a model
+   * round-trip to the turn. */
+  allowModel?: boolean;
+}
+
 /** The model replies with a "Language: …" header above a "Meaning: …" line
  * (see identify.prompt.ts v2); the parse is tolerant of stray punctuation,
  * codes and spelled-out names. When the header is present it is the ONLY
@@ -102,6 +109,10 @@ function parseIdentifiedLanguage(raw: string): SupportedLanguage | null {
  *   5. model       — N-ATLaS translates the message and its language header
  *      is read (short texts skip; see identify.prompt.ts).
  *   6. fallback    — lang null → callers keep the current preference.
+ *
+ * `detect(text, { allowModel: false })` stops at step 4 — pure heuristics
+ * with no I/O, for callers that must not spend a model call (the render
+ * lane's output verification).
  */
 @Injectable()
 export class LanguageDetectorService {
@@ -109,14 +120,17 @@ export class LanguageDetectorService {
 
   constructor(private readonly natlasLlm: NatlasLlmProvider) {}
 
-  async detect(text: string): Promise<LanguageDetection> {
+  async detect(
+    text: string,
+    options: DetectOptions = {},
+  ): Promise<LanguageDetection> {
     const lowered = text.toLowerCase();
     return (
       this.byDiacritics(lowered) ??
       this.byPidginMarkers(lowered) ??
       this.byLexicon(lowered) ??
       this.byFranc(text) ??
-      (await this.byModel(text)) ?? {
+      (options.allowModel === false ? null : await this.byModel(text)) ?? {
         lang: null,
         confidence: 'low',
         method: 'fallback',

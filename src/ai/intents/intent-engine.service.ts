@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { SupportFlagSeverity } from '@prisma/client';
 import { INTENTS, MODEL_CANDIDATE_LABEL } from './intents.config.js';
 import type { IntentAction, IntentDefinition } from './intents.config.js';
+import { foldDiacritics } from './vernacular-keywords.js';
 import type { AiGenerationResult } from '../providers/ai-provider.interface.js';
 
 /**
@@ -51,7 +52,7 @@ export class IntentEngineService {
     userContent: string;
     aiResult: AiGenerationResult;
   }): IntentVerdict | null {
-    const lowered = (input.userContent ?? '').toLowerCase();
+    const folded = foldDiacritics(input.userContent ?? '');
     const modelFlag = input.aiResult?.supportFlag;
     const modelCategory =
       modelFlag?.category && modelFlag.category !== 'NONE'
@@ -60,10 +61,12 @@ export class IntentEngineService {
     const modelSeverity = coerceSeverity(modelFlag?.severity);
 
     // Layer 1 — server keywords (runs on every message, AI available or not).
+    // Both sides are diacritic-folded first, so "Mo fẹ́ kú" and "mo fe ku"
+    // land on the same term (VERNACULAR_SAFETY_017 crisis-scan recall).
     const keywordMatches: { intent: IntentDefinition; evidence: string[] }[] = [];
     for (const intent of INTENTS) {
       const evidence = intent.serverSignals.keywords.filter((keyword) =>
-        lowered.includes(keyword),
+        folded.includes(foldDiacritics(keyword)),
       );
       if (evidence.length > 0) keywordMatches.push({ intent, evidence });
     }

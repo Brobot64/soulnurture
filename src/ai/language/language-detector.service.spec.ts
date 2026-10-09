@@ -273,6 +273,24 @@ describe('LanguageDetectorService', () => {
       expect(natlasLlm.completeLabel).not.toHaveBeenCalled();
     });
 
+    it('never asks under allowModel: false — the render-verification path', async () => {
+      natlasLlm.completeLabel.mockResolvedValue({ text: 'ha', usage: {} });
+
+      expect(
+        await detector.detect('Ina jin dadi amma ba zan iya sanya jin dadi ba', {
+          allowModel: false,
+        }),
+      ).toEqual({ lang: null, confidence: 'low', method: 'fallback' });
+      expect(natlasLlm.completeLabel).not.toHaveBeenCalled();
+    });
+
+    it('still runs every heuristic under allowModel: false', async () => {
+      expect(
+        await detector.detect('Mo ti rẹ̀ rẹ̀ lónìí', { allowModel: false }),
+      ).toEqual({ lang: 'yo', confidence: 'high', method: 'diacritics' });
+      expect(natlasLlm.completeLabel).not.toHaveBeenCalled();
+    });
+
     it('stays on the preference fallback while the endpoint is unconfigured', async () => {
       natlasLlm.configured = false;
 
