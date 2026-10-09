@@ -95,12 +95,11 @@ export function attachBetterAuthOpenApi(document: OpenAPIObject): OpenAPIObject 
     '/api/auth/sign-up/email': {
       post: {
         tags: [tag],
-        summary: 'Sign up with email/password',
-        description: `${betterAuthNote}\n\nEmail verification is required. Duplicate email → **422** \`USER_ALREADY_EXISTS\`.`,
+        summary: 'Sign up with email/password (disabled)',
+        description: `${betterAuthNote}\n\nPublic sign-up is **disabled**: accounts enter only by provisioning (school onboarding, staff bootstrap, platform-admin routes). Always answers **400** \`EMAIL_PASSWORD_SIGN_UP_DISABLED\` — a uniform error so sign-up cannot probe whether an email exists.`,
         requestBody: json('BetterAuthSignUpDto'),
         responses: {
-          '200': { description: 'User created / verification required (Better Auth raw body)' },
-          '422': { description: 'User already exists' },
+          '400': { description: 'Public sign-up disabled (EMAIL_PASSWORD_SIGN_UP_DISABLED)' },
         },
       },
     },

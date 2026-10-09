@@ -87,7 +87,7 @@ All **Nest-handled** routes return:
 
 ## Authentication
 
-1. Sign up / sign in via Better Auth (\`/api/auth/...\`)
+1. Sign up / sign in via Better Auth (\`/api/auth/...\`) — public sign-up is disabled; accounts enter by provisioning
 2. Session cookie is set by Better Auth
 3. Send cookies on subsequent requests (\`credentials: 'include'\`)
 4. Protected Nest routes require a valid session
@@ -96,7 +96,7 @@ All **Nest-handled** routes return:
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | \`/api/auth/sign-up/email\` | Register (name, email, password, optional phone) |
+| POST | \`/api/auth/sign-up/email\` | Disabled — uniform 400 \`EMAIL_PASSWORD_SIGN_UP_DISABLED\` |
 | POST | \`/api/auth/sign-in/email\` | Login |
 | POST | \`/api/auth/sign-out\` | Logout |
 | GET | \`/api/auth/get-session\` | Current session |
@@ -134,7 +134,7 @@ Every user manages their own profile by role:
 
 Profiles are **auto-provisioned** on first access, so a valid account always has a writable profile — no separate setup call is required.
 
-Staff can provision new user accounts (assigning role) via \`POST /api/v1/users\`. Self sign-up always creates a \`STUDENT\` account; the role field is **not** client-selectable.
+Staff can provision new user accounts (assigning role) via \`POST /api/v1/users\`. Public sign-up is disabled — accounts are provisioned (school onboarding, staff bootstrap, platform-admin routes); the role field is **not** client-selectable.
 
 ---
 

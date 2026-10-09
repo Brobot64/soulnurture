@@ -9,8 +9,12 @@
  *   2. Provisioned staff (SUPPORT_STAFF) — POST /api/v1/users + sign-in
  *      (proves hashes fix) + dashboard access; admin seeds Dr. Eric Moore as
  *      a support person (no admin CRUD exists yet — documented gap)
- *   3. JUDE (student at Miva University, Nigeria) — public sign-up, verify,
- *      profile, sanctuary, consent, privacy prefs, AI disclosure + ack
+ *   3. JUDE (student at Miva University, Nigeria) — the public door is
+ *      closed (400 EMAIL_PASSWORD_SIGN_UP_DISABLED); a raw-SQL platform
+ *      owner creates the school + provisions its admin (owner-only route),
+ *      the admin is forced onto a personal password, onboards Jude with the
+ *      school default password, and Jude verifies → default sign-in → forced
+ *      change → profile, sanctuary, consent, privacy prefs, AI disclosure
  *   4. JUDE's journey — check-in → conversation → 3 AI messages; the third
  *      uses crisis wording so the intent engine must persist a TIER_3
  *      SERVER_POLICY flag + safety message + human-support pathway
@@ -30,6 +34,7 @@
  */
 import { Pool } from 'pg';
 import { randomUUID } from 'node:crypto';
+import { hashPassword } from 'better-auth/crypto';
 
 const BASE = process.env.E2E_BASE_URL ?? 'http://localhost:3000';
 const DB_URL =
@@ -39,6 +44,7 @@ const DB_URL =
 const ENROLLMENT_KEY =
   process.env.E2E_STAFF_BOOTSTRAP_KEY ?? 'natlas-boot-2026-local';
 const ORIGIN = 'http://localhost:3000';
+const SHORT_CODE_CHARSET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
 const ERIC = {
   name: 'Eric Moore',
@@ -60,6 +66,19 @@ const JUDE = {
   email: 'jude.okonkwo@miva.edu.ng',
   password: 'JudeSafe123#',
   phone: '+2348098765432',
+};
+// Journey-specific owner email — never the one e2e-school-chat.mjs bootstraps,
+// so both scripts can share one dev database without deleting each other.
+const OWNER = {
+  name: 'Platform Owner',
+  email: 'platform.owner@journey.natlas.test',
+  password: 'OwnerSafe123#',
+};
+const SCHOOL = { name: 'Miva University', defaultPassword: 'MivaSafe#2026' };
+const SCHOOL_ADMIN = {
+  name: 'Grace Adeyemi',
+  email: 'grace.adeyemi@miva.edu.ng',
+  password: 'GraceSafe123#',
 };
 
 // ---------------------------------------------------------------------------
@@ -140,12 +159,16 @@ async function devVerificationUrl(actor, email) {
   return res.body?.data?.url ?? null;
 }
 
+const shortCodeRe = (prefix) => new RegExp(`^${prefix}[${SHORT_CODE_CHARSET}]{4}$`);
+
 // ---------------------------------------------------------------------------
 async function main() {
   const started = Date.now();
   const eric = makeActor('Eric');
   const ngozi = makeActor('Ngozi');
   const jude = makeActor('Jude');
+  const owner = makeActor('Owner');
+  const schoolAdmin = makeActor('SchoolAdmin');
   const anon = null; // unauthenticated caller is just null
 
   // ---------------------------------------------------------------- act 0
@@ -162,10 +185,13 @@ async function main() {
     ERIC.email,
     NGOZI.email,
     JUDE.email,
+    OWNER.email,
+    SCHOOL_ADMIN.email,
     'probe.token@x.com',
     'fake.staff@x.com',
   ];
   await db(`DELETE FROM "user" WHERE email = ANY($1::text[])`, [EMAILS]);
+  await db(`DELETE FROM school WHERE name = $1`, [SCHOOL.name]);
   await db(`DELETE FROM support_person WHERE name = 'Dr. Eric Moore'`);
   await db(`DELETE FROM verification WHERE identifier = ANY($1::text[])`, [EMAILS]);
   check('test data cleaned', true);
@@ -261,10 +287,72 @@ async function main() {
   check('Dr. Eric Moore listed as support person', true);
 
   // ---------------------------------------------------------------- act 3
-  act('Act 3 — JUDE (STUDENT): public signup → verify → profile');
-  console.log('  POST /api/auth/sign-up/email', JSON.stringify({ name: JUDE.name, email: JUDE.email, phone: JUDE.phone }));
+  act('Act 3 — the public sign-up door is closed');
+  console.log('  POST /api/auth/sign-up/email', JSON.stringify({ name: JUDE.name, email: JUDE.email }));
   res = await api(anon, 'POST', '/api/auth/sign-up/email', { name: JUDE.name, email: JUDE.email, password: JUDE.password, phone: JUDE.phone });
-  check('public signup works', res.status === 200 && res.body?.user?.email === JUDE.email, `status ${res.status}`);
+  check('public sign-up refused (uniform 400, no email-existence oracle)', res.status === 400 && res.body?.code === 'EMAIL_PASSWORD_SIGN_UP_DISABLED', `status ${res.status} code ${res.body?.code}`);
+
+  act('Act 3 — platform owner bootstraps the school (raw SQL, no sign-up route)');
+  const ownerId = randomUUID();
+  await db(
+    `INSERT INTO "user" (id, name, email, "emailVerified", role, "mustChangePassword", "createdAt", "updatedAt")
+     VALUES ($1, $2, $3, true, 'PLATFORM_ADMIN', false, now(), now())`,
+    [ownerId, OWNER.name, OWNER.email],
+  );
+  await db(
+    `INSERT INTO account (id, "userId", "accountId", "providerId", password, "createdAt", "updatedAt")
+     VALUES ($1, $2, $2, 'credential', $3, now(), now())`,
+    [randomUUID(), ownerId, await hashPassword(OWNER.password)],
+  );
+  res = await api(owner, 'POST', '/api/auth/sign-in/email', { email: OWNER.email, password: OWNER.password });
+  check('platform owner signs in', res.status === 200 && res.body?.user?.role === 'PLATFORM_ADMIN', `status ${res.status}`);
+
+  console.log('  POST /api/v1/schools', JSON.stringify({ name: SCHOOL.name }));
+  res = await api(owner, 'POST', '/api/v1/schools', { name: SCHOOL.name, defaultPassword: SCHOOL.defaultPassword });
+  const school = data(res);
+  check('school created ACTIVE with an acronym short code', res.status === 201 && school?.status === 'ACTIVE' && shortCodeRe('MU').test(school?.shortCode ?? ''), `status ${res.status} code ${school?.shortCode}`);
+  const schoolId = school?.id;
+
+  act('Act 3 — school admin provisioned, forced onto a personal password');
+  console.log('  POST /api/v1/schools/:id/admins', JSON.stringify({ name: SCHOOL_ADMIN.name, email: SCHOOL_ADMIN.email }));
+  res = await api(owner, 'POST', `/api/v1/schools/${schoolId}/admins`, { name: SCHOOL_ADMIN.name, email: SCHOOL_ADMIN.email });
+  check('owner provisions the school admin (owner-only route)', res.status === 201 && data(res)?.verificationEmailSent === true, `status ${res.status}`);
+
+  verifyUrl = await devVerificationUrl(anon, SCHOOL_ADMIN.email);
+  check('verification link visible for the school admin', !!verifyUrl);
+  if (verifyUrl) {
+    const target = new URL(verifyUrl);
+    res = await api(schoolAdmin, 'GET', `${target.pathname}${target.search}`, undefined, { redirect: 'manual' });
+    check('school admin verifies email (auto sign-in)', res.status === 200 || res.status === 302, `status ${res.status}`);
+  }
+  res = await api(schoolAdmin, 'POST', '/api/auth/sign-in/email', { email: SCHOOL_ADMIN.email, password: SCHOOL.defaultPassword });
+  check('school admin signs in with the school default password', res.status === 200, `status ${res.status}`);
+  res = await api(schoolAdmin, 'GET', '/api/v1/users/me');
+  check('admin profile shows school + forced change', data(res)?.school?.name === SCHOOL.name && data(res)?.mustChangePassword === true, `school=${data(res)?.school?.name} mustChange=${data(res)?.mustChangePassword}`);
+
+  res = await api(schoolAdmin, 'GET', `/api/v1/schools/${schoolId}/users`);
+  check('admin locked out of onboarding until the change (403 PASSWORD_CHANGE_REQUIRED)', res.status === 403 && JSON.stringify(res.body ?? {}).includes('PASSWORD_CHANGE_REQUIRED'), `status ${res.status}`);
+
+  res = await api(schoolAdmin, 'POST', '/api/v1/auth/first-password', { newPassword: SCHOOL_ADMIN.password });
+  check('admin sets a personal password (no old password)', res.status === 200 && data(res)?.passwordChanged === true, `status ${res.status}`);
+  res = await api(schoolAdmin, 'GET', `/api/v1/schools/${schoolId}/users`);
+  check('admin allowed again after the change', res.status === 200, `status ${res.status}`);
+  res = await api(schoolAdmin, 'POST', `/api/v1/schools/${schoolId}/admins`, { name: 'Peer Admin', email: 'peer.admin@miva.edu.ng' });
+  check('admin cannot mint peers (owner-only route, 403)', res.status === 403, `status ${res.status}`);
+
+  act('Act 3 — JUDE onboarded by the school (no public sign-up)');
+  console.log('  POST /api/v1/schools/:id/students', JSON.stringify({ email: JUDE.email, firstName: 'Jude' }));
+  res = await api(schoolAdmin, 'POST', `/api/v1/schools/${schoolId}/students`, {
+    email: JUDE.email,
+    firstName: 'Jude',
+    lastName: 'Okonkwo',
+    classLabel: 'Sociology 300 Level',
+    phone: JUDE.phone,
+  });
+  const enrolled = data(res);
+  check('school onboards Jude (201 + verification email)', res.status === 201 && enrolled?.verificationEmailSent === true, `status ${res.status}`);
+  check(`student code follows the school short code (${school?.shortCode}-####)`, new RegExp(`^${school?.shortCode}-\\d{4}$`).test(enrolled?.studentCode ?? ''), enrolled?.studentCode);
+
   verifyUrl = await devVerificationUrl(anon, JUDE.email);
   check('verification link visible for Jude', !!verifyUrl);
   if (verifyUrl) {
@@ -273,10 +361,20 @@ async function main() {
     res = await api(jude, 'GET', `${target.pathname}${target.search}`, undefined, { redirect: 'manual' });
     check('Jude verifies email (auto sign-in)', res.status === 200 || res.status === 302, `status ${res.status}`);
   }
-  res = await api(jude, 'POST', '/api/auth/sign-in/email', { email: JUDE.email, password: JUDE.password });
-  check('Jude signs in', res.status === 200, `status ${res.status}`);
+  res = await api(jude, 'POST', '/api/auth/sign-in/email', { email: JUDE.email, password: SCHOOL.defaultPassword });
+  check('Jude signs in with the school default password', res.status === 200, `status ${res.status}`);
   res = await api(jude, 'GET', '/api/users/me');
-  check('Jude role STUDENT', data(res)?.role === 'STUDENT', data(res)?.role);
+  check('Jude role STUDENT, school attached, forced change pending', data(res)?.role === 'STUDENT' && data(res)?.school?.name === SCHOOL.name && data(res)?.mustChangePassword === true, `role=${data(res)?.role} school=${data(res)?.school?.name} mustChange=${data(res)?.mustChangePassword}`);
+
+  res = await api(jude, 'POST', '/api/v1/auth/first-password', { newPassword: JUDE.password });
+  check('Jude sets a personal password', res.status === 200 && data(res)?.passwordChanged === true, `status ${res.status}`);
+  const throwaway = makeActor('throwaway-Jude');
+  res = await api(throwaway, 'POST', '/api/auth/sign-in/email', { email: JUDE.email, password: SCHOOL.defaultPassword });
+  check('school default dead for Jude after the change', res.status === 401, `status ${res.status}`);
+  res = await api(throwaway, 'POST', '/api/auth/sign-in/email', { email: JUDE.email, password: JUDE.password });
+  check('Jude personal password works', res.status === 200, `status ${res.status}`);
+  res = await api(jude, 'GET', '/api/users/me');
+  check('Jude session survives the forced change', res.status === 200, `status ${res.status}`);
 
   res = await api(jude, 'PATCH', '/api/v1/students/me', {
     displayName: 'Jude O.',
@@ -547,6 +645,12 @@ async function main() {
   res = await api(ngozi, 'POST', '/api/auth/sign-out');
   res = await api(ngozi, 'GET', '/api/users/me');
   check('stale Ngozi cookie now 401', res.status === 401, `status ${res.status}`);
+  res = await api(schoolAdmin, 'POST', '/api/auth/sign-out');
+  res = await api(schoolAdmin, 'GET', '/api/users/me');
+  check('stale school admin cookie now 401', res.status === 401, `status ${res.status}`);
+  res = await api(owner, 'POST', '/api/auth/sign-out');
+  res = await api(owner, 'GET', '/api/users/me');
+  check('stale owner cookie now 401', res.status === 401, `status ${res.status}`);
 
   // ------------------------------------------------------------- summary
   const total = passed + failed;

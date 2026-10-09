@@ -322,7 +322,7 @@ ON CONFLICT (name, type) DO UPDATE SET
 
 ## 4. Student Jude Michael — account → consent → disclosure
 
-### 4.1 Public sign-up
+### 4.1 The sign-up door is closed
 
 **Request** (anonymous)
 
@@ -339,15 +339,26 @@ POST /api/auth/sign-up/email
 }
 ```
 
-**Expected** `200`, `user.email` matches.
+**Expected** `400` with `code === "EMAIL_PASSWORD_SIGN_UP_DISABLED"`. The
+error is uniform whether or not the email exists — sign-up can no longer be
+used to probe which accounts are real.
+
+Accounts therefore enter only by **provisioning**. For a student that is
+school onboarding (§13.3): a school admin creates Jude with his school's
+default password, and his first sign-in is forced through a personal-password
+change (§13.4) before any other route works. Provision Jude now if you have
+not already — `jude.michael@miva.edu.ng`, class label
+`Sociology 300 Level`, phone `+2348098765432` — then continue.
 
 ### 4.2 Verify email + sign in
 
-Same flow as §2.2, with Jude's email and `jude.jar`. (Confirm the
-verify-first rule: a sign-in attempt made *before* verification is rejected.)
-Then:
+Same flow as §2.2, with Jude's email and `jude.jar`, except that the password
+is the **personal one Jude just chose** during the forced change (§13.4), not
+a self-chosen sign-up password. (Confirm the verify-first rule: a sign-in
+attempt made *before* verification is rejected.)
 
-**Request** `GET /api/users/me` — assert `data.role === "STUDENT"`.
+**Request** `GET /api/users/me` — assert `data.role === "STUDENT"` and
+`data.school.name` matches the onboarding school.
 
 ### 4.3 Student profile
 
@@ -1214,8 +1225,9 @@ onboard users until §13.3 sets it.
 ### 13.3 School-scoped user management
 
 Every route below is `SCHOOL_ADMIN` or `PLATFORM_ADMIN`; a school admin scoped
-to a different school is rejected with `403`. Today no API provisions a
-`SCHOOL_ADMIN` account — the platform owner drives these routes for any school.
+to a different school is rejected with `403`. The one exception is
+`POST /api/v1/schools/<schoolId>/admins` — minting a school admin is
+**owner-only** (`PLATFORM_ADMIN`); a school admin calling it gets `403`.
 
 **Request** — set the school-wide default password:
 

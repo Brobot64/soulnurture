@@ -36,6 +36,15 @@ describe('createAuth trustedOrigins', () => {
   });
 });
 
+describe('createAuth sign-up lock', () => {
+  it('disables public email/password sign-up — accounts enter only by provisioning', () => {
+    const auth = createAuth(prismaStub, mailerStub);
+
+    expect(auth.options.emailAndPassword?.disableSignUp).toBe(true);
+    expect(auth.options.emailAndPassword?.enabled).toBe(true);
+  });
+});
+
 describe('createAuth verification link redirect', () => {
   const userStub = { email: 'sam@example.com', name: 'Sam' } as never;
   const rawUrl =

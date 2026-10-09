@@ -93,7 +93,7 @@ Response envelope (Nest-handled routes):
 
 | Method | Path |
 |--------|------|
-| POST | `/api/auth/sign-up/email` |
+| POST | `/api/auth/sign-up/email` (disabled — uniform 400 `EMAIL_PASSWORD_SIGN_UP_DISABLED`) |
 | POST | `/api/auth/sign-in/email` |
 | POST | `/api/auth/sign-out` |
 | POST | `/api/auth/update-user` (rename/phone) |
@@ -103,7 +103,7 @@ Response envelope (Nest-handled routes):
 | GET | `/api/auth/verify-email` |
 | POST | `/api/verification/resend` |
 
-Email verification is required before full access. Use `credentials: "include"` from the browser — sessions are cookie-based. Verification emails are school-branded (the student's school name in the copy). Sign-in is rejected (403 `SCHOOL_SUSPENDED` / `ACCOUNT_DEACTIVATED`) for users whose school is suspended or whose account is deactivated.
+Email verification is required before full access. Use `credentials: "include"` from the browser — sessions are cookie-based. Verification emails are school-branded (the student's school name in the copy). Sign-in is rejected (403 `SCHOOL_SUSPENDED` / `ACCOUNT_DEACTIVATED`) for users whose school is suspended or whose account is deactivated. **Public sign-up is disabled** — accounts exist only by provisioning; the closed door answers a uniform 400 so the route can't probe which emails exist.
 
 **Roles:** `STUDENT`, `COUNSELLOR`, `PSYCHOLOGIST`, `SUPPORT_STAFF`, `SCHOOL_ADMIN`, `PLATFORM_ADMIN`. The school-onboarding path is the primary one: a PLATFORM_ADMIN provisions schools (`POST /api/v1/schools`), then school-scoped routes onboard students and professionals with the school's shared **default password** (plaintext never stored; the precomputed hash lives on `School`). Onboarded users sign in with the default password and are forced through `POST /api/v1/auth/first-password` before any other route works (`PASSWORD_CHANGE_REQUIRED` 403). Direct staff enrolment is also possible:
 - `POST /api/v1/staff/bootstrap` — public with the shared enrolment key (`STAFF_BOOTSTRAP_KEY`); roles `COUNSELLOR | PSYCHOLOGIST | SUPPORT_STAFF` only; requires email verification before sign-in.

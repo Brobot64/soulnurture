@@ -53,36 +53,6 @@ export function createAuth(
         ''
     ).replace(/\/+$/, '');
 
-    const rejectExistingEmailSignup = {
-        id: 'reject-existing-email-signup',
-        hooks: {
-            before: [{
-                matcher: (context) => context.path === '/sign-up/email',
-                handler: createAuthMiddleware(async (context) => {
-                    const email = (context.body as { email?: unknown }).email;
-                    if (typeof email !== 'string') return;
-
-                    const existingUser = await prisma.user.findFirst({
-                        where: {
-                            email: {
-                                equals: email.trim(),
-                                mode: 'insensitive',
-                            },
-                        },
-                        select: { id: true },
-                    });
-
-                    if (existingUser) {
-                        throw APIError.from('UNPROCESSABLE_ENTITY', {
-                            code: 'USER_ALREADY_EXISTS',
-                            message: 'An account with this email already exists.',
-                        });
-                    }
-                }),
-            }],
-        },
-    } satisfies BetterAuthPlugin;
-
     /// Blocks sign-in for users whose school is suspended or whose account is
     /// deactivated. The 403 message doubles as the "notification at sign-in".
     /// The request-time TenantGuard (src/common/guards/tenant.guard.ts) cuts
@@ -132,7 +102,7 @@ export function createAuth(
     return betterAuth({
         database: prismaAdapter(prisma, { provider: 'postgresql' }),
         basePath: '/api/auth',
-        plugins: [rejectExistingEmailSignup, schoolStatusGuard],
+        plugins: [schoolStatusGuard],
         advanced: {
             database: {
                 generateId: 'uuid',
@@ -168,6 +138,11 @@ export function createAuth(
         emailAndPassword: {
             enabled: true,
             requireEmailVerification: true,
+            // Accounts enter only by provisioning (school onboarding, staff
+            // bootstrap, platform-admin grant). A uniform 400 with
+            // EMAIL_PASSWORD_SIGN_UP_DISABLED replaces the old duplicate-email
+            // 422 so sign-up can no longer probe which emails exist.
+            disableSignUp: true,
 
             sendResetPassword: async ({ user, url }) => {
                 await mailer.sendMail({

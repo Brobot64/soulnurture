@@ -6,7 +6,6 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import request from 'supertest';
 import { AppModule } from './../src/app.module.js';
 import { randomUUID } from 'node:crypto';
-import { PrismaService } from '../src/prisma/prisma.service.js';
 
 describe('AppController (e2e)', () => {
   let app: NestFastifyApplication;
@@ -65,32 +64,20 @@ describe('AppController (e2e)', () => {
     await request(app.getHttpServer()).get('/api/v1/conversations').expect(401);
   });
 
-  it('rejects signup for an existing email with 422', async () => {
-    const email = `duplicate-${randomUUID()}@example.com`;
-    const prisma = app.get(PrismaService);
+  it('refuses public sign-up — accounts enter only by provisioning', async () => {
+    const response = await request(app.getHttpServer())
+      .post('/api/auth/sign-up/email')
+      .set('origin', 'http://localhost:3000')
+      .send({
+        name: 'Self Signup',
+        email: `locked-${randomUUID()}@example.com`,
+        password: 'valid-password-123',
+      })
+      .expect(400);
 
-    await prisma.user.create({
-      data: { name: 'Existing Test User', email },
+    expect(response.body).toMatchObject({
+      code: 'EMAIL_PASSWORD_SIGN_UP_DISABLED',
     });
-
-    try {
-      const response = await request(app.getHttpServer())
-        .post('/api/auth/sign-up/email')
-        .set('origin', 'http://localhost:3000')
-        .send({
-          name: 'Duplicate Test User',
-          email,
-          password: 'valid-password-123',
-        })
-        .expect(422);
-
-      expect(response.body).toMatchObject({
-        code: 'USER_ALREADY_EXISTS',
-        message: 'An account with this email already exists.',
-      });
-    } finally {
-      await prisma.user.delete({ where: { email } });
-    }
   });
 
   it('resends verification using an anonymous email-safe response', async () => {
