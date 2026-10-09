@@ -125,12 +125,13 @@ describe('AiService.generateAndApply', () => {
       transcribeAudio: (...args: unknown[]) => Promise<unknown>;
     },
     config: AiConfig = aiConfigStub,
+    context: typeof ctx = ctx,
   ) {
     return Test.createTestingModule({
       providers: [
         AiService,
         { provide: AI_PROVIDER, useValue: providerValue },
-        { provide: AiContextService, useValue: { build: async () => ctx } },
+        { provide: AiContextService, useValue: { build: async () => context } },
         IntentEngineService,
         { provide: PrismaService, useValue: prisma },
         { provide: AuditService, useValue: auditService },
@@ -422,25 +423,27 @@ describe('AiService.generateAndApply', () => {
     };
     const module = await createModule(provider);
     const service = module.get(AiService);
-    await service.generateAndApply({ ...orchestrationInput, language: 'yo' });
+    await service.generateAndApply({ ...orchestrationInput, messageLanguage: 'yo' });
 
     const sent = generateResponse.mock.calls[0][0] as { systemPrompt: string };
     expect(sent.systemPrompt).toContain('REPLY FULLY in Yoruba');
     expect(sent.systemPrompt).toContain('culturally grounded Yoruba');
   });
 
-  it('follows the language detected in the message over the standing language', async () => {
+  it('follows the language detected in the message over the standing preference', async () => {
     const generateResponse = vi.fn().mockResolvedValue(validModelResult());
     const provider = {
       generateResponse,
       transcribeAudio: async () => ({ text: 'x' }),
     };
-    const module = await createModule(provider);
+    const module = await createModule(provider, aiConfigStub, {
+      ...ctx,
+      student: { ...ctx.student, preferredLanguage: 'yo' },
+    });
     const service = module.get(AiService);
     await service.generateAndApply({
       ...orchestrationInput,
       messageLanguage: 'ha',
-      language: 'yo',
     });
 
     const sent = generateResponse.mock.calls[0][0] as { systemPrompt: string };
@@ -457,11 +460,15 @@ describe('AiService.generateAndApply', () => {
       },
     };
 
-    function serviceWithSpy(config: AiConfig = translateConfig) {
+    function serviceWithSpy(
+      config: AiConfig = translateConfig,
+      context: typeof ctx = ctx,
+    ) {
       const generateResponse = vi.fn().mockResolvedValue(validModelResult());
       return createModule(
         { generateResponse, transcribeAudio: async () => ({ text: 'x' }) },
         config,
+        context,
       ).then((module) => ({
         service: module.get(AiService),
         generateResponse,
@@ -496,12 +503,30 @@ describe('AiService.generateAndApply', () => {
 
     it('a language detected in this message beats the standing preference', async () => {
       replyRenderer.render.mockResolvedValue({ rendered: 'Rendered.', via: 'openai' });
-      const { service } = await serviceWithSpy();
+      const { service } = await serviceWithSpy(translateConfig, {
+        ...ctx,
+        student: { ...ctx.student, preferredLanguage: 'ha' },
+      });
       await service.generateAndApply({
         ...orchestrationInput,
         messageLanguage: 'yo',
-        language: 'ha',
       });
+
+      expect(replyRenderer.render).toHaveBeenCalledWith(
+        expect.objectContaining({ language: 'yo' }),
+      );
+    });
+
+    it('falls back to the standing preference when detection found nothing', async () => {
+      replyRenderer.render.mockResolvedValue({
+        rendered: 'Rendered.',
+        via: 'n-atlas-local',
+      });
+      const { service } = await serviceWithSpy(translateConfig, {
+        ...ctx,
+        student: { ...ctx.student, preferredLanguage: 'yo' },
+      });
+      await service.generateAndApply(orchestrationInput);
 
       expect(replyRenderer.render).toHaveBeenCalledWith(
         expect.objectContaining({ language: 'yo' }),
@@ -529,11 +554,13 @@ describe('AiService.generateAndApply', () => {
     });
 
     it("'en' detected in this message beats a vernacular language — English turns stay English", async () => {
-      const { service, generateResponse } = await serviceWithSpy();
+      const { service, generateResponse } = await serviceWithSpy(translateConfig, {
+        ...ctx,
+        student: { ...ctx.student, preferredLanguage: 'yo' },
+      });
       const outcome = await service.generateAndApply({
         ...orchestrationInput,
         messageLanguage: 'en',
-        language: 'yo',
       });
 
       expect(replyRenderer.render).not.toHaveBeenCalled();

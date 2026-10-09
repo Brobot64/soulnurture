@@ -187,10 +187,11 @@ export class ConversationsService {
 
     // Realtime language detection (offline heuristics; N-ATLaS only when
     // every heuristic is silent — fail-open, short timeout). The detected
-    // language beats the standing preference for THIS turn's reply, 'en'
-    // included (whoever types English can read it); null keeps the
-    // preference. Detection also drives the one-time language offer and the
-    // async VERNACULAR job (vernacular codes only).
+    // language drives THIS turn's reply, 'en' included (whoever types English
+    // can read it; the preference only fills silence) — the client passes no
+    // language, detection from the message content is the sole input.
+    // Detection also drives the one-time language offer and the async
+    // VERNACULAR job (vernacular codes only).
     const detection = await this.languageDetector.detect(dto.content);
     const detectedLanguage =
       detection.lang !== null && detection.lang !== 'en' ? detection.lang : null;
@@ -238,7 +239,6 @@ export class ConversationsService {
       conversationId: conversation.id,
       checkInId: conversation.checkInId,
       userContent: dto.content,
-      language: dto.language ?? student.preferredLanguage,
       messageLanguage: detection.lang,
       studentRef: student.displayName ?? student.firstName ?? 'Student',
       classLabel: student.classLabel ?? null,
