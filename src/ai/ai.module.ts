@@ -31,6 +31,7 @@ import { LanguageDetectorService } from './language/language-detector.service.js
 import { NatlasLlmProvider } from './providers/natlas/natlas-llm.provider.js';
 import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js';
 import { NAtlasAsrProvider } from './providers/natlas/natlas-asr.provider.js';
+import { ReplyRendererService } from './language/reply-renderer.service.js';
 
 @Module({
   imports: [PrismaModule, AuditModule, ConsentModule, ConfigModule, StudentsModule],
@@ -50,6 +51,7 @@ import { NAtlasAsrProvider } from './providers/natlas/natlas-asr.provider.js';
     NatlasLlmProvider,
     NatlasTranslationProvider,
     NAtlasAsrProvider,
+    ReplyRendererService,
     {
       provide: AI_PROVIDER_CHAIN_MEMBERS,
       useFactory: (

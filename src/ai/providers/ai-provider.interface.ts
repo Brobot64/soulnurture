@@ -33,6 +33,10 @@ export interface AiGenerationResult {
    * activities API. Not part of the model's structured-output contract. */
   activity?: { recommended: boolean; slug: string | null; title: string | null } | null;
   asyncState?: 'COMPLETE' | 'PENDING_AI' | 'FAILED';
+  /** Server-owned: the reply was rendered into a vernacular language by the
+   * render lane (n-atlas-translate mode); englishSource keeps the original
+   * English text for audit. Null/absent = the reply shipped as generated. */
+  render?: { language: string; via: string; englishSource: string } | null;
   usage?: {
     inputTokens?: number;
     outputTokens?: number;

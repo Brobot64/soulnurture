@@ -97,9 +97,10 @@ export interface AiConfig {
     /** When true, a message detected as vernacular while the preference is
      * still 'en' comes back with a languageOffer in the response. */
     offerEnabled: boolean;
-    /** Reply lane for vernacular turns. 'openai-native' is the built
-     * default; 'n-atlas-translate' is pre-wired for the post-pilot local
-     * model and currently behaves as openai-native. */
+    /** Reply lane for vernacular turns. 'n-atlas-translate' (default):
+     * generation stays English and local N-ATLaS renders the finished reply
+     * into the turn's language in the same request. 'openai-native': the
+     * frontier model replies in the vernacular directly (rollback). */
     vernacularReplyMode: VernacularReplyMode;
     /** OpenAI-compatible N-ATLaS chat endpoint for the vernacular lane —
      * the hosted Hugging Face Inference Endpoint (vLLM) in production, any
@@ -112,8 +113,14 @@ export interface AiConfig {
      * the hosted endpoint scales to zero and cold starts queue; the worker
      * retry ladder covers whatever exceeds this. */
     natlasTimeoutMs: number;
+    /** Per-attempt timeout for the synchronous reply render (ms). Short on
+     * purpose — the student is waiting, so a cold endpoint must fall through
+     * to the OpenAI render quickly. */
+    natlasRenderTimeoutMs: number;
     /** Strict output budget for the understanding contract (small JSON). */
     understandingMaxOutputTokens: number;
+    /** Output budget for a rendered reply (the reply in another language). */
+    renderMaxOutputTokens: number;
     /** Per-attempt timeout for the OpenAI translation fallback (ms). */
     understandingTimeoutMs: number;
   };
@@ -299,7 +306,11 @@ export function buildAiConfig(config: ConfigService): AiConfig {
       natlasTimeoutMs: Number(
         config.get<string>('NATLAS_LLM_TIMEOUT_MS') ?? 45_000,
       ),
+      natlasRenderTimeoutMs: Number(
+        config.get<string>('NATLAS_RENDER_TIMEOUT_MS') ?? 12_000,
+      ),
       understandingMaxOutputTokens: 120,
+      renderMaxOutputTokens: 400,
       understandingTimeoutMs: 15_000,
     },
     context: {

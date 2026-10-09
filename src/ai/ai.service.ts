@@ -50,10 +50,13 @@ import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js
 import type { MessageUnderstanding } from './language/understanding.schema.js';
 import {
   ASR_VERNACULAR_LANGUAGES,
+  LANGUAGE_DISPLAY_NAMES,
   languagePromptDirective,
   SUPPORTED_LANGUAGES,
   type SupportedLanguage,
 } from './language/language.config.js';
+import { interimEnglishDirective } from './language/render.prompt.js';
+import { ReplyRendererService } from './language/reply-renderer.service.js';
 import { NAtlasAsrProvider } from './providers/natlas/natlas-asr.provider.js';
 
 /**
@@ -72,6 +75,10 @@ export interface AiOrchestrationInput {
   checkInId?: string | null;
   userContent: string;
   language?: string;
+  /** Language detected in THIS message's text (synchronous detector in the
+   * conversations lane). Beats `language`/preference for the reply language —
+   * a Yoruba turn answered in Yoruba, per-message, no manual switching. */
+  messageLanguage?: SupportedLanguage | null;
   studentRef: string;
   classLabel: string | null;
   /** Guided-reply marker from the DTO; drives the directive selection. */
@@ -192,6 +199,7 @@ export class AiService {
     private readonly memory: MemoryRepository,
     private readonly understandingProvider: NatlasTranslationProvider,
     private readonly natlasAsr: NAtlasAsrProvider,
+    private readonly replyRenderer: ReplyRendererService,
     @Inject(AI_CONFIG) private readonly aiConfig: AiConfig,
   ) {}
 
@@ -239,6 +247,19 @@ export class AiService {
       }
     }
 
+    // Reply language for this turn: a language detected in THIS message's
+    // text beats the standing preference (per-message following), then the
+    // explicit/preference language, then English. With the n-atlas-translate
+    // mode a non-English turn also flips the generation directive to interim
+    // English — the finished reply is rendered afterwards by the local model.
+    const replyLanguage = this.resolveReplyLanguage(
+      input,
+      ctx.student.preferredLanguage,
+    );
+    const renderActive =
+      this.aiConfig.language.vernacularReplyMode === 'n-atlas-translate' &&
+      replyLanguage !== 'en';
+
     // Input guardrail: the model sees the truncated message; the intent floor
     // below still evaluates the RAW userContent — safety is never truncated.
     const sanitized = this.guardrail.sanitizeInput(input.userContent);
@@ -246,9 +267,11 @@ export class AiService {
     const systemPrompt = [
       SYSTEM_PROMPT,
       `Prompt version: ${REFLECTION_PROMPT_VERSION}`,
-      languagePromptDirective(
-        input.language ?? ctx.student.preferredLanguage ?? 'en',
-      ),
+      renderActive
+        ? interimEnglishDirective(replyLanguage)
+        : languagePromptDirective(
+            input.language ?? ctx.student.preferredLanguage ?? 'en',
+          ),
       ...guidedLines,
       `Valid supportFlag.category values: ${CANONICAL_CATEGORIES.join(', ')}`,
       `Valid supportFlag.severity values: ${CANONICAL_SEVERITIES.join(', ')}`,
@@ -323,7 +346,64 @@ export class AiService {
     // Server extras are owned by us, never trusted from the model.
     result.asyncState = 'COMPLETE';
 
+    // Render lane (n-atlas-translate): the finished English reply is rendered
+    // into the turn's language within this same request, so the student's
+    // next reply already comes back in their language. Scripted safety copy
+    // is never rendered — that wording is approved verbatim. Total render
+    // failure keeps the English reply (enhancement, never a blocker).
+    if (renderActive) {
+      const scriptedSafety = verdict?.actions.some(
+        (action) => action.type === 'SAFETY_MESSAGE',
+      );
+      if (scriptedSafety) {
+        notes.push(
+          'Reply render skipped: scripted safety message stays in its approved English wording.',
+        );
+      } else {
+        const rendered = await this.replyRenderer.render({
+          englishReply: result.message,
+          language: replyLanguage,
+          contextLines: [
+            `Student: ${input.studentRef}${input.classLabel ? ` (${input.classLabel})` : ''}`,
+            `The student just wrote: ${input.userContent}`,
+          ],
+        });
+        if (rendered) {
+          result.render = {
+            language: replyLanguage,
+            via: rendered.via,
+            englishSource: result.message,
+          };
+          result.message = rendered.rendered;
+          notes.push(
+            `Reply rendered in ${LANGUAGE_DISPLAY_NAMES[replyLanguage]} via ${rendered.via}.`,
+          );
+        } else {
+          notes.push('Reply render unavailable; kept the English reply.');
+        }
+      }
+    }
+
     return { result, context: ctx, verdict, notes };
+  }
+
+  /** messageLanguage (detected in this turn's text) ?? input.language ??
+   * student preference ?? 'en'. Unsupported codes and 'en' all fall to 'en'. */
+  private resolveReplyLanguage(
+    input: AiOrchestrationInput,
+    preferredLanguage: string | null | undefined,
+  ): SupportedLanguage {
+    const candidates = [input.messageLanguage, input.language, preferredLanguage];
+    for (const code of candidates) {
+      if (
+        code &&
+        code !== 'en' &&
+        SUPPORTED_LANGUAGES.includes(code as SupportedLanguage)
+      ) {
+        return code as SupportedLanguage;
+      }
+    }
+    return 'en';
   }
 
   /**

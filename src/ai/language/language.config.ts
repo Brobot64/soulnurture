@@ -11,7 +11,9 @@
  *
  * Detection is a realtime, offline heuristic stack (see
  * language-detector.service.ts): diacritics scan → Pidgin marker words →
- * franc trigram detection. No LLM ever sits in the realtime lane; the
+ * Yoruba/Hausa/Igbo lexicon wordlists → franc trigram detection (long
+ * English only — franc cannot separate yo/ha/ig: "mi o ti jeun lati aaro"
+ * scores ibo 1.0 vs yor 0.89). No LLM ever sits in the realtime lane; the
  * async understanding lane (worker VERNACULAR job) is the only model step.
  * ---------------------------------------------------------------------------
  */
@@ -36,16 +38,28 @@ export const LANGUAGE_DISPLAY_NAMES: Record<SupportedLanguage, string> = {
   ig: 'Igbo',
 };
 
-/** Reply-lane switch: 'openai-native' is the built default (the frontier
- * model replies in the vernacular directly); 'n-atlas-translate' is
- * pre-wired config only — the local N-ATLaS model translates and a
- * second pass replies, enabled after the pilot. */
+/** Reply-lane switch. 'n-atlas-translate' (default): generation stays
+ * English (full context + guardrails on English) and local N-ATLaS renders
+ * the finished reply into the turn's language in the same request — the
+ * student's next reply comes back in their language immediately.
+ * 'openai-native': the frontier model replies in the vernacular directly
+ * (rollback switch — the hosted N-ATLaS endpoint scales to zero). */
 export type VernacularReplyMode = 'openai-native' | 'n-atlas-translate';
 export const DEFAULT_VERNACULAR_REPLY_MODE: VernacularReplyMode =
-  'openai-native';
+  'n-atlas-translate';
 
 /** franc's ISO 639-3 codes for our canonical set. */
 export const FRANC_ONLY_CODES = ['eng', 'yor', 'hau', 'ibo', 'pcm'] as const;
+
+/**
+ * franc is only trusted for English, and only on text long enough to give
+ * its trigram model signal. On Nigerian-language text it misfires badly
+ * ("mi o ti jeun lati aaro mo fe lo ile mi" → ibo 1.0 vs yor 0.89; even
+ * "I am happy" → hau), so anything franc asserts about yo/ha/ig/pcm is
+ * discarded — the lexicon below is the only source for those languages.
+ */
+export const FRANC_MIN_CHARS = 20;
+export const FRANC_ACCEPTED_CODE = 'eng';
 
 export const FRANC_TO_LANGUAGE: Record<string, SupportedLanguage> = {
   eng: 'en',
@@ -107,6 +121,80 @@ export const PIDGIN_MARKER_PHRASES = [
 
 export const PIDGIN_MIN_MARKERS = 2;
 export const PIDGIN_HIGH_MARKERS = 3;
+
+/**
+ * Yoruba/Hausa/Igbo lexicon wordlists — the primary signal for the three
+ * local languages, because franc cannot separate them (see FRANC_MIN_CHARS).
+ * Every entry is whole-token matched on lowercased text and must be
+ * unambiguous across our five languages + English: shared words ('obi'
+ * yo+ig, 'iya' yo+ha, 'ni' yo+ha, 'ego', 'son') are deliberately absent.
+ * Diacritic spellings are handled by the (earlier, higher-precision)
+ * diacritics stage, so entries are written plain.
+ *
+ * Scoring per matched token occurrence: 3+ letters = 1.0, 2-letter words =
+ * 0.5 — and only Yoruba carries 2-letter words (mi/mo/fe/lo things);
+ * a 2-letter hit can never clear the threshold alone.
+ */
+export const LEXICON_WORDS: Record<'yo' | 'ha' | 'ig', readonly string[]> = {
+  yo: [
+    'aaro',
+    'baba',
+    'ile',
+    'iwe',
+    'jeun',
+    'lati',
+    'loni',
+    'nkan',
+    'omi',
+    'ounje',
+    'owo',
+    // 2-letter (0.5 each, occurrence-counted)
+    'fe',
+    'ko',
+    'lo',
+    'mi',
+    'mo',
+    'se',
+  ],
+  ha: [
+    'abinci',
+    'daga',
+    'gida',
+    'gobe',
+    'ina',
+    'jiya',
+    'kada',
+    'kwana',
+    'menene',
+    'nagode',
+    'nawa',
+    'ruwa',
+    'yaya',
+    'yanzu',
+  ],
+  ig: [
+    'akwukwo',
+    'ebee',
+    'gini',
+    'maka',
+    'mmiri',
+    'ndewo',
+    'nke',
+    'nna',
+    'nne',
+    'nri',
+    'nwa',
+    'nwanne',
+    'oge',
+    'ulo',
+  ],
+};
+
+/** Accept a lexicon call only at this score, and only when strictly the
+ * highest language. "mi o ti jeun lati aaro mo fe lo ile mi" scores yo 6.5;
+ * a single 3-letter word (1.0) or two 2-letter words (1.0) never fire. */
+export const LEXICON_MIN_SCORE = 2.5;
+export const LEXICON_HIGH_SCORE = 5.0;
 
 /** System-prompt language line. Vernacular directives demand a fully
  * vernacular reply — natural and culturally grounded, never machine-literal,

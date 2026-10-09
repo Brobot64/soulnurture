@@ -13,6 +13,7 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { AI_PROVIDER } from './providers/ai-provider.interface.js';
 import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js';
 import { NAtlasAsrProvider } from './providers/natlas/natlas-asr.provider.js';
+import { ReplyRendererService } from './language/reply-renderer.service.js';
 
 const aiConfigStub = {
   context: { messageLimit: 12, characterLimit: 12_000 },
@@ -81,6 +82,10 @@ describe('AiService.summarizeConversation', () => {
           useValue: { understand: vi.fn() },
         },
         { provide: NAtlasAsrProvider, useValue: { transcribeAudio: vi.fn() } },
+        {
+          provide: ReplyRendererService,
+          useValue: { render: vi.fn().mockResolvedValue(null) },
+        },
       ],
     }).compile();
     return module.get(AiService);

@@ -13,6 +13,7 @@ import { IntentEngineService } from './intents/intent-engine.service.js';
 import { MemoryRepository } from './memory/memory.repository.js';
 import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js';
 import { NAtlasAsrProvider } from './providers/natlas/natlas-asr.provider.js';
+import { ReplyRendererService } from './language/reply-renderer.service.js';
 import type { MessageUnderstanding } from './language/understanding.schema.js';
 import type { AiGenerationResult } from './providers/ai-provider.interface.js';
 
@@ -47,6 +48,18 @@ const aiConfigStub = {
     },
     wrapUpDirective: 'DIRECTIVE_WRAP_UP',
     flagDirective: 'DIRECTIVE_FLAG',
+  },
+  language: {
+    supported: ['en', 'yo', 'ha', 'ig', 'pcm'],
+    offerEnabled: true,
+    vernacularReplyMode: 'openai-native',
+    natlasBaseUrl: null,
+    natlasModel: 'NCAIR1/N-ATLaS',
+    natlasTimeoutMs: 45_000,
+    natlasRenderTimeoutMs: 12_000,
+    understandingMaxOutputTokens: 120,
+    renderMaxOutputTokens: 400,
+    understandingTimeoutMs: 15_000,
   },
 } as unknown as AiConfig;
 
@@ -104,11 +117,15 @@ describe('AiService.generateAndApply', () => {
   let auditService: { log: ReturnType<typeof vi.fn> };
   let understandingProvider: { understand: ReturnType<typeof vi.fn> };
   let asrProvider: { transcribeAudio: ReturnType<typeof vi.fn> };
+  let replyRenderer: { render: ReturnType<typeof vi.fn> };
 
-  function createModule(providerValue: {
-    generateResponse: (...args: unknown[]) => Promise<unknown>;
-    transcribeAudio: (...args: unknown[]) => Promise<unknown>;
-  }) {
+  function createModule(
+    providerValue: {
+      generateResponse: (...args: unknown[]) => Promise<unknown>;
+      transcribeAudio: (...args: unknown[]) => Promise<unknown>;
+    },
+    config: AiConfig = aiConfigStub,
+  ) {
     return Test.createTestingModule({
       providers: [
         AiService,
@@ -118,13 +135,14 @@ describe('AiService.generateAndApply', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: AuditService, useValue: auditService },
         GuardrailService,
-        { provide: AI_CONFIG, useValue: aiConfigStub },
+        { provide: AI_CONFIG, useValue: config },
         {
           provide: MemoryRepository,
           useValue: { embedAndStore: vi.fn(), recall: vi.fn() },
         },
         { provide: NatlasTranslationProvider, useValue: understandingProvider },
         { provide: NAtlasAsrProvider, useValue: asrProvider },
+        { provide: ReplyRendererService, useValue: replyRenderer },
       ],
     }).compile();
   }
@@ -141,6 +159,7 @@ describe('AiService.generateAndApply', () => {
     asrProvider = {
       transcribeAudio: vi.fn().mockResolvedValue({ text: 'sidecar text', durationSeconds: 3.2 }),
     };
+    replyRenderer = { render: vi.fn().mockResolvedValue(null) };
   });
 
   it('strips unknown resource ids from provider output', async () => {
@@ -408,6 +427,115 @@ describe('AiService.generateAndApply', () => {
     const sent = generateResponse.mock.calls[0][0] as { systemPrompt: string };
     expect(sent.systemPrompt).toContain('REPLY FULLY in Yoruba');
     expect(sent.systemPrompt).toContain('culturally grounded Yoruba');
+  });
+
+  describe('reply render lane (n-atlas-translate)', () => {
+    const translateConfig = {
+      ...aiConfigStub,
+      language: {
+        ...aiConfigStub.language,
+        vernacularReplyMode: 'n-atlas-translate' as const,
+      },
+    };
+
+    function serviceWithSpy(config: AiConfig = translateConfig) {
+      const generateResponse = vi.fn().mockResolvedValue(validModelResult());
+      return createModule(
+        { generateResponse, transcribeAudio: async () => ({ text: 'x' }) },
+        config,
+      ).then((module) => ({
+        service: module.get(AiService),
+        generateResponse,
+      }));
+    }
+
+    it('renders the finished reply and records it on the result', async () => {
+      replyRenderer.render.mockResolvedValue({
+        rendered: 'Mo wà níbí pẹ̀lú rẹ.',
+        via: 'n-atlas-local',
+      });
+      const { service } = await serviceWithSpy();
+      const outcome = await service.generateAndApply({
+        ...orchestrationInput,
+        userContent: 'mi o ti jeun lati aaro',
+        messageLanguage: 'yo',
+      });
+
+      expect(replyRenderer.render).toHaveBeenCalledWith({
+        englishReply: 'hello',
+        language: 'yo',
+        contextLines: ['Student: Jude O.', 'The student just wrote: mi o ti jeun lati aaro'],
+      });
+      expect(outcome.result.message).toBe('Mo wà níbí pẹ̀lú rẹ.');
+      expect(outcome.result.render).toEqual({
+        language: 'yo',
+        via: 'n-atlas-local',
+        englishSource: 'hello',
+      });
+      expect(outcome.notes.join(' ')).toContain('Reply rendered in Yoruba via n-atlas-local');
+    });
+
+    it('a language detected in this message beats the standing preference', async () => {
+      replyRenderer.render.mockResolvedValue({ rendered: 'Rendered.', via: 'openai' });
+      const { service } = await serviceWithSpy();
+      await service.generateAndApply({
+        ...orchestrationInput,
+        messageLanguage: 'yo',
+        language: 'ha',
+      });
+
+      expect(replyRenderer.render).toHaveBeenCalledWith(
+        expect.objectContaining({ language: 'yo' }),
+      );
+    });
+
+    it('keeps the English reply when every render lane fails', async () => {
+      const { service } = await serviceWithSpy();
+      const outcome = await service.generateAndApply({
+        ...orchestrationInput,
+        messageLanguage: 'yo',
+      });
+
+      expect(outcome.result.message).toBe('hello');
+      expect(outcome.result.render).toBeUndefined();
+      expect(outcome.notes.join(' ')).toContain('Reply render unavailable; kept the English reply.');
+    });
+
+    it('does not render for an English turn', async () => {
+      const { service } = await serviceWithSpy();
+      const outcome = await service.generateAndApply(orchestrationInput);
+
+      expect(replyRenderer.render).not.toHaveBeenCalled();
+      expect(outcome.result.render).toBeUndefined();
+    });
+
+    it('swaps the language directive for interim English while the render lane is on', async () => {
+      const { service, generateResponse } = await serviceWithSpy();
+      await service.generateAndApply({
+        ...orchestrationInput,
+        messageLanguage: 'yo',
+      });
+
+      const sent = generateResponse.mock.calls[0][0] as { systemPrompt: string };
+      expect(sent.systemPrompt).toContain('write this reply in English');
+      expect(sent.systemPrompt).toContain('rendered into Yoruba');
+      expect(sent.systemPrompt).not.toContain('REPLY FULLY in Yoruba');
+    });
+
+    it('never renders scripted safety copy — approved wording stays English', async () => {
+      prisma.supportFlag.findFirst = vi.fn().mockResolvedValue(null);
+      prisma.supportFlag.create = vi.fn().mockResolvedValue({ id: 'flag-1' });
+      const { service } = await serviceWithSpy();
+      const outcome = await service.generateAndApply({
+        ...orchestrationInput,
+        userContent: 'I want to kill myself and end it all',
+        messageLanguage: 'yo',
+      });
+
+      expect(replyRenderer.render).not.toHaveBeenCalled();
+      expect(outcome.result.message).toContain('you matter');
+      expect(outcome.notes.join(' ')).toContain('scripted safety message stays in its approved English wording');
+    });
   });
 
   describe('guided directives', () => {

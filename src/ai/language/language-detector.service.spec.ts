@@ -85,4 +85,51 @@ describe('LanguageDetectorService', () => {
       method: 'fallback',
     });
   });
+
+  it('detects pure Yoruba via the lexicon (franc says ibo for this text)', () => {
+    expect(detector.detect('mi o ti jeun lati aaro mo fe lo ile mi')).toEqual({
+      lang: 'yo',
+      confidence: 'high',
+      method: 'lexicon',
+    });
+  });
+
+  it('detects Yoruba inside a mixed English message', () => {
+    const detection = detector.detect(
+      "I'm feeling sad. I think it's because of school. mi o ti jeun lati aaro mo fe lo ile mi",
+    );
+    expect(detection.lang).toBe('yo');
+    expect(detection.method).toBe('lexicon');
+  });
+
+  it('detects Hausa via the lexicon', () => {
+    expect(detector.detect('yanzu ina kwana a gida')).toEqual({
+      lang: 'ha',
+      confidence: 'medium',
+      method: 'lexicon',
+    });
+  });
+
+  it('detects Igbo via the lexicon', () => {
+    expect(detector.detect('nne nna ndewo gini')).toEqual({
+      lang: 'ig',
+      confidence: 'medium',
+      method: 'lexicon',
+    });
+  });
+
+  it('never lets franc assert a Nigerian language', () => {
+    // Pre-lexicon, "I am happy" was misread as hausa by franc.
+    expect(detector.detect('I am happy')).toEqual({
+      lang: null,
+      confidence: 'low',
+      method: 'fallback',
+    });
+  });
+
+  it('does not fire on lone 2-letter Yoruba words', () => {
+    const detection = detector.detect('mo mi fe');
+    expect(detection.lang).not.toBe('yo');
+    expect(detection.method).toBe('fallback');
+  });
 });

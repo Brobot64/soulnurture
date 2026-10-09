@@ -555,14 +555,24 @@ preference is still `"en"` — see below).
 
 **Vernacular messages (language layer).** Every message is language-detected
 synchronously with offline heuristics — marked letters (Yoruba ẹ/ọ/ṣ, Hausa
-ƙ/ɓ/ɗ, Igbo ị/ọ/ụ/ṅ), Pidgin marker words, then franc — no model call sits in
-the realtime path, so the reply is never delayed. Detection does three things:
-when the student's preference is still `"en"`, the response carries
-`languageOffer: { detected, current }`; the reply itself continues in
-`dto.language ?? preferredLanguage` (a detected Yoruba message still gets an
-English reply until the preference changes); and a `VERNACULAR` job (see §6.6)
-is queued to translate the message and run a **second safeguarding sweep** on
-the English translation.
+ƙ/ɓ/ɗ, Igbo ị/ọ/ụ/ṅ), Pidgin marker words, then Yoruba/Hausa/Igbo lexicon
+wordlists; franc only classifies long English text (it cannot separate the
+Nigerian languages — "mi o ti jeun lati aaro" reads as Igbo to franc). No
+model call sits in the realtime path, so the reply is never delayed.
+Detection does three things: when the student's preference is still `"en"`,
+the response carries `languageOffer: { detected, current }`; the reply for
+**this turn** is rendered into the detected language — generation stays
+English (context, guardrails and the intent floor all run on the English
+lane) and the finished reply is rendered by local N-ATLaS **within the same
+request**, so a Yoruba message is answered in Yoruba immediately, whatever
+the standing preference (per-message following; a voice note follows the
+same rule once its transcript is sent). Forced `dto.language` wins over the
+detection; the preference is the fallback when nothing is detected. Render
+fallback chain: N-ATLaS → OpenAI render → the English reply (total render
+failure never blocks the turn); scripted safety copy is never rendered —
+that wording is approved verbatim. Finally a `VERNACULAR` job (see §6.6) is
+queued to translate the message and run a second safeguarding sweep on the
+English translation.
 
 **Vernacular probe** (optional — run after §5.4 so the 6-message assertion
 above stays valid). Send (omit `language`):
@@ -576,7 +586,11 @@ Assert:
 - `data.languageOffer === { "detected": "yo", "current": "en" }`
 - `data.activeIntent === null` (benign text; the keyword floor still ran on
   the raw text synchronously)
-- the assistant reply is in English (preference unchanged)
+- the assistant reply comes back **in Yoruba** (rendered in-request; with
+  neither `NATLAS_LLM_BASE_URL` nor `OPENAI_API_KEY` configured it stays
+  English — the turn is never blocked); the assistant turn's `aiPayload`
+  gains `render: { language: "yo", via: "n-atlas-local" | "openai",
+  englishSource }`
 
 Then within ~1 worker poll cycle (translation requires `OPENAI_API_KEY` or
 `NATLAS_LLM_BASE_URL`; see §9.5):
@@ -986,9 +1000,11 @@ Follow-up statuses: `PENDING | SCHEDULED | COMPLETED | CANCELLED`.
   (model + timeout), `memory` (idle close, recall windows, max similar),
   `summaries` (summary output cap), `context`, `async`, `safeguarding`,
   `language` (canonical `supported` codes, `offerEnabled` — `AI_LANGUAGE_OFFER_ENABLED`
-  — `vernacularReplyMode` — `AI_VERNACULAR_REPLY_MODE` — N-ATLaS
+  — `vernacularReplyMode` — `AI_VERNACULAR_REPLY_MODE`, `n-atlas-translate`
+  by default — N-ATLaS
   endpoint/model — `NATLAS_LLM_BASE_URL`/`NATLAS_LLM_MODEL` — and the
-  understanding output/timeout caps), `intents`, `canonicalCategories`,
+  understanding + render output/timeout caps: `NATLAS_LLM_TIMEOUT_MS`,
+  `NATLAS_RENDER_TIMEOUT_MS`, `renderMaxOutputTokens`), `intents`, `canonicalCategories`,
   `canonicalSeverities`, `canonicalTopics`,
   `guardrails` (`input` caps + injection probes, `output` caps + banned claims,
   `rate` per-student limits — see §5.3)
@@ -1764,3 +1780,4 @@ registers, and the §10 rows 17–19 fences.
 | 2026-10-09 | `SIGNUP_LOCK_011` — public sign-up closed with a uniform 400 `EMAIL_PASSWORD_SIGN_UP_DISABLED` (§14.8). |
 | 2026-10-09 | `DASH_DOCS_012` — Chapter 14 (this lane) + §10 rows 17–19 + Appendix B placeholder note; README dashboard routes; e2e `test/e2e-dashboards.mjs` (`npm run test:e2e:dashboards`). |
 | 2026-10-09 | `PLATFORM_ADMIN_013` — seed bootstrap accepts comma-separated `PLATFORM_ADMIN_EMAIL`/`PLATFORM_ADMIN_NAME` lists (positional names, generic fallback) so one seed run enrolls several owners; §13.1 + `.env.example` updated. |
+| 2026-10-09 | `VERNACULAR_REPLY_015` — per-message language following: lexicon detection replaces franc for yo/ha/ig (franc only classifies long English), and the `n-atlas-translate` reply mode renders the finished English reply into the turn's language within the same request (N-ATLaS → OpenAI render → English fallback; scripted safety copy never rendered); `aiPayload.render`, `NATLAS_RENDER_TIMEOUT_MS`; §5.3 + §9.5 + `.env.example` updated. |

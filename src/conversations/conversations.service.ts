@@ -186,8 +186,9 @@ export class ConversationsService {
     this.guardrail.assertMessageAllowed(student.id);
 
     // Realtime language detection (offline heuristics — no LLM in this lane).
-    // Drives the one-time language offer and the async VERNACULAR job only;
-    // the reply language itself stays dto.language ?? preference.
+    // Message language beats the standing preference for THIS turn's reply
+    // (per-message following: a Yoruba message is answered in Yoruba), drives
+    // the one-time language offer and the async VERNACULAR job.
     const detection = this.languageDetector.detect(dto.content);
     const detectedLanguage =
       detection.lang !== null && detection.lang !== 'en' ? detection.lang : null;
@@ -236,6 +237,7 @@ export class ConversationsService {
       checkInId: conversation.checkInId,
       userContent: dto.content,
       language: dto.language ?? student.preferredLanguage,
+      messageLanguage: detectedLanguage,
       studentRef: student.displayName ?? student.firstName ?? 'Student',
       classLabel: student.classLabel ?? null,
       quickReply: dto.quickReply ?? null,

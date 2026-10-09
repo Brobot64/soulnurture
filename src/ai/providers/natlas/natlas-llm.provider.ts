@@ -18,6 +18,11 @@ export interface NatlasCompletion {
   usage: { inputTokens?: number; outputTokens?: number };
 }
 
+export interface NatlasTextCompletion {
+  text: string;
+  usage: { inputTokens?: number; outputTokens?: number };
+}
+
 /**
  * Raw client for N-ATLaS behind an OpenAI-compatible chat API — the hosted
  * Hugging Face Inference Endpoint (vLLM) in production, any OpenAI-shape
@@ -48,6 +53,68 @@ export class NatlasLlmProvider {
     systemPrompt: string,
     userContent: string,
   ): Promise<NatlasCompletion> {
+    const { content, usage } = await this.postChat(
+      {
+        stream: false,
+        temperature: 0.1,
+        max_tokens: this.aiConfig.language.understandingMaxOutputTokens,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userContent },
+        ],
+      },
+      this.aiConfig.language.natlasTimeoutMs,
+    );
+
+    let raw: unknown;
+    try {
+      raw = JSON.parse(content);
+    } catch (error) {
+      throw new NatlasUnavailableError('N-ATLaS response is not valid JSON', {
+        cause: error,
+      });
+    }
+
+    return { raw, usage };
+  }
+
+  /** Free-text completion for the reply-render lane (no response_format —
+   * the model returns the rendered message itself). Own, shorter timeout:
+   * unlike the async understanding lane, the student waits on this, so a
+   * cold endpoint must fail fast into the fallback chain. */
+  async completeText(
+    systemPrompt: string,
+    userContent: string,
+  ): Promise<NatlasTextCompletion> {
+    const { content, usage } = await this.postChat(
+      {
+        stream: false,
+        temperature: 0.2,
+        max_tokens: this.aiConfig.language.renderMaxOutputTokens,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userContent },
+        ],
+      },
+      this.aiConfig.language.natlasRenderTimeoutMs,
+    );
+    const text = content.trim();
+    if (text.length === 0) {
+      throw new NatlasUnavailableError(
+        'N-ATLaS endpoint returned an empty response',
+      );
+    }
+    return { text, usage };
+  }
+
+  private async postChat(
+    body: Record<string, unknown>,
+    timeoutMs: number,
+  ): Promise<{
+    content: string;
+    usage: { inputTokens?: number; outputTokens?: number };
+  }> {
     const baseUrl = this.aiConfig.language.natlasBaseUrl;
     if (!baseUrl) {
       throw new NatlasUnavailableError('N-ATLaS endpoint is not configured');
@@ -68,16 +135,9 @@ export class NatlasLlmProvider {
         headers,
         body: JSON.stringify({
           model: this.aiConfig.language.natlasModel,
-          stream: false,
-          temperature: 0.1,
-          max_tokens: this.aiConfig.language.understandingMaxOutputTokens,
-          response_format: { type: 'json_object' },
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userContent },
-          ],
+          ...body,
         }),
-        signal: AbortSignal.timeout(this.aiConfig.language.natlasTimeoutMs),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
       throw new NatlasUnavailableError('N-ATLaS endpoint is unreachable', {
@@ -108,17 +168,8 @@ export class NatlasLlmProvider {
       );
     }
 
-    let raw: unknown;
-    try {
-      raw = JSON.parse(content);
-    } catch (error) {
-      throw new NatlasUnavailableError('N-ATLaS response is not valid JSON', {
-        cause: error,
-      });
-    }
-
     return {
-      raw,
+      content,
       usage: {
         inputTokens: json.usage?.prompt_tokens,
         outputTokens: json.usage?.completion_tokens,

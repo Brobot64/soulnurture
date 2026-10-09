@@ -10,7 +10,9 @@ const aiConfig = {
     natlasBaseUrl: 'https://endpoint.example.cloud/',
     natlasModel: 'NCAIR1/N-ATLaS',
     natlasTimeoutMs: 45_000,
+    natlasRenderTimeoutMs: 12_000,
     understandingMaxOutputTokens: 120,
+    renderMaxOutputTokens: 400,
     understandingTimeoutMs: 15_000,
   },
 } as unknown as AiConfig;
@@ -156,5 +158,52 @@ describe('NatlasLlmProvider', () => {
       /not configured/,
     );
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  describe('completeText (reply render)', () => {
+    it('POSTs the free-text shape with the render budget and trims the content', async () => {
+      let capturedInit: RequestInit | undefined;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (_url: string, init: RequestInit) => {
+          capturedInit = init;
+          return jsonResponse(
+            chatBody('  Mo wà níbí.  ', {
+              prompt_tokens: 12,
+              completion_tokens: 6,
+            }),
+          );
+        }),
+      );
+
+      const outcome = await buildProvider({ NATLAS_LLM_API_KEY: 'hf_test' })
+        .completeText('SYSTEM', 'USER');
+
+      expect(JSON.parse(capturedInit?.body as string)).toEqual({
+        model: 'NCAIR1/N-ATLaS',
+        stream: false,
+        temperature: 0.2,
+        max_tokens: 400,
+        messages: [
+          { role: 'system', content: 'SYSTEM' },
+          { role: 'user', content: 'USER' },
+        ],
+      });
+      expect(outcome).toEqual({
+        text: 'Mo wà níbí.',
+        usage: { inputTokens: 12, outputTokens: 6 },
+      });
+    });
+
+    it('rejects a whitespace-only completion', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => jsonResponse(chatBody('   '))),
+      );
+
+      await expect(
+        buildProvider().completeText('sys', 'user'),
+      ).rejects.toThrow(/empty response/);
+    });
   });
 });
