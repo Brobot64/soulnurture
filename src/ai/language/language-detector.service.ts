@@ -1,5 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { franc } from 'franc';
+import { AI_CONFIG } from '../config/ai.config.js';
+import type { AiConfig } from '../config/ai.config.js';
+import { OPENAI_CHAT_URL } from '../providers/openai/openai.constants.js';
 import { NatlasLlmProvider } from '../providers/natlas/natlas-llm.provider.js';
 import { identifyLanguageSystemPrompt } from './identify.prompt.js';
 import {
@@ -87,12 +91,15 @@ function parseIdentifiedLanguage(raw: string): SupportedLanguage | null {
 /**
  * Realtime language detection for the chat lane. Heuristics first (pure, no
  * I/O): diacritics → Pidgin markers → lexicon → franc. Only when every
- * heuristic is silent does the detector ask N-ATLaS itself to classify the
- * message — the model that answers the student decides their language, so
+ * heuristic is silent does the detector ask a model to name the message's
+ * language — N-ATLaS itself first; when that lane is unavailable (paused or
+ * cold endpoint) or answers unparsably, OpenAI runs the same identify
+ * prompt, because the model that answers the student decides their language:
  * Hausa/Igbo typed without diacritics (invisible to the wordlists) is
  * followed instead of the standing preference winning by default. The model
- * stage is fail-open and strictly capped (see NATLAS_IDENTIFY_TIMEOUT_MS):
- * unconfigured endpoint, short text or any error → heuristic verdict stands.
+ * stage is fail-open and strictly capped (NATLAS_IDENTIFY_TIMEOUT_MS, then
+ * OPENAI_IDENTIFY_TIMEOUT_MS): no lane configured, short text or any error →
+ * the fallback verdict stands (keep the preference).
  *
  * A detected language seeds the reply language for that turn (render lane /
  * direct vernacular reply); the async VERNACULAR job still runs the full
@@ -107,7 +114,8 @@ function parseIdentifiedLanguage(raw: string): SupportedLanguage | null {
  *   4. franc       — long English text only; its yo/ha/ig/pcm verdicts are
  *      discarded outright.
  *   5. model       — N-ATLaS translates the message and its language header
- *      is read (short texts skip; see identify.prompt.ts).
+ *      is read; OpenAI runs the same prompt when N-ATLaS is unavailable or
+ *      unparsable (short texts skip; see identify.prompt.ts).
  *   6. fallback    — lang null → callers keep the current preference.
  *
  * `detect(text, { allowModel: false })` stops at step 4 — pure heuristics
@@ -118,7 +126,16 @@ function parseIdentifiedLanguage(raw: string): SupportedLanguage | null {
 export class LanguageDetectorService {
   private readonly logger = new Logger(LanguageDetectorService.name);
 
-  constructor(private readonly natlasLlm: NatlasLlmProvider) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly natlasLlm: NatlasLlmProvider,
+    @Inject(AI_CONFIG) private readonly aiConfig: AiConfig,
+  ) {}
+
+  private get apiKey(): string {
+    // Secret lives only here; it never enters AiConfig, which GET /api/v1/ai/config exposes.
+    return this.config.get<string>('OPENAI_API_KEY') ?? '';
+  }
 
   async detect(
     text: string,
@@ -223,28 +240,97 @@ export class LanguageDetectorService {
   }
 
   /**
-   * Model stage — the last resort when every heuristic is silent. Fail-open
-   * in every direction: unconfigured endpoint, text below IDENTIFY_MIN_CHARS
-   * or without letters, any model error → null, and the caller's fallback
-   * verdict (keep the preference) stands exactly as before LANG_ID_016.
+   * Model stage — the last resort when every heuristic is silent. N-ATLaS
+   * first; when its lane is unavailable (paused/cold endpoint — the reported
+   * LANG_ID_016 gap) or it answers unparsably, OpenAI runs the same identify
+   * prompt. Fail-open in every direction: no lane configured, text below
+   * IDENTIFY_MIN_CHARS or without letters, any model error → null, and the
+   * caller's fallback verdict (keep the preference) stands exactly as before
+   * LANG_ID_016.
    */
   private async byModel(text: string): Promise<LanguageDetection | null> {
     const trimmed = text.trim();
-    if (!this.natlasLlm.configured || trimmed.length < IDENTIFY_MIN_CHARS) {
+    const natlasReady = this.natlasLlm.configured;
+    const openaiReady = this.apiKey.length > 0;
+    if ((!natlasReady && !openaiReady) || trimmed.length < IDENTIFY_MIN_CHARS) {
       return null;
     }
     if (!/\p{L}/u.test(trimmed)) return null;
+
+    if (natlasReady) {
+      try {
+        const completion = await this.natlasLlm.completeLabel(
+          identifyLanguageSystemPrompt(),
+          text,
+        );
+        const lang = parseIdentifiedLanguage(completion.text);
+        if (lang) return { lang, confidence: 'medium', method: 'model' };
+        // An explicit "Language: Other/French" header is a real non-answer —
+        // honoured, never back-filled (not even by the OpenAI lane). Only a
+        // header-less unparsable answer falls through.
+        if (LANGUAGE_LINE_PATTERN.test(completion.text)) return null;
+        this.logger.warn(
+          `N-ATLaS language identification answered unparsably${
+            openaiReady ? '; falling back to OpenAI' : ''
+          }`,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `N-ATLaS language identification failed${
+            openaiReady ? '; falling back to OpenAI' : ''
+          }: ${message}`,
+        );
+      }
+    }
+
+    return this.identifyViaOpenAi(text);
+  }
+
+  /**
+   * Same identify prompt on the OpenAI lane — the reliable fallback while
+   * N-ATLaS is paused or cold. Never throws: any failure → null, and the
+   * preference fallback stands exactly as if the stage never ran.
+   */
+  private async identifyViaOpenAi(
+    text: string,
+  ): Promise<LanguageDetection | null> {
+    if (!this.apiKey) return null;
     try {
-      const completion = await this.natlasLlm.completeLabel(
-        identifyLanguageSystemPrompt(),
-        text,
-      );
-      const lang = parseIdentifiedLanguage(completion.text);
+      const res = await fetch(OPENAI_CHAT_URL, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: this.aiConfig.openai.model,
+          max_completion_tokens:
+            this.aiConfig.language.openaiIdentifyMaxOutputTokens,
+          messages: [
+            { role: 'system', content: identifyLanguageSystemPrompt() },
+            { role: 'user', content: text },
+          ],
+        }),
+        signal: AbortSignal.timeout(
+          this.aiConfig.language.openaiIdentifyTimeoutMs,
+        ),
+      });
+
+      if (!res.ok) {
+        throw new Error(`OpenAI rejected the request with status ${res.status}`);
+      }
+
+      const json = (await res.json()) as {
+        choices?: { message?: { content?: string } }[];
+      };
+      const content = json.choices?.[0]?.message?.content;
+      const lang = content ? parseIdentifiedLanguage(content) : null;
       if (!lang) return null;
       return { lang, confidence: 'medium', method: 'model' };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn(`N-ATLaS language identification failed: ${message}`);
+      this.logger.warn(`OpenAI language identification failed: ${message}`);
       return null;
     }
   }

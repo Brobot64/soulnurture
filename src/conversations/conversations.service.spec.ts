@@ -1,4 +1,5 @@
 import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { MessageRole } from '@prisma/client';
 import { AiService } from '../ai/ai.service.js';
@@ -55,6 +56,8 @@ const aiConfigStub = {
     natlasModel: 'n-atlas',
     understandingMaxOutputTokens: 120,
     understandingTimeoutMs: 15_000,
+    openaiIdentifyTimeoutMs: 8_000,
+    openaiIdentifyMaxOutputTokens: 200,
   },
 } as AiConfig;
 
@@ -150,6 +153,10 @@ describe('ConversationsService', () => {
         {
           provide: NatlasLlmProvider,
           useValue: { configured: false, completeLabel: vi.fn() },
+        },
+        {
+          provide: ConfigService,
+          useValue: { get: vi.fn().mockReturnValue(undefined) },
         },
         LanguageDetectorService,
         { provide: GuardrailService, useValue: guardrail },

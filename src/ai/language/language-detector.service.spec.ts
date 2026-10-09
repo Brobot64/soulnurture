@@ -1,15 +1,49 @@
+import type { ConfigService } from '@nestjs/config';
+import type { AiConfig } from '../config/ai.config.js';
+import { OPENAI_CHAT_URL } from '../providers/openai/openai.constants.js';
 import type { NatlasLlmProvider } from '../providers/natlas/natlas-llm.provider.js';
 import { LanguageDetectorService } from './language-detector.service.js';
+
+const aiConfig = {
+  openai: { model: 'gpt-5.6-luna' },
+  language: {
+    openaiIdentifyTimeoutMs: 8_000,
+    openaiIdentifyMaxOutputTokens: 200,
+  },
+} as unknown as AiConfig;
+
+function configWith(env: Record<string, string>): ConfigService {
+  return { get: (key: string) => env[key] } as unknown as ConfigService;
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function openAiBody(content: string): object {
+  return { choices: [{ message: { content } }] };
+}
 
 describe('LanguageDetectorService', () => {
   let detector: LanguageDetectorService;
   let natlasLlm: { configured: boolean; completeLabel: ReturnType<typeof vi.fn> };
+  let env: Record<string, string>;
 
   beforeEach(() => {
+    env = {};
     natlasLlm = { configured: false, completeLabel: vi.fn() };
     detector = new LanguageDetectorService(
+      configWith(env),
       natlasLlm as unknown as NatlasLlmProvider,
+      aiConfig,
     );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('detects Yoruba from its diacritics', async () => {
@@ -317,6 +351,180 @@ describe('LanguageDetectorService', () => {
       expect(
         await detector.detect('Ina jin dadi amma ba zan iya sanya ba'),
       ).toEqual({ lang: null, confidence: 'low', method: 'fallback' });
+    });
+  });
+
+  describe('OpenAI identify fallback', () => {
+    const silentText = 'Ina jin dadi amma ba zan iya sanya jin dadi ba';
+
+    beforeEach(() => {
+      natlasLlm.configured = true;
+      env.OPENAI_API_KEY = 'sk-test';
+    });
+
+    it('falls back to OpenAI when the N-ATLaS lane is unavailable (paused endpoint)', async () => {
+      natlasLlm.completeLabel.mockRejectedValue(
+        new Error('N-ATLaS endpoint rejected the request with status 400'),
+      );
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse(openAiBody('Language: Hausa\nMeaning: I am happy.')),
+        );
+      vi.stubGlobal('fetch', fetchMock);
+
+      expect(await detector.detect(silentText)).toEqual({
+        lang: 'ha',
+        confidence: 'medium',
+        method: 'model',
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe(OPENAI_CHAT_URL);
+      expect(init.headers).toEqual({
+        Authorization: 'Bearer sk-test',
+        'Content-Type': 'application/json',
+      });
+      const body = JSON.parse(init.body as string) as {
+        model: string;
+        max_completion_tokens: number;
+        messages: { role: string; content: string }[];
+      };
+      expect(body.model).toBe('gpt-5.6-luna');
+      expect(body.max_completion_tokens).toBe(200);
+      expect(body.messages[0].content).toContain('Language: <the language');
+      expect(body.messages[1].content).toBe(silentText);
+      expect(body).not.toHaveProperty('response_format');
+    });
+
+    it('runs the OpenAI lane directly when N-ATLaS is unconfigured', async () => {
+      natlasLlm.configured = false;
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse(
+            openAiBody(
+              'Language: Igbo\nMeaning: It is fine but I cannot express that feeling.',
+            ),
+          ),
+        );
+      vi.stubGlobal('fetch', fetchMock);
+
+      expect(
+        await detector.detect(
+          'O di m mma mana enweghi m ike itinye mmetuta ahu',
+        ),
+      ).toEqual({ lang: 'ig', confidence: 'medium', method: 'model' });
+      expect(natlasLlm.completeLabel).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('an N-ATLaS verdict still wins — OpenAI is never asked', async () => {
+      natlasLlm.completeLabel.mockResolvedValue({
+        text: 'Language: Hausa\nMeaning: I am happy.',
+        usage: {},
+      });
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+
+      expect(await detector.detect(silentText)).toEqual({
+        lang: 'ha',
+        confidence: 'medium',
+        method: 'model',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("an explicit 'Other' header from N-ATLaS is honoured — OpenAI is not asked", async () => {
+      natlasLlm.completeLabel.mockResolvedValue({
+        text: 'Language: French\nMeaning: I am happy.',
+        usage: {},
+      });
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+
+      expect(await detector.detect(silentText)).toEqual({
+        lang: null,
+        confidence: 'low',
+        method: 'fallback',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('a header-less unparsable N-ATLaS answer falls through to OpenAI', async () => {
+      natlasLlm.completeLabel.mockResolvedValue({
+        text: 'fr maybe?',
+        usage: {},
+      });
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(jsonResponse(openAiBody('yo')));
+      vi.stubGlobal('fetch', fetchMock);
+
+      expect(await detector.detect('Mo ri e ni oko')).toEqual({
+        lang: 'yo',
+        confidence: 'medium',
+        method: 'model',
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('fails open when OpenAI itself errors (HTTP status)', async () => {
+      natlasLlm.completeLabel.mockRejectedValue(new Error('cold start'));
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(jsonResponse({ error: 'boom' }, 500)),
+      );
+
+      expect(await detector.detect(silentText)).toEqual({
+        lang: null,
+        confidence: 'low',
+        method: 'fallback',
+      });
+    });
+
+    it('fails open when fetch itself throws', async () => {
+      natlasLlm.completeLabel.mockRejectedValue(new Error('cold start'));
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockRejectedValue(new Error('network down')),
+      );
+
+      expect(await detector.detect(silentText)).toEqual({
+        lang: null,
+        confidence: 'low',
+        method: 'fallback',
+      });
+    });
+
+    it('fails open when the OpenAI answer is unparsable too', async () => {
+      natlasLlm.completeLabel.mockRejectedValue(new Error('cold start'));
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(jsonResponse(openAiBody('no idea, sorry'))),
+      );
+
+      expect(await detector.detect(silentText)).toEqual({
+        lang: null,
+        confidence: 'low',
+        method: 'fallback',
+      });
+    });
+
+    it('stays a no-op when neither lane is configured', async () => {
+      natlasLlm.configured = false;
+      delete env.OPENAI_API_KEY;
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+
+      expect(await detector.detect(silentText)).toEqual({
+        lang: null,
+        confidence: 'low',
+        method: 'fallback',
+      });
+      expect(natlasLlm.completeLabel).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 });

@@ -121,6 +121,11 @@ export interface AiConfig {
      * strictest of the three: it runs inside sendMessage before the reply
      * lane even starts, so on timeout the heuristics' verdict stands. */
     natlasIdentifyTimeoutMs: number;
+    /** Per-attempt timeout for the OpenAI language-ID fallback (ms). Fires
+     * only when the N-ATLaS lane is unavailable (paused/cold) or answers
+     * unparsably; more room than the N-ATLaS cap (reasoning models think),
+     * still bounded — on timeout the preference fallback stands. */
+    openaiIdentifyTimeoutMs: number;
     /** Strict output budget for the understanding contract (small JSON). */
     understandingMaxOutputTokens: number;
     /** Output budget for a rendered reply (the reply in another language). */
@@ -128,6 +133,10 @@ export interface AiConfig {
     /** Output budget for the language-ID reply (language header line plus a
      * short translation; the header prints first, so truncation is safe). */
     identifyMaxOutputTokens: number;
+    /** Output budget for the OpenAI language-ID fallback. Larger than the
+     * N-ATLaS cap: reasoning models need headroom for thinking + the
+     * two-line answer (identify.prompt.ts v2). */
+    openaiIdentifyMaxOutputTokens: number;
     /** Per-attempt timeout for the OpenAI translation fallback (ms). */
     understandingTimeoutMs: number;
   };
@@ -319,9 +328,13 @@ export function buildAiConfig(config: ConfigService): AiConfig {
       natlasIdentifyTimeoutMs: Number(
         config.get<string>('NATLAS_IDENTIFY_TIMEOUT_MS') ?? 4_000,
       ),
+      openaiIdentifyTimeoutMs: Number(
+        config.get<string>('OPENAI_IDENTIFY_TIMEOUT_MS') ?? 8_000,
+      ),
       understandingMaxOutputTokens: 120,
       renderMaxOutputTokens: 400,
       identifyMaxOutputTokens: 64,
+      openaiIdentifyMaxOutputTokens: 200,
       understandingTimeoutMs: 15_000,
     },
     context: {

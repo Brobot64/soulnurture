@@ -77,4 +77,19 @@ describe('buildAiConfig language block', () => {
 
     expect(config.language.natlasIdentifyTimeoutMs).toBe(2_000);
   });
+
+  it('defaults the OpenAI identify fallback knobs', () => {
+    const config = buildAiConfig(new ConfigService({}));
+
+    expect(config.language.openaiIdentifyTimeoutMs).toBe(8_000);
+    expect(config.language.openaiIdentifyMaxOutputTokens).toBe(200);
+  });
+
+  it('honours OPENAI_IDENTIFY_TIMEOUT_MS', () => {
+    const config = buildAiConfig(
+      new ConfigService({ OPENAI_IDENTIFY_TIMEOUT_MS: '6000' }),
+    );
+
+    expect(config.language.openaiIdentifyTimeoutMs).toBe(6_000);
+  });
 });

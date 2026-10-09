@@ -557,11 +557,15 @@ synchronously: offline heuristics first — marked letters (Yoruba ẹ/ọ/ṣ, 
 ƙ/ɓ/ɗ, Igbo ị/ọ/ụ/ṅ), Pidgin marker words, then Yoruba/Hausa/Igbo lexicon
 wordlists; franc only classifies long English text (it cannot separate the
 Nigerian languages — "mi o ti jeun lati aaro" reads as Igbo to franc). When
-every heuristic is silent the detector asks N-ATLaS itself to name the
-language (LANG_ID_016) — a strict 4s cap (`NATLAS_IDENTIFY_TIMEOUT_MS`) and
-fail-open in every direction: text under 8 characters, a missing/cold
-endpoint or any error leaves the preference fallback standing exactly as
-before, so the turn is never delayed more than the cap. Detection does three
+every heuristic is silent the detector asks a model to name the language
+(LANG_ID_016): N-ATLaS first — a strict 4s cap (`NATLAS_IDENTIFY_TIMEOUT_MS`)
+— and when that lane is unavailable (paused/cold endpoint) or answers
+unparsably, OpenAI runs the same identify prompt (8s cap,
+`OPENAI_IDENTIFY_TIMEOUT_MS`). An explicit "Other" header from N-ATLaS is a
+non-answer and is honoured as-is, never back-filled. Fail-open in every
+direction: text under 8 characters, no lane configured or any error leaves
+the preference fallback standing exactly as
+before, so the turn is never delayed beyond the caps. Detection does three
 things: when the student's preference is still `"en"`, the response carries
 `languageOffer: { detected, current }`; the reply for **this turn** follows
 the detected language — `"en"` included, so whoever types English is answered
@@ -1049,8 +1053,9 @@ Follow-up statuses: `PENDING | SCHEDULED | COMPLETED | CANCELLED`.
   endpoint/model — `NATLAS_LLM_BASE_URL`/`NATLAS_LLM_MODEL` — and the
   understanding + render + language-ID output/timeout caps:
   `NATLAS_LLM_TIMEOUT_MS`, `NATLAS_RENDER_TIMEOUT_MS`,
-  `NATLAS_IDENTIFY_TIMEOUT_MS`, `renderMaxOutputTokens`,
-  `identifyMaxOutputTokens`), `intents`, `canonicalCategories`,
+  `NATLAS_IDENTIFY_TIMEOUT_MS`, `OPENAI_IDENTIFY_TIMEOUT_MS`,
+  `renderMaxOutputTokens`,
+  `identifyMaxOutputTokens`, `openaiIdentifyMaxOutputTokens`), `intents`, `canonicalCategories`,
   `canonicalSeverities`, `canonicalTopics`,
   `guardrails` (`input` caps + injection probes, `output` caps + banned claims,
   `rate` per-student limits — see §5.3)
@@ -1834,3 +1839,4 @@ registers, and the §10 rows 17–19 fences.
 | 2026-10-09 | `VERNACULAR_REPLY_015` — per-message language following: lexicon detection replaces franc for yo/ha/ig (franc only classifies long English), and the `n-atlas-translate` reply mode renders the finished English reply into the turn's language within the same request (N-ATLaS → OpenAI render → English fallback; scripted safety copy never rendered); `aiPayload.render`, `NATLAS_RENDER_TIMEOUT_MS`; §5.3 + §9.5 + `.env.example` updated. |
 | 2026-10-09 | `LANG_ID_016` — language from the input itself: when every heuristic is silent the detector asks N-ATLaS to name the turn's language (`IDENTIFY_MIN_CHARS` 8, strict `NATLAS_IDENTIFY_TIMEOUT_MS` 4s, fail-open to the standing preference on cold/unparsable), and the detected language — `en` included — always beats the preference for that turn; §5.3 + §9.5 + `.env.example` updated. |
 | 2026-10-09 | `VERNACULAR_SAFETY_017` — vernacular safety hardening: per-language crisis copy (yo/ha/ig/pcm drafts on every scripted `SAFETY_MESSAGE`, English wording as fallback, never rendered; `safetyCopyReviewStatus` = `PENDING_NATIVE_REVIEW` in §9.5), render output verification (`render.verified`/`render.attempts`; heuristics-only check, one retry, best-effort kept — §5.3), diacritic-folded crisis keyword scan (§5.3 probe), history_en pivot — context window + summary transcript read English (§5.5, §6.7); manual harness `test/language-harness/` (text + voice turns against a local backend). |
+| 2026-10-09 | `VERNACULAR_SAFETY_017 (fixup)` — the identify stage gains an OpenAI fallback: when the N-ATLaS lane is unavailable (paused/cold endpoint) or answers unparsably, OpenAI runs the same identify prompt (strict `OPENAI_IDENTIFY_TIMEOUT_MS` 8s, `openaiIdentifyMaxOutputTokens` 200; fail-open to the preference when both lanes fail, an explicit "Other" header honoured, never back-filled); §5.3 + §9.5 + `.env.example` updated. |
