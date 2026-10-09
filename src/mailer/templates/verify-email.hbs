@@ -10,8 +10,19 @@
   <h2>Hello {{name}}</h2>
 
   <p>
-    Welcome to Natlas.
+    {{#if schoolName}}
+      You have been added to <strong>Soul Nurture AI</strong> from <strong>{{schoolName}}</strong>.
+    {{else}}
+      Welcome to Soul Nurture AI.
+    {{/if}}
   </p>
+
+  {{#if schoolName}}
+  <p>
+    Sign in with the default password your school gave you. After verifying,
+    you will be asked to set your own password.
+  </p>
+  {{/if}}
 
   <p>
     Click the button below to verify your email address.

@@ -9,6 +9,7 @@ import { AuditModule } from './audit/audit.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { APP_GUARD } from '@nestjs/core';
 import { RolesGuard } from './common/guards/roles.guard.js';
+import { TenantGuard } from './common/guards/tenant.guard.js';
 import { CheckInsModule } from './check-ins/check-ins.module.js';
 import { ConsentModule } from './consent/consent.module.js';
 import { ConversationsModule } from './conversations/conversations.module.js';
@@ -91,6 +92,12 @@ import { UsersModule } from './users/users.module.js';
     {
       provide: APP_GUARD,
       useClass: RolesGuard,
+    },
+    // After RolesGuard: enforces school suspension / deactivation /
+    // must-change-password on every /api/v1 route (403 with coded errors).
+    {
+      provide: APP_GUARD,
+      useClass: TenantGuard,
     },
   ],
 })

@@ -7,6 +7,8 @@ import { MailerService } from '../mailer/mailer.service.js';
 import { createAuth } from './auth.config.js';
 import { AuthService } from './auth.service.js';
 import { AuthController } from './auth.controller.js';
+import { FirstPasswordController } from './first-password.controller.js';
+import { FirstPasswordService } from './first-password.service.js';
 import { VerificationController } from './verification.controller.js';
 
 @Module({
@@ -21,8 +23,8 @@ import { VerificationController } from './verification.controller.js';
             }),
         }),
     ],
-    controllers: [AuthController, VerificationController],
-    providers: [AuthService],
+    controllers: [AuthController, VerificationController, FirstPasswordController],
+    providers: [AuthService, FirstPasswordService],
     exports: [AuthService],
 })
 export class AuthModule {}

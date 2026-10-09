@@ -83,10 +83,56 @@ export function createAuth(
         },
     } satisfies BetterAuthPlugin;
 
+    /// Blocks sign-in for users whose school is suspended or whose account is
+    /// deactivated. The 403 message doubles as the "notification at sign-in".
+    /// The request-time TenantGuard (src/common/guards/tenant.guard.ts) cuts
+    /// off already-issued sessions the same way.
+    const schoolStatusGuard = {
+        id: 'school-status-guard',
+        hooks: {
+            before: [{
+                matcher: (context) => context.path === '/sign-in/email',
+                handler: createAuthMiddleware(async (context) => {
+                    const email = (context.body as { email?: unknown }).email;
+                    if (typeof email !== 'string') return;
+
+                    const user = await prisma.user.findFirst({
+                        where: {
+                            email: {
+                                equals: email.trim(),
+                                mode: 'insensitive',
+                            },
+                        },
+                        select: {
+                            deactivatedAt: true,
+                            school: { select: { status: true } },
+                        },
+                    });
+                    if (!user) return;
+
+                    if (user.deactivatedAt) {
+                        throw APIError.from('FORBIDDEN', {
+                            code: 'ACCOUNT_DEACTIVATED',
+                            message:
+                                'This account has been deactivated. Contact your school administrator.',
+                        });
+                    }
+                    if (user.school?.status === 'SUSPENDED') {
+                        throw APIError.from('FORBIDDEN', {
+                            code: 'SCHOOL_SUSPENDED',
+                            message:
+                                'Your school is currently suspended. Contact your school administrator.',
+                        });
+                    }
+                }),
+            }],
+        },
+    } satisfies BetterAuthPlugin;
+
     return betterAuth({
         database: prismaAdapter(prisma, { provider: 'postgresql' }),
         basePath: '/api/auth',
-        plugins: [rejectExistingEmailSignup],
+        plugins: [rejectExistingEmailSignup, schoolStatusGuard],
         advanced: {
             database: {
                 generateId: 'uuid',
@@ -106,6 +152,15 @@ export function createAuth(
                     type: 'string',
                     required: false,
                     input: false,
+                },
+                // Surfaces in the session right after verification so the web
+                // app can force the first-password screen. Flows from the DB
+                // on every getSession — no stale copies.
+                mustChangePassword: {
+                    type: 'boolean',
+                    required: false,
+                    input: false,
+                    defaultValue: false,
                 },
             },
         },
@@ -139,13 +194,23 @@ export function createAuth(
                     // endpoint; production never records them.
                     DevVerificationLinks.set(user.email, verificationUrl);
                 }
+                // School onboarding carries the school's name into the email —
+                // "added to Soul Nurture AI from <School>".
+                const dbUser = await prisma.user.findUnique({
+                    where: { email: user.email },
+                    select: { school: { select: { name: true } } },
+                });
+                const schoolName = dbUser?.school?.name ?? null;
                 await mailer.sendMail({
                     to: user.email,
-                    subject: "Verify your Nurture AI Email",
+                    subject: schoolName
+                        ? `Verify your email — Soul Nurture AI (${schoolName})`
+                        : 'Verify your Nurture AI Email',
                     template: 'verify-email',
                     context: {
                         name: user.name,
-                        verificationUrl
+                        verificationUrl,
+                        schoolName,
                     },
                 });
             },
