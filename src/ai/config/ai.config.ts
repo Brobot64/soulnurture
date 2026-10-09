@@ -117,10 +117,17 @@ export interface AiConfig {
      * purpose — the student is waiting, so a cold endpoint must fall through
      * to the OpenAI render quickly. */
     natlasRenderTimeoutMs: number;
+    /** Per-attempt timeout for the synchronous language-ID stage (ms). The
+     * strictest of the three: it runs inside sendMessage before the reply
+     * lane even starts, so on timeout the heuristics' verdict stands. */
+    natlasIdentifyTimeoutMs: number;
     /** Strict output budget for the understanding contract (small JSON). */
     understandingMaxOutputTokens: number;
     /** Output budget for a rendered reply (the reply in another language). */
     renderMaxOutputTokens: number;
+    /** Output budget for the language-ID reply (language header line plus a
+     * short translation; the header prints first, so truncation is safe). */
+    identifyMaxOutputTokens: number;
     /** Per-attempt timeout for the OpenAI translation fallback (ms). */
     understandingTimeoutMs: number;
   };
@@ -309,8 +316,12 @@ export function buildAiConfig(config: ConfigService): AiConfig {
       natlasRenderTimeoutMs: Number(
         config.get<string>('NATLAS_RENDER_TIMEOUT_MS') ?? 12_000,
       ),
+      natlasIdentifyTimeoutMs: Number(
+        config.get<string>('NATLAS_IDENTIFY_TIMEOUT_MS') ?? 4_000,
+      ),
       understandingMaxOutputTokens: 120,
       renderMaxOutputTokens: 400,
+      identifyMaxOutputTokens: 64,
       understandingTimeoutMs: 15_000,
     },
     context: {

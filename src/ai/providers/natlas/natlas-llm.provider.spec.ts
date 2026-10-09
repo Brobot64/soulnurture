@@ -11,8 +11,10 @@ const aiConfig = {
     natlasModel: 'NCAIR1/N-ATLaS',
     natlasTimeoutMs: 45_000,
     natlasRenderTimeoutMs: 12_000,
+    natlasIdentifyTimeoutMs: 4_000,
     understandingMaxOutputTokens: 120,
     renderMaxOutputTokens: 400,
+    identifyMaxOutputTokens: 64,
     understandingTimeoutMs: 15_000,
   },
 } as unknown as AiConfig;
@@ -203,6 +205,59 @@ describe('NatlasLlmProvider', () => {
 
       await expect(
         buildProvider().completeText('sys', 'user'),
+      ).rejects.toThrow(/empty response/);
+    });
+  });
+
+  describe('completeLabel (language ID)', () => {
+    it('POSTs the translation-header shape with temperature 0 and the identify budget', async () => {
+      let capturedInit: RequestInit | undefined;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (_url: string, init: RequestInit) => {
+          capturedInit = init;
+          return jsonResponse(
+            chatBody('Language: Hausa\nMeaning: I am happy.', {
+              prompt_tokens: 9,
+              completion_tokens: 12,
+            }),
+          );
+        }),
+      );
+
+      const outcome = await buildProvider({ NATLAS_LLM_API_KEY: 'hf_test' })
+        .completeLabel('SYSTEM', 'USER');
+
+      expect(JSON.parse(capturedInit?.body as string)).toEqual({
+        model: 'NCAIR1/N-ATLaS',
+        stream: false,
+        temperature: 0,
+        max_tokens: 64,
+        messages: [
+          { role: 'system', content: 'SYSTEM' },
+          { role: 'user', content: 'USER' },
+        ],
+      });
+      expect(outcome).toEqual({
+        text: 'Language: Hausa\nMeaning: I am happy.',
+        usage: { inputTokens: 9, outputTokens: 12 },
+      });
+    });
+
+    it('trims the label and rejects a whitespace-only completion', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => jsonResponse(chatBody('  ha.\n'))),
+      );
+      const outcome = await buildProvider().completeLabel('sys', 'user');
+      expect(outcome.text).toBe('ha.');
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => jsonResponse(chatBody('   '))),
+      );
+      await expect(
+        buildProvider().completeLabel('sys', 'user'),
       ).rejects.toThrow(/empty response/);
     });
   });

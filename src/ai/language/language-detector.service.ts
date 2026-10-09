@@ -1,11 +1,14 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { franc } from 'franc';
+import { NatlasLlmProvider } from '../providers/natlas/natlas-llm.provider.js';
+import { identifyLanguageSystemPrompt } from './identify.prompt.js';
 import {
   DIACRITIC_SETS,
   FRANC_ACCEPTED_CODE,
   FRANC_MIN_CHARS,
   FRANC_ONLY_CODES,
   FRANC_TO_LANGUAGE,
+  IDENTIFY_MIN_CHARS,
   LEXICON_HIGH_SCORE,
   LEXICON_MIN_SCORE,
   LEXICON_WORDS,
@@ -21,6 +24,7 @@ export type LanguageDetectionMethod =
   | 'pidgin-markers'
   | 'lexicon'
   | 'franc'
+  | 'model'
   | 'fallback';
 
 export type LanguageConfidence = 'low' | 'medium' | 'high';
@@ -33,12 +37,59 @@ export interface LanguageDetection {
   method: LanguageDetectionMethod;
 }
 
+/** The model replies with a "Language: …" header above a "Meaning: …" line
+ * (see identify.prompt.ts v2); the parse is tolerant of stray punctuation,
+ * codes and spelled-out names. When the header is present it is the ONLY
+ * thing parsed — the English meaning text may legitimately contain something
+ * that looks like a code ("Yo, I am happy…"). */
+const LANGUAGE_LINE_PATTERN = /language\s*:\s*([^\n]+)/i;
+const IDENTIFIED_CODE_PATTERN = /\b(en|pcm|yo|ha|ig)\b/;
+const LANGUAGE_NAME_ALIASES: ReadonlyArray<[string, SupportedLanguage]> = [
+  ['english', 'en'],
+  ['pidgin', 'pcm'],
+  ['yoruba', 'yo'],
+  ['hausa', 'ha'],
+  ['igbo', 'ig'],
+];
+
+function parseLanguageValue(candidate: string): SupportedLanguage | null {
+  // NFD-strip combining marks first: N-ATLaS may name the language with its
+  // own diacritics ("Yorùbá", "Èdè Yorùbá") — the ASCII codes are unaffected.
+  const lowered = candidate
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  const code = lowered.match(IDENTIFIED_CODE_PATTERN);
+  if (code) return code[1] as SupportedLanguage;
+  for (const [name, lang] of LANGUAGE_NAME_ALIASES) {
+    if (lowered.includes(name)) return lang;
+  }
+  return null;
+}
+
+function parseIdentifiedLanguage(raw: string): SupportedLanguage | null {
+  const header = raw.match(LANGUAGE_LINE_PATTERN);
+  // 'Other'/'French' on the header parses to null — an explicit non-answer
+  // is honoured (fallback keeps the preference), never back-filled from the
+  // meaning line.
+  if (header) return parseLanguageValue(header[1]);
+  return parseLanguageValue(raw);
+}
+
 /**
- * Realtime, offline language detection for the chat lane. Pure heuristics —
- * no network, no model, no I/O — so it can run synchronously inside
- * sendMessage. A detected vernacular language seeds the reply language for
- * that turn (render lane / direct vernacular reply); the async VERNACULAR
- * job still runs the full understanding pass.
+ * Realtime language detection for the chat lane. Heuristics first (pure, no
+ * I/O): diacritics → Pidgin markers → lexicon → franc. Only when every
+ * heuristic is silent does the detector ask N-ATLaS itself to classify the
+ * message — the model that answers the student decides their language, so
+ * Hausa/Igbo typed without diacritics (invisible to the wordlists) is
+ * followed instead of the standing preference winning by default. The model
+ * stage is fail-open and strictly capped (see NATLAS_IDENTIFY_TIMEOUT_MS):
+ * unconfigured endpoint, short text or any error → heuristic verdict stands.
+ *
+ * A detected language seeds the reply language for that turn (render lane /
+ * direct vernacular reply); the async VERNACULAR job still runs the full
+ * understanding pass.
  *
  * Stack, first confident signal wins:
  *   1. Diacritics  — sub-dot/hooked letters are near-proof (handles mixed
@@ -48,17 +99,28 @@ export interface LanguageDetection {
  *      scoring; franc is unusable for these (see language.config.ts).
  *   4. franc       — long English text only; its yo/ha/ig/pcm verdicts are
  *      discarded outright.
- *   5. fallback    — lang null → callers keep the current preference.
+ *   5. model       — N-ATLaS translates the message and its language header
+ *      is read (short texts skip; see identify.prompt.ts).
+ *   6. fallback    — lang null → callers keep the current preference.
  */
 @Injectable()
 export class LanguageDetectorService {
-  detect(text: string): LanguageDetection {
+  private readonly logger = new Logger(LanguageDetectorService.name);
+
+  constructor(private readonly natlasLlm: NatlasLlmProvider) {}
+
+  async detect(text: string): Promise<LanguageDetection> {
     const lowered = text.toLowerCase();
     return (
       this.byDiacritics(lowered) ??
       this.byPidginMarkers(lowered) ??
       this.byLexicon(lowered) ??
-      this.byFranc(text)
+      this.byFranc(text) ??
+      (await this.byModel(text)) ?? {
+        lang: null,
+        confidence: 'low',
+        method: 'fallback',
+      }
     );
   }
 
@@ -134,19 +196,42 @@ export class LanguageDetectorService {
     };
   }
 
-  private byFranc(text: string): LanguageDetection {
+  private byFranc(text: string): LanguageDetection | null {
     // Short or Nigerian-language text: franc's verdict would be noise.
-    if (text.trim().length < FRANC_MIN_CHARS) {
-      return { lang: null, confidence: 'low', method: 'fallback' };
-    }
+    if (text.trim().length < FRANC_MIN_CHARS) return null;
     const code = franc(text, { only: [...FRANC_ONLY_CODES] });
-    if (code !== FRANC_ACCEPTED_CODE) {
-      return { lang: null, confidence: 'low', method: 'fallback' };
-    }
+    if (code !== FRANC_ACCEPTED_CODE) return null;
     return {
       lang: FRANC_TO_LANGUAGE[code],
       confidence: 'medium',
       method: 'franc',
     };
+  }
+
+  /**
+   * Model stage — the last resort when every heuristic is silent. Fail-open
+   * in every direction: unconfigured endpoint, text below IDENTIFY_MIN_CHARS
+   * or without letters, any model error → null, and the caller's fallback
+   * verdict (keep the preference) stands exactly as before LANG_ID_016.
+   */
+  private async byModel(text: string): Promise<LanguageDetection | null> {
+    const trimmed = text.trim();
+    if (!this.natlasLlm.configured || trimmed.length < IDENTIFY_MIN_CHARS) {
+      return null;
+    }
+    if (!/\p{L}/u.test(trimmed)) return null;
+    try {
+      const completion = await this.natlasLlm.completeLabel(
+        identifyLanguageSystemPrompt(),
+        text,
+      );
+      const lang = parseIdentifiedLanguage(completion.text);
+      if (!lang) return null;
+      return { lang, confidence: 'medium', method: 'model' };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`N-ATLaS language identification failed: ${message}`);
+      return null;
+    }
   }
 }
