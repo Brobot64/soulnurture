@@ -694,6 +694,15 @@ sudo apt install -y nginx certbot
 `/etc/nginx/sites-available/natlas`:
 
 ```nginx
+# Socket.IO upgrade mapping (http context — this file is included there):
+# forwards `Connection: upgrade` only when the client actually requested an
+# upgrade, so plain HTTP on the same path (engine.io polling fallback) still
+# gets `Connection: close`.
+map $http_upgrade $connection_upgrade {
+  default upgrade;
+  ''      close;
+}
+
 # --- API ---
 server {
   listen 80;
@@ -712,6 +721,23 @@ server {
   add_header X-Frame-Options DENY always;
   add_header X-Content-Type-Options nosniff always;
   add_header Strict-Transport-Security "max-age=31536000" always;
+
+  # --- Socket.IO (chat pool / notifications / unread badges) — the upgrade
+  #     dance needs explicit headers (plain proxying strips the upgrade), and
+  #     the socket is long-lived: the 60s default read timeout would keep
+  #     killing idle connections. Backend path constant: /api/socket.io.
+  location /api/socket.io {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+  }
 
   location / {
     proxy_pass http://127.0.0.1:3000;
@@ -948,9 +974,15 @@ curl -s https://s3.YOUR_VPS_IP.sslip.io/health
 # model
 ollama list && ollama run natlas "Say hello in Hausa" --verbose
 
-# full-system E2E (run against a STAGING database first — the journey
-# cleans only its own synthetic users, but keep it out of the prod DB)
+# full-system E2E (run against a STAGING database first — the journeys
+# clean only their own synthetic users, but keep them out of the prod DB)
 E2E_BASE_URL=https://api.YOUR_VPS_IP.sslip.io npm run test:e2e:journey
+E2E_BASE_URL=https://api.YOUR_VPS_IP.sslip.io npm run test:e2e:school-chat
+
+# WebSocket upgrade through nginx (expect "HTTP/1.1 101 Switching Protocols")
+curl -si -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  "https://api.YOUR_VPS_IP.sslip.io/api/socket.io/?EIO=4&transport=websocket" | head -3
 ```
 
 Final checks: Grafana shows all scrape targets UP · alert test notification arrives · `journalctl -u natlas` shows the AI worker start line ("AI async worker started") · attribution string present in the product footer · `STAFF_BOOTSTRAP_KEY` differs from dev.

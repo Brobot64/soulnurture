@@ -9,6 +9,7 @@ This is **not a generic chatbot** — the AI is a backend capability embedded in
 - NestJS 12 + Fastify · TypeScript (ESM)
 - Prisma 7 + PostgreSQL
 - Better Auth (email/password + verification + sessions)
+- Socket.IO — push-only realtime (chat pool, notifications, unread badges)
 - Nodemailer + Handlebars email templates
 - Groq (LLM + Whisper) — fully abstracted behind `AIProvider`
 - Vitest (unit + e2e), oxlint, Prettier
@@ -17,8 +18,13 @@ This is **not a generic chatbot** — the AI is a backend capability embedded in
 
 ```text
 src/
-├── auth/            # Better Auth integration, session helpers, verification
+├── auth/            # Better Auth integration, session helpers, verification, first-password change
 ├── users/           # current-user endpoint, provisioning, STAFF bootstrap enrolment
+├── schools/         # school tenancy: school-scoped user management + default password
+├── admin/           # platform owner console (schools CRUD, overview, global user list)
+├── chat/            # human chat: request pool → claim → messages → close
+├── notifications/   # per-user notification feed (chat request/claimed/reply, suspension)
+├── realtime/        # Socket.IO gateway — push-only broadcasts to per-user rooms
 ├── students/        # student profile, Sanctuary home aggregate, vibe/language
 ├── professionals/   # professional profile
 ├── consent/         # consent version records
@@ -43,7 +49,7 @@ src/
 ├── privacy/         # self-referral & privacy controls
 ├── mailer/          # SMTP transport + Handlebars templates
 ├── prisma/          # PrismaService wrapper
-├── common/          # validation pipe, response interceptor, exception filter, RolesGuard
+├── common/          # validation pipe, response interceptor, exception filter, RolesGuard, TenantGuard
 └── docs/            # OpenAPI/Swagger setup
 ```
 
@@ -97,11 +103,13 @@ Response envelope (Nest-handled routes):
 | GET | `/api/auth/verify-email` |
 | POST | `/api/verification/resend` |
 
-Email verification is required before full access. Use `credentials: "include"` from the browser — sessions are cookie-based.
+Email verification is required before full access. Use `credentials: "include"` from the browser — sessions are cookie-based. Verification emails are school-branded (the student's school name in the copy). Sign-in is rejected (403 `SCHOOL_SUSPENDED` / `ACCOUNT_DEACTIVATED`) for users whose school is suspended or whose account is deactivated.
 
-**Roles:** public sign-up always creates a `STUDENT`. Professional accounts are created two ways:
+**Roles:** `STUDENT`, `COUNSELLOR`, `PSYCHOLOGIST`, `SUPPORT_STAFF`, `SCHOOL_ADMIN`, `PLATFORM_ADMIN`. The school-onboarding path is the primary one: a PLATFORM_ADMIN provisions schools (`POST /api/v1/schools`), then school-scoped routes onboard students and professionals with the school's shared **default password** (plaintext never stored; the precomputed hash lives on `School`). Onboarded users sign in with the default password and are forced through `POST /api/v1/auth/first-password` before any other route works (`PASSWORD_CHANGE_REQUIRED` 403). Direct staff enrolment is also possible:
 - `POST /api/v1/staff/bootstrap` — public with the shared enrolment key (`STAFF_BOOTSTRAP_KEY`); roles `COUNSELLOR | PSYCHOLOGIST | SUPPORT_STAFF` only; requires email verification before sign-in.
 - `POST /api/v1/users` — staff-to-staff provisioning (password stored hashed).
+
+**School tenancy enforcement:** a global `TenantGuard` (after `RolesGuard`) re-checks every `/api/v1` request: deactivated account → `ACCOUNT_DEACTIVATED`; suspended school → `SCHOOL_SUSPENDED`; pending first password change → `PASSWORD_CHANGE_REQUIRED` (allowlist: `GET /api/v1/users/me`, `POST /api/v1/auth/first-password`). Suspension also revokes live sessions and hard-disconnects live sockets.
 
 ### Domain routes (`/api/v1/...`)
 
@@ -123,6 +131,25 @@ Email verification is required before full access. Use `credentials: "include"` 
 | Consent | `GET /consent/me`, `POST /consent/accept` |
 | Privacy | `GET /privacy/preferences`, `PATCH /privacy/preferences` |
 | Audit | `GET /audit` |
+| Platform console | `POST/GET /schools`, `PATCH /schools/:id`, `POST /schools/:id/suspend`, `POST /schools/:id/reactivate`, `GET /admin/overview`, `GET /admin/users` (PLATFORM_ADMIN) |
+| School management | `GET /schools/:id/overview`, `GET /schools/:id/users`, `POST /schools/:id/students`, `POST /schools/:id/professionals`, `PATCH /schools/:id/users/:userId`, `DELETE /schools/:id/users/:userId`, `POST .../reactivate`, `PATCH /schools/:id/settings` (PLATFORM_ADMIN any school; SCHOOL_ADMIN own school) |
+| Human chat | `POST /chat/threads`, `GET /chat/threads`, `GET /chat/inbox`, `POST /chat/threads/:id/claim`, `GET /chat/threads/:id`, `POST /chat/threads/:id/messages`, `GET /chat/unread`, `POST /chat/threads/:id/read`, `POST /chat/threads/:id/close` |
+| Notifications | `GET /notifications`, `GET /notifications/unread-count`, `POST /notifications/:id/read`, `POST /notifications/read-all` |
+| First password | `POST /auth/first-password` (session; no old password — school default → own password) |
+
+### Realtime (Socket.IO, push-only)
+
+Path `/api/socket.io`. Auth via session cookie at handshake (re-verified against the DB — suspended/deactivated/must-change-password users are disconnected). Rooms: `user:<id>` (personal pushes) and `school-professionals:<schoolId>` (request pool). No anonymous sockets; cross-school sockets receive nothing. REST stays the transport for every write — WebSockets only push.
+
+| Event | Target | Meaning |
+|---|---|---|
+| `chat.request.created` | school professionals | new pool request `{threadId, student{firstName, classLabel}, pendingCount}` |
+| `chat.thread.claimed` | student + school professionals | a professional took the thread |
+| `chat.message.new` | both participants | new human-chat message |
+| `chat.thread.closed` | both participants | thread closed |
+| `chat.unread.updated` | affected user | `{total, byThread}` true counts (99+ cap is client-side) |
+| `notification.new` | target user | notification row `{id, type, title, body, data}` |
+| `notification.unread.updated` | target user | `{count}` |
 
 ### AI contract highlights
 
@@ -226,6 +253,15 @@ npm run test:e2e:journey
 ```
 
 In dev the backend stores and serves the latest verification links at `GET /api/verification/dev-links/:email` (production turns this off completely) so the journey can verify accounts without an inbox.
+
+### End-to-end school tenancy + human chat (live backend)
+
+`test/e2e-school-chat.mjs` walks the school-centric surface: platform owner console (create schools → short codes → default password → suspend/reactivate), school-scoped onboarding of students/professionals, the forced first-password flow, Socket.IO room targeting (anonymous sockets rejected, cross-school sockets silent), the chat request pool (PENDING → race-safe claim → messages both ways → close), unread badges, notifications, and suspension side effects (sessions revoked, sockets dropped, sign-in blocked). Uses the same cookie-jar actor pattern + DB cleanup as the journey.
+
+```bash
+# with the server running on :3000
+npm run test:e2e:school-chat
+```
 
 ## License
 

@@ -1,18 +1,23 @@
 # Natlas API Manual Testing Handbook
 
 Step-by-step API walkthrough for manual testing, covering every user type and
-the full feature surface: auth + email verification, professional onboarding,
-student profile, consent/privacy, AI disclosure, check-ins, conversations with
-AI (sync + async retry lane), voice transcription, resources, journal, support
-requests → professional assignment, flag triage, follow-ups, dashboard, audit,
-and the RBAC negative matrix.
+the full feature surface: auth + email verification, school tenancy (platform
+owner console, school default passwords, forced first-password change),
+professional onboarding, student profile, consent/privacy, AI disclosure,
+check-ins, conversations with AI (sync + async retry lane), voice
+transcription, resources, journal, human chat (request → pool → claim →
+messages → close, Socket.IO push), support requests → professional assignment,
+flag triage, follow-ups, dashboard, audit, notifications, and the RBAC
+negative matrix.
 
 > **Keep this handbook in sync.** When an endpoint, payload, enum, or flow
 > changes, update the affected chapter in the same branch/commit. Do not add
 > endpoints here that are not live in code — mirror the API, never the plan.
 >
-> **Last synced:** Phase C step 1 (`AI_PROVIDER_CHAIN_001`) — `GET /api/v1/ai/config`
-> now exposes `chain`, `openai`, `pricing`, and `budget` blocks (Chapter 9.7).
+> **Last synced:** `DOCS_008` (school tenancy + human chat) — new Chapter 13
+> covers the platform console, school-scoped user management, the forced
+> first-password flow, human chat, notifications, and the Socket.IO push
+> surface; Appendices A/B extended with the new enums and placeholders.
 
 ---
 
@@ -1064,6 +1069,11 @@ Every row must produce exactly the stated status **with the stated actor**:
 | 9 | Grace | `POST /api/v1/ai/disclosure/acknowledge` | `403` (STUDENT-role-only route) |
 | 10 | anonymous | `GET /api/v1/ai/disclosure` | `200` (deliberately public, pre-login) |
 | 11 | anonymous | `POST /api/v1/uploads/presign` (valid body) | `401` |
+| 12 | Jude | `GET /api/v1/schools` | `403` (PLATFORM_ADMIN-only) |
+| 13 | Jude | `GET /api/v1/admin/overview` | `403` (PLATFORM_ADMIN-only) |
+| 14 | Grace | `GET /api/v1/schools/<schoolId>/overview` | `403` (SCHOOL_ADMIN/PLATFORM_ADMIN-only) |
+| 15 | Grace | `POST /api/v1/chat/threads` | `403` (STUDENT-role-only route) |
+| 16 | Jude | `POST /api/v1/chat/threads/<threadId>/claim` | `403` (staff-role-only route) |
 
 ---
 
@@ -1154,11 +1164,319 @@ The bucket is private — objects are readable only through a signed URL.
 
 ---
 
+## 13. School tenancy & human chat (`SCHOOL_TENANCY_001` → `DOCS_008`)
+
+The multi-tenant lane. A **School** is the tenant: every onboarded user belongs
+to exactly one school, schools are created/suspended by the platform owner, and
+school accounts are onboarded with a school-wide **default password** that each
+account must replace at first sign-in. Students can open **human chat**
+requests that pool for the school's professionals — separate from the AI
+conversations in Chapter 5 and containing **no AI replies** (only the thread's
+entry note is AI-composed from check-in context). REST is the transport for
+every write here; Socket.IO (§13.8) is push-only.
+
+### 13.1 Platform owner (seed bootstrap)
+
+The owner account is created by `prisma/seed.ts` from `PLATFORM_ADMIN_EMAIL` /
+`PLATFORM_ADMIN_NAME` / `PLATFORM_ADMIN_PASSWORD` (env; the bootstrap is
+skipped entirely when unset). Sign in normally
+(`POST /api/auth/sign-in/email`, own cookie jar) and assert
+`role === "PLATFORM_ADMIN"`.
+
+### 13.2 Platform console — schools
+
+**Request** (as the owner)
+
+```http
+POST /api/v1/schools
+```
+
+```json
+{ "name": "Riverside Academy", "defaultPassword": "Riverside#2026" }
+```
+
+**Expected** `201`. Assert `data.status === "ACTIVE"` and `data.shortCode` is
+6 characters from the unambiguous charset (`ABCDEFGHJKMNPQRSTUVWXYZ23456789`)
+starting with up to 3 letters of the school-name acronym (`RA……` for
+"Riverside Academy"). The `defaultPassword` is hashed (scrypt) on arrival —
+never returned, never logged. It is optional, but a school without one cannot
+onboard users until §13.3 sets it.
+
+| Request (as owner) | Expected |
+| --- | --- |
+| `GET /api/v1/schools` | `200` — `data.items[]` with `id`, `name`, `shortCode`, `status`, `createdAt`, `_count.users` |
+| `PATCH /api/v1/schools/<schoolId>` `{"name":"..."}` | `200` — rename; `shortCode` never changes |
+| `POST /api/v1/schools/<schoolId>/suspend` | `200` — `{id, status: "SUSPENDED"}` (semantics in §13.7); idempotent |
+| `POST /api/v1/schools/<schoolId>/reactivate` | `200` — `{id, status: "ACTIVE"}`; idempotent |
+| `GET /api/v1/admin/overview` | `200` — `data.schools {total, active, suspended}`, `data.users {total, students, professionals, admins, newLast7d, newLast30d}`, `data.chat.pendingRequests` |
+| `GET /api/v1/admin/users?limit=50` | `200` — `data.items[]` across all schools (each with `school {id, name, shortCode}`); `limit` default 50, max 100 |
+
+### 13.3 School-scoped user management
+
+Every route below is `SCHOOL_ADMIN` or `PLATFORM_ADMIN`; a school admin scoped
+to a different school is rejected with `403`. Today no API provisions a
+`SCHOOL_ADMIN` account — the platform owner drives these routes for any school.
+
+**Request** — set the school-wide default password:
+
+```http
+PATCH /api/v1/schools/<schoolId>/settings
+```
+
+```json
+{ "defaultPassword": "Riverside#2026" }
+```
+
+**Expected** `200`, `data.defaultPasswordUpdated === true`. Applies to accounts
+onboarded from now on; existing accounts keep their personal passwords.
+
+**Request** — onboard a student:
+
+```http
+POST /api/v1/schools/<schoolId>/students
+```
+
+```json
+{
+  "email": "ama.mensah@e2e.natlas.test",
+  "firstName": "Ama",
+  "lastName": "Mensah",
+  "classLabel": "JHS 2B",
+  "preferredLanguage": "en"
+}
+```
+
+**Expected** `201`. Assert `data.user.role === "STUDENT"`, `data.studentCode`
+matches `<shortCode>-<4 digits>`, and `data.verificationEmailSent === true`
+(the school-branded verification mail — **the default password is never
+emailed**; the school distributes it). Negatives:
+
+| Probe | Expected |
+| --- | --- |
+| onboard before the school has a default password | `422` `SCHOOL_DEFAULT_PASSWORD_REQUIRED` |
+| duplicate email | `409`/`422` (email already in use) |
+| unknown `role` value in the list route filter | `422` "Unknown role filter" |
+
+**Request** — onboard a professional:
+
+```http
+POST /api/v1/schools/<schoolId>/professionals
+```
+
+```json
+{
+  "email": "kojo.ashanti@e2e.natlas.test",
+  "name": "Dr. Kojo Ashanti",
+  "role": "COUNSELLOR",
+  "title": "Senior Counsellor",
+  "department": "Guidance & Counselling"
+}
+```
+
+`role` ∈ `COUNSELLOR | PSYCHOLOGIST | SUPPORT_STAFF`. **Expected** `201` with
+`{user, verificationEmailSent}` — same default-password + verification flow as
+students.
+
+**Management routes**:
+
+| Request | Expected |
+| --- | --- |
+| `GET /api/v1/schools/<schoolId>/overview` | `200` — `{students, professionals, totalUsers, pendingChatRequests}` |
+| `GET /api/v1/schools/<schoolId>/users?role=STUDENT` | `200` — `data.items[]` incl. `studentProfile`/`professionalProfile` and onboarding state (`emailVerified`, `mustChangePassword`, `deactivatedAt`); filter ∈ `STUDENT | SCHOOL_ADMIN | COUNSELLOR | PSYCHOLOGIST | SUPPORT_STAFF` |
+| `PATCH /api/v1/schools/<schoolId>/users/<userId>` `{name?, phone?, classLabel?, preferredLanguage?, title?, department?}` | `200` — `{updated: true}` (user + matching profile fields) |
+| `DELETE /api/v1/schools/<schoolId>/users/<userId>` | `200` — `{id, deactivated: true}` — soft removal: sessions revoked at once, sign-in `403` `ACCOUNT_DEACTIVATED`, history kept |
+| `POST /api/v1/schools/<schoolId>/users/<userId>/reactivate` | `200` — `{id, deactivated: false}` |
+
+### 13.4 First sign-in — forced password change
+
+Strict order (a skipped step breaks the rest):
+
+1. **Verify** — read the dev link (§0.3) for the onboarded email and consume
+   only its path+query with that persona's jar (auto sign-in sets the cookie).
+2. **Sign in with the school default password** — `POST /api/auth/sign-in/email`
+   → `200`. Sign-in is deliberately allowed while `mustChangePassword` (it is
+   part of onboarding), but every app route except the allowlist below is shut.
+3. **Check your standing** — `GET /api/v1/users/me` → `200`; assert
+   `data.mustChangePassword === true`, `data.emailVerified === true`, and
+   `data.school` = `{id, name, shortCode}`.
+4. **Probe the lock** — any other `v1` route, e.g. `GET /api/v1/chat/unread`,
+   → `403` `PASSWORD_CHANGE_REQUIRED`. The allowlist is exactly
+   `GET /api/v1/users/me` + `POST /api/v1/auth/first-password`.
+5. **Set your own password** — no old password is requested:
+
+```http
+POST /api/v1/auth/first-password
+```
+
+```json
+{ "newPassword": "AmaPersonal123#" }
+```
+
+**Expected** `200`, `data.passwordChanged === true`. The current session
+survives; every other session of the account is revoked. The old default now
+`401`s at sign-in and all routes unlock. On an account not flagged
+`mustChangePassword` the route answers `403` `PASSWORD_CHANGE_NOT_REQUIRED`.
+
+### 13.5 Human chat (students ↔ professionals)
+
+A thread walks `PENDING` (request, sitting in the school's shared pool) →
+`ACTIVE` (claimed by exactly one professional) → `CLOSED`. REST for every
+write; Socket.IO (§13.8) for live push.
+
+**Request** (as the student) — ask to talk:
+
+```http
+POST /api/v1/chat/threads
+```
+
+```json
+{ "note": "Exams are piling up and I can't sleep", "checkInId": "<checkInId>" }
+```
+
+Both fields optional — `checkInId` defaults to the student's latest check-in.
+**Expected** `201`. Assert `data.status === "PENDING"`, `data.aiEntrySummary`
+equals the first message's `content`, that message has `role === "SYSTEM"` and
+`meta.composedByAi` (boolean), and `data.studentReadAt` is set. The entry note
+is composed from check-in **context only** (name, class, feeling) — the
+check-in description and the raw note never leak into it.
+
+Negatives: a second open request → `409` `PENDING_REQUEST_EXISTS`; an account
+with no school → `422` `NO_SCHOOL`; a suspended school → `403`
+`SCHOOL_SUSPENDED`.
+
+**Request** (as a professional) — the shared pool:
+
+```http
+GET /api/v1/chat/inbox
+```
+
+**Expected** `200`, `data.items[]` = the school's PENDING requests, **oldest
+first**, each with `student {firstName, lastName, classLabel, studentCode}`.
+
+**Request** — claim (first professional wins):
+
+```http
+POST /api/v1/chat/threads/<threadId>/claim
+```
+
+**Expected** `201`. Assert `data.status === "ACTIVE"` and the professional
+branch populated (`title`, `department`, `user.name`). The race is safe: the
+second claimer gets `409` `CHAT_THREAD_TAKEN`; a cross-school thread id is
+indistinguishable from a missing one (`404`).
+
+**Request** — send a message (either participant):
+
+```http
+POST /api/v1/chat/threads/<threadId>/messages
+```
+
+```json
+{ "content": "I'm here — tell me more about your nights.", "viaVoice": false }
+```
+
+**Expected** `201`. Assert `data.role` (`STUDENT` or `PROFESSIONAL`),
+`data.senderUserId`, `viaVoice`, and the stored `createdAt`. Voice replies
+arrive with `viaVoice: true` — text transcribed by the app via the §9.6 voice
+lane first; this route never touches audio. Negatives: before claim → `409`
+`CHAT_NOT_CLAIMED`; after close → `409` `CHAT_THREAD_CLOSED`; non-participant
+→ `404`; over the per-user send rate limit (`CHAT_RATE_LIMIT_PER_MINUTE`,
+default 30/min — rejected sends consume no budget) → `429`.
+
+**Remaining routes**:
+
+| Request | Expected |
+| --- | --- |
+| `GET /api/v1/chat/threads` | `200` — students: own threads; staff: the ones they claimed; items carry the last message + counterpart summary |
+| `GET /api/v1/chat/threads/<threadId>` | `200` — full thread, `messages` ascending; participants only (`404` otherwise) |
+| `POST /api/v1/chat/threads/<threadId>/read` | `200` — `{id, read: true}`; drives the unread badge |
+| `GET /api/v1/chat/unread` | `200` — `{total, byThread}` true counts (the 99+ display cap is client-side); zero-unread threads are omitted from `byThread` |
+| `POST /api/v1/chat/threads/<threadId>/close` | `200` — `{id, status: "CLOSED"}`; idempotent; both sides then get `409` on send |
+
+### 13.6 Notifications (REST side)
+
+| Request | Expected |
+| --- | --- |
+| `GET /api/v1/notifications` | `200` — newest first, 50 max; `?unread=true` filters |
+| `GET /api/v1/notifications/unread-count` | `200` — `{count}`; initial load / reconnect fallback for the badge |
+| `POST /api/v1/notifications/<notificationId>/read` | `200` — `{id, read: true}`; idempotent |
+| `POST /api/v1/notifications/read-all` | `200` — `{readAll: true}` |
+
+Types produced by this lane: `CHAT_REQUEST` (each active professional on a new
+request), `CHAT_CLAIMED` (student), `CHAT_REPLY` (the counterpart, preview
+≤ 120 chars), `SCHOOL_SUSPENDED` (every school user, explaining the
+suspension).
+
+### 13.7 Suspension & deactivation semantics
+
+`POST /api/v1/schools/<schoolId>/suspend` (as the owner), observed from inside
+the school:
+
+1. Every session under the school is revoked **immediately** — any stale jar
+   now gets `401` on its next request.
+2. Sign-in answers `403` `SCHOOL_SUSPENDED`.
+3. Live sockets are hard-disconnected server-side (the client sees
+   `disconnect`; reconnection attempts keep failing while suspended).
+4. Every school user has a durable `SCHOOL_SUSPENDED` notification waiting
+   (readable after reactivation).
+5. `POST .../reactivate` restores sign-in and sockets; nothing else changes.
+
+Single-user `DELETE /api/v1/schools/<schoolId>/users/<userId>` behaves the
+same per-account: sessions cut, sign-in and next requests `403`
+`ACCOUNT_DEACTIVATED` until reactivated.
+
+### 13.8 Socket.IO (push-only surface)
+
+- **Path** `/api/socket.io` (use the `websocket` transport), **auth = the
+  session cookie**. Same-origin browsers send it automatically; cross-origin
+  clients need credentials (`withCredentials: true` / `extraHeaders` with the
+  cookie). There is no separate socket token.
+- After the handshake the server re-verifies from the DB and drops clients
+  whose account is deactivated, flagged `mustChangePassword`, or in a
+  suspended school — a valid cookie alone is not enough.
+- **Rooms** (server-side; clients never join explicitly):
+  `user:<userId>` for personal pushes and `school-professionals:<schoolId>`
+  for pool pushes. Every broadcast is room-targeted — a user who is not in
+  the room receives nothing at all.
+- Push-only: all writes stay on REST; sockets carry no acknowledgements.
+
+**Event table**:
+
+| Event | Room | Payload | Fired when |
+| --- | --- | --- | --- |
+| `chat.request.created` | `school-professionals:<schoolId>` | `{threadId, student: {firstName, classLabel}, pendingCount}` | a student creates a request |
+| `chat.thread.claimed` | the student's `user:<id>` + the school pros room | `{threadId, professionalName}` | a claim wins |
+| `chat.message.new` | both participants' `user:<id>` rooms | `{threadId, message: {id, role, content, viaVoice, createdAt}}` | a message is sent (the sender is echoed too) |
+| `chat.thread.closed` | both participants | `{threadId}` | either side closes |
+| `chat.unread.updated` | the user whose badge changed | `{total, byThread}` | on send (recipient) and on read (self) |
+| `notification.new` | the recipient | `{id, type, title, body, data}` | any notification row is created |
+| `notification.unread.updated` | the recipient | `{count}` | their unread count changes |
+
+**Smoke test** (Node — `socket.io-client` is already a devDependency):
+
+```js
+import { io } from 'socket.io-client';
+
+const socket = io('http://localhost:3000', {
+  path: '/api/socket.io',
+  transports: ['websocket'],
+  extraHeaders: { cookie: 'better-auth.session_token=<from sign-in>', origin: 'http://localhost:3000' },
+});
+socket.on('connect', () => console.log('connected'));
+socket.on('chat.message.new', (payload) => console.log('push', payload));
+```
+
+With two sockets (student + professional), walk §13.5 and watch: request →
+school pros room; claim → student + pros room; message → both; read →
+`chat.unread.updated`; close → both; then suspend the school — every school
+socket in the room dies while a second school's sockets are untouched.
+
+---
+
 ## Appendix A — Enum reference
 
 | Enum | Values |
 | --- | --- |
-| `UserRole` | `STUDENT`, `COUNSELLOR`, `PSYCHOLOGIST`, `SUPPORT_STAFF` |
+| `UserRole` | `STUDENT`, `COUNSELLOR`, `PSYCHOLOGIST`, `SUPPORT_STAFF`, `SCHOOL_ADMIN`, `PLATFORM_ADMIN` |
 | `FeelingLabel` | `OVERWHELMED`, `ANXIOUS`, `TIRED`, `SAD_LOW`, `CALM`, `HOPEFUL`, `GREAT`, `HAPPY`, `PEACEFUL`, `STRESSED`, `DOWN`, `ANGRY` |
 | `FeelingIntensity` | `A_LITTLE`, `SOMEWHAT`, `A_LOT` |
 | `SupportPersonType` | `COUNSELLOR`, `PSYCHOLOGIST`, `TRUSTED_TEACHER`, `PARENT_GUARDIAN` |
@@ -1170,6 +1488,10 @@ The bucket is private — objects are readable only through a signed URL.
 | `AiJobKind` | `REPLY`, `SUMMARY`, `VERNACULAR` |
 | `ActivityStepType` (renderer contract) | `breath-pacing`, `timer`, `prompt-list`, `body-scan` |
 | `FollowUpStatus` | `PENDING`, `SCHEDULED`, `COMPLETED`, `CANCELLED` |
+| `SchoolStatus` | `ACTIVE`, `SUSPENDED` |
+| `ChatThreadStatus` | `PENDING`, `ACTIVE`, `CLOSED` |
+| `ChatMessageRole` | `STUDENT`, `PROFESSIONAL`, `SYSTEM` |
+| `NotificationType` | `CHAT_REQUEST`, `CHAT_CLAIMED`, `CHAT_REPLY`, `SCHOOL_SUSPENDED` |
 | `ResourceType` / `ResourceCategory` | see `prisma/schema.prisma` (seed data in `prisma/seed.ts`) |
 
 ## Appendix B — Placeholder legend
@@ -1185,6 +1507,9 @@ The bucket is private — objects are readable only through a signed URL.
 | `<supportRequestId>` | §8.1 create |
 | `<judeProfileId>` | §6.2 SQL |
 | `<userId>` | session user id — second path segment of every upload key (§12) |
+| `<schoolId>` | §13.2 school create / list (`data.id`) |
+| `<threadId>` | §13.5 chat request create (`data.id`) |
+| `<notificationId>` | §13.6 notifications list |
 | `<flagId>`, `<followUpId>`, `<placeholderId>` | chapters 6 and 9 |
 
 ## Appendix C — Change log (keep current)
@@ -1199,3 +1524,11 @@ The bucket is private — objects are readable only through a signed URL.
 | 2026-10-06 | Phase C step 5: voice routing — `en`/`pcm` → Whisper chain, `yo`/`ha`/`ig` → local N-ATLaS ASR sidecar, forced `language` + `Unsupported language` 400, friendly "type instead" 503 degradation (§9.6); `transcription.natlas` config sub-block (§9.5); sidecar service `services/n-atlas-asr` (NCAIR1 spike table, capacity honesty) + fixtures convention. |
 | 2026-10-06 | Phase C step 6: backend-orchestrated activities — seeded approved catalogue + list/detail/start/complete/history endpoints + renderer `steps` contract (§7.3), `recommendedActivity` on the turn shape with intent wiring (§5.3), `ActivityStepType` in Appendix A, `<activitySessionId>` placeholder (Appendix B). |
 | 2026-10-06 | File uploads (object storage) — multipart route + presigned direct-PUT route with 10MB/type allowlist and `uploads/<userId>/<uuid><ext>` keys (§12), anonymous negative in §10, `<userId>` placeholder (Appendix B); friendly `503` on deployments without `S3_*`. |
+| 2026-10-09 | `SCHOOL_TENANCY_001` — School (6-char short code, ACTIVE/SUSPENDED, scrypt default password), `User.schoolId`/`mustChangePassword`/`deactivatedAt`, `SCHOOL_ADMIN`/`PLATFORM_ADMIN` roles, ChatThread/ChatMessage/Notification tables, platform-admin seed bootstrap. |
+| 2026-10-09 | `TENANCY_AUTH_002` — TenantGuard (coded `SCHOOL_SUSPENDED` / `ACCOUNT_DEACTIVATED` / `PASSWORD_CHANGE_REQUIRED` 403s + users/me+first-password allowlist), sign-in-time checks, forced first-password flow (§13.4; current session survives, others revoked). |
+| 2026-10-09 | `PLATFORM_ADMIN_003` — platform console: schools create/list/rename/suspend/reactivate + `GET /api/v1/admin/overview` + cross-school users list (§13.2); suspension = session revocation + `SCHOOL_SUSPENDED` notifications + socket drop (§13.7). |
+| 2026-10-09 | `SCHOOL_USERS_004` — school-scoped management: settings (default password), overview, users list, student/professional onboarding with school-branded verification email (default password never emailed), update, deactivate/reactivate (§13.3). |
+| 2026-10-09 | `SOCKET_REALTIME_005` — Socket.IO push layer at `/api/socket.io` (cookie handshake + DB re-verification, `user:<id>` / `school-professionals:<schoolId>` rooms) + notifications REST + the 7-event table (§13.6, §13.8). |
+| 2026-10-09 | `CHAT_POOL_006` — human chat: request → PENDING pool → race-safe claim → messages (`viaVoice`) → read → closable/idempotent close (§13.5); AI entry note from check-in context only; per-user send rate limit; true `{total, byThread}` unread summary. |
+| 2026-10-09 | `PROFILE_007` — `GET /api/v1/users/me` gains `school {id, name, shortCode}` + `mustChangePassword` (§13.4). |
+| 2026-10-09 | `DOCS_008` — Chapter 13 (this lane) + §10 rows 12–16 + Appendix A enums (SchoolStatus/ChatThreadStatus/ChatMessageRole/NotificationType) + Appendix B placeholders; `.env.example` tenancy block; DEPLOYMENT.md nginx WebSocket upgrade; README note; e2e `test/e2e-school-chat.mjs` (`npm run test:e2e:school-chat`). |
