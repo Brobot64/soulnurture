@@ -1,7 +1,9 @@
 import { Prisma } from '@prisma/client';
 import { Test, TestingModule } from '@nestjs/testing';
 import { AuditService } from '../audit/audit.service.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { RealtimeService } from '../realtime/realtime.service.js';
 import { AdminService } from './admin.service.js';
 
 describe('AdminService', () => {
@@ -10,11 +12,12 @@ describe('AdminService', () => {
     school: { create: vi.fn(), findMany: vi.fn(), findUnique: vi.fn(), update: vi.fn(), count: vi.fn() },
     user: { findMany: vi.fn(), count: vi.fn() },
     session: { deleteMany: vi.fn() },
-    notification: { createMany: vi.fn() },
     chatThread: { count: vi.fn() },
     $transaction: vi.fn(),
   };
   const auditService = { log: vi.fn() };
+  const notifications = { pushMany: vi.fn() };
+  const realtime = { disconnectUser: vi.fn() };
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -23,6 +26,8 @@ describe('AdminService', () => {
         AdminService,
         { provide: PrismaService, useValue: prisma },
         { provide: AuditService, useValue: auditService },
+        { provide: NotificationsService, useValue: notifications },
+        { provide: RealtimeService, useValue: realtime },
       ],
     }).compile();
     service = module.get(AdminService);
@@ -101,10 +106,11 @@ describe('AdminService', () => {
   });
 
   describe('suspendSchool', () => {
-    it('suspends, revokes every school session, notifies users, audits', async () => {
+    it('suspends, revokes every school session, notifies users, kills live sockets, audits', async () => {
       prisma.school.findUnique.mockResolvedValue({ id: 'school-1', status: 'ACTIVE' });
       prisma.user.findMany.mockResolvedValue([{ id: 'u1' }, { id: 'u2' }]);
       prisma.$transaction.mockResolvedValue([]);
+      notifications.pushMany.mockResolvedValue([]);
 
       const result = await service.suspendSchool('admin-1', 'school-1');
 
@@ -116,12 +122,15 @@ describe('AdminService', () => {
       expect(prisma.session.deleteMany).toHaveBeenCalledWith({
         where: { user: { schoolId: 'school-1' } },
       });
-      const notifyArgs = prisma.notification.createMany.mock.calls[0][0];
-      expect(notifyArgs.data).toHaveLength(2);
-      expect(notifyArgs.data[0]).toMatchObject({
-        userId: 'u1',
-        type: 'SCHOOL_SUSPENDED',
-      });
+      expect(notifications.pushMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userIds: ['u1', 'u2'],
+          type: 'SCHOOL_SUSPENDED',
+        }),
+      );
+      expect(realtime.disconnectUser).toHaveBeenCalledTimes(2);
+      expect(realtime.disconnectUser).toHaveBeenCalledWith('u1');
+      expect(realtime.disconnectUser).toHaveBeenCalledWith('u2');
       expect(auditService.log).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'school.suspended', entityId: 'school-1' }),
       );
@@ -134,6 +143,8 @@ describe('AdminService', () => {
 
       expect(prisma.school.update).not.toHaveBeenCalled();
       expect(prisma.session.deleteMany).not.toHaveBeenCalled();
+      expect(notifications.pushMany).not.toHaveBeenCalled();
+      expect(realtime.disconnectUser).not.toHaveBeenCalled();
     });
   });
 

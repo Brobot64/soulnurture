@@ -21,9 +21,11 @@ import { FollowUpsModule } from './follow-ups/follow-ups.module.js';
 import { JournalModule } from './journal/journal.module.js';
 import { MailerModule } from './mailer/mailer.module.js';
 import type { EmailOptions } from './mailer/interfaces/mail-config.interface.js';
+import { NotificationsModule } from './notifications/notifications.module.js';
 import { PrivacyModule } from './privacy/privacy.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { ProfessionalsModule } from './professionals/professionals.module.js';
+import { RealtimeModule } from './realtime/realtime.module.js';
 import { ResourcesModule } from './resources/resources.module.js';
 import { SchoolsModule } from './schools/schools.module.js';
 import { StorageModule } from './storage/storage.module.js';
@@ -80,6 +82,8 @@ import { UsersModule } from './users/users.module.js';
     ActivitiesModule,
     SupportRequestsModule,
     SupportFlagsModule,
+    NotificationsModule,
+    RealtimeModule,
     FollowUpsModule,
     DashboardModule,
     AuditModule,

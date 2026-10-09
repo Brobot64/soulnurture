@@ -6,7 +6,9 @@ import {
 import { Prisma } from '@prisma/client';
 import { hashPassword } from 'better-auth/crypto';
 import { AuditService } from '../audit/audit.service.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { RealtimeService } from '../realtime/realtime.service.js';
 import { generateShortCode } from '../schools/short-code.js';
 
 const CODE_RETRY_ATTEMPTS = 5;
@@ -23,6 +25,8 @@ export class AdminService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
+    private readonly notifications: NotificationsService,
+    private readonly realtime: RealtimeService,
   ) {}
 
   async createSchool(actorId: string, input: { name: string; defaultPassword?: string }) {
@@ -94,8 +98,10 @@ export class AdminService {
 
   /// Suspending a school cuts every session it holds, so live users die on
   /// their next request (TenantGuard) — the sign-in guard blocks re-entry.
-  /// The SCHOOL_SUSPENDED notifications are durable rows so users see the
-  /// reason in-app if the school is ever reactivated.
+  /// Comms are best-effort and run after the state change commits: durable
+  /// SCHOOL_SUSPENDED rows (so users see the reason in-app if the school is
+  /// ever reactivated), then a hard socket disconnect — open sockets survive
+  /// session revocation, and suspension must bite immediately.
   async suspendSchool(actorId: string, schoolId: string) {
     const school = await this.requireSchool(schoolId);
     if (school.status === 'SUSPENDED') return { id: schoolId, status: 'SUSPENDED' };
@@ -111,19 +117,17 @@ export class AdminService {
         data: { status: 'SUSPENDED' },
       }),
       this.prisma.session.deleteMany({ where: { user: { schoolId } } }),
-      ...(users.length > 0
-        ? [
-            this.prisma.notification.createMany({
-              data: users.map((user) => ({
-                userId: user.id,
-                type: 'SCHOOL_SUSPENDED',
-                title: 'School account suspended',
-                body: 'Your school is currently suspended. Contact your school administrator.',
-              })),
-            }),
-          ]
-        : []),
     ]);
+
+    await this.notifications.pushMany({
+      userIds: users.map((user) => user.id),
+      type: 'SCHOOL_SUSPENDED',
+      title: 'School account suspended',
+      body: 'Your school is currently suspended. Contact your school administrator.',
+    });
+    for (const user of users) {
+      this.realtime.disconnectUser(user.id);
+    }
 
     await this.auditService.log({
       actorId,
