@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { fileURLToPath } from 'node:url';
 import { ActivitiesModule } from './activities/activities.module.js';
+import { AdminModule } from './admin/admin.module.js';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AiModule } from './ai/ai.module.js';
@@ -39,6 +40,7 @@ import { UsersModule } from './users/users.module.js';
       validate: validateEnv,
     }),
     PrismaModule,
+    AdminModule,
     MailerModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
