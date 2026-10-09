@@ -11,6 +11,14 @@ CREATE TYPE "ChatMessageRole" AS ENUM ('STUDENT', 'PROFESSIONAL', 'SYSTEM');
 ALTER TYPE "UserRole" ADD VALUE 'SCHOOL_ADMIN';
 ALTER TYPE "UserRole" ADD VALUE 'PLATFORM_ADMIN';
 
+-- AlterTable
+ALTER TABLE "user" ADD COLUMN     "deactivatedAt" TIMESTAMP(3),
+ADD COLUMN     "mustChangePassword" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN     "schoolId" UUID;
+
+-- AlterTable
+ALTER TABLE "student_profile" ADD COLUMN     "studentCode" TEXT;
+
 -- CreateTable
 CREATE TABLE "school" (
     "id" UUID NOT NULL,
