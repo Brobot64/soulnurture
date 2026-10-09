@@ -166,6 +166,7 @@ export class ChatService {
         checkInId: checkIn?.id ?? null,
         composedByAi: entry.viaAi,
       },
+      schoolId: thread.schoolId,
     });
 
     const professionals = await this.prisma.user.findMany({
@@ -330,6 +331,7 @@ export class ChatService {
       entity: 'ChatThread',
       entityId: threadId,
       meta: { professionalId: professional.id },
+      schoolId: thread.schoolId,
     });
 
     const payload = { threadId, professionalName: user.name };
@@ -520,6 +522,7 @@ export class ChatService {
       select: {
         id: true,
         status: true,
+        schoolId: true,
         student: { select: { userId: true } },
         professional: { select: { userId: true } },
       },
@@ -538,6 +541,7 @@ export class ChatService {
       action: 'chat.thread_closed',
       entity: 'ChatThread',
       entityId: threadId,
+      schoolId: thread.schoolId,
     });
 
     const payload = { threadId };

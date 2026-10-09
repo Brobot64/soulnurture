@@ -158,6 +158,7 @@ export class SchoolUsersService {
       entity: 'User',
       entityId: user.id,
       meta: { schoolId, studentCode },
+      schoolId,
     });
     return {
       user: { id: user.id, name: user.name, email: user.email, role: user.role },
@@ -207,6 +208,7 @@ export class SchoolUsersService {
       entity: 'User',
       entityId: user.id,
       meta: { schoolId, role: input.role },
+      schoolId,
     });
     return {
       user: { id: user.id, name: user.name, email: user.email, role: user.role },
@@ -276,6 +278,7 @@ export class SchoolUsersService {
       entity: 'User',
       entityId: userId,
       meta: { schoolId },
+      schoolId,
     });
     return { updated: true };
   }
@@ -300,6 +303,7 @@ export class SchoolUsersService {
       entity: 'User',
       entityId: userId,
       meta: { schoolId },
+      schoolId,
     });
     return { id: userId, deactivated: true };
   }
@@ -318,6 +322,7 @@ export class SchoolUsersService {
       entity: 'User',
       entityId: userId,
       meta: { schoolId },
+      schoolId,
     });
     return { id: userId, deactivated: false };
   }
@@ -340,6 +345,7 @@ export class SchoolUsersService {
       entity: 'School',
       entityId: schoolId,
       meta: { defaultPasswordUpdated: true },
+      schoolId,
     });
     return { defaultPasswordUpdated: true };
   }

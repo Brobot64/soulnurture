@@ -60,6 +60,7 @@ export class AdminService {
       entity: 'School',
       entityId: school.id,
       meta: { name, hasDefaultPassword: defaultPasswordHash !== null },
+      schoolId: school.id,
     });
     return school;
   }
@@ -92,6 +93,7 @@ export class AdminService {
       entity: 'School',
       entityId: schoolId,
       meta: { name: school.name },
+      schoolId,
     });
     return school;
   }
@@ -135,6 +137,7 @@ export class AdminService {
       entity: 'School',
       entityId: schoolId,
       meta: { revokedSessionsOf: users.length },
+      schoolId,
     });
     return { id: schoolId, status: 'SUSPENDED' };
   }
@@ -152,6 +155,7 @@ export class AdminService {
       action: 'school.reactivated',
       entity: 'School',
       entityId: schoolId,
+      schoolId,
     });
     return { id: schoolId, status: 'ACTIVE' };
   }

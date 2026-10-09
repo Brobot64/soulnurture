@@ -171,6 +171,7 @@ model School {
 
   users         User[]
   chatThreads   ChatThread[]
+  auditLogs     AuditLog[]
 
   @@map("school")
 }
@@ -534,11 +535,14 @@ model AuditLog {
   entity    String
   entityId  String?
   meta      Json?
+  schoolId  String?  @db.Uuid
   createdAt DateTime @default(now())
   actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  school    School?  @relation(fields: [schoolId], references: [id], onDelete: SetNull)
 
   @@index([entity, entityId])
   @@index([createdAt])
+  @@index([schoolId])
   @@map("audit_log")
 }
 

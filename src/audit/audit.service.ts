@@ -12,6 +12,7 @@ export class AuditService {
     entity: string;
     entityId?: string | null;
     meta?: Prisma.InputJsonValue;
+    schoolId?: string | null;
   }) {
     return this.prisma.auditLog.create({
       data: {
@@ -20,12 +21,19 @@ export class AuditService {
         entity: input.entity,
         entityId: input.entityId ?? null,
         meta: input.meta ?? undefined,
+        schoolId: input.schoolId ?? null,
       },
     });
   }
 
-  list(params: { take?: number }) {
+  list(params: { take?: number; actions?: string[]; schoolId?: string }) {
     return this.prisma.auditLog.findMany({
+      where: {
+        ...(params.actions && params.actions.length > 0
+          ? { action: { in: params.actions } }
+          : {}),
+        ...(params.schoolId ? { schoolId: params.schoolId } : {}),
+      },
       orderBy: { createdAt: 'desc' },
       take: params.take ?? 50,
     });
