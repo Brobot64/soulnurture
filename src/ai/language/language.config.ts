@@ -9,12 +9,14 @@
  *   ha  Hausa
  *   ig  Igbo
  *
- * Detection is a realtime, offline heuristic stack (see
- * language-detector.service.ts): diacritics scan → Pidgin marker words →
- * Yoruba/Hausa/Igbo lexicon wordlists → franc trigram detection (long
- * English only — franc cannot separate yo/ha/ig: "mi o ti jeun lati aaro"
- * scores ibo 1.0 vs yor 0.89). No LLM ever sits in the realtime lane; the
- * async understanding lane (worker VERNACULAR job) is the only model step.
+ * Detection is a heuristic stack (see language-detector.service.ts):
+ * diacritics scan → Pidgin marker words → Yoruba/Hausa/Igbo lexicon
+ * wordlists → franc trigram detection (long English only — franc cannot
+ * separate yo/ha/ig: "mi o ti jeun lati aaro" scores ibo 1.0 vs yor 0.89) →
+ * N-ATLaS itself, only when every heuristic is silent (LANG_ID_016: Hausa/
+ * Igbo typed without diacritics is invisible to the wordlists). The model
+ * stage is fail-open and capped by a short timeout — when it is missing,
+ * slow or wrong, the preference fallback stands exactly as before.
  * ---------------------------------------------------------------------------
  */
 
@@ -60,6 +62,11 @@ export const FRANC_ONLY_CODES = ['eng', 'yor', 'hau', 'ibo', 'pcm'] as const;
  */
 export const FRANC_MIN_CHARS = 20;
 export const FRANC_ACCEPTED_CODE = 'eng';
+
+/** Below this trimmed length the detector never asks the model (see the
+ * model stage in language-detector.service.ts): one or two words cannot be
+ * classified reliably, so the preference fallback stands unchanged. */
+export const IDENTIFY_MIN_CHARS = 8;
 
 export const FRANC_TO_LANGUAGE: Record<string, SupportedLanguage> = {
   eng: 'en',

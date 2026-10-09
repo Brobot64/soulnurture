@@ -62,4 +62,19 @@ describe('buildAiConfig language block', () => {
 
     expect(config.language.natlasRenderTimeoutMs).toBe(8_000);
   });
+
+  it('defaults the language-ID knobs to the strictest budget', () => {
+    const config = buildAiConfig(new ConfigService({}));
+
+    expect(config.language.natlasIdentifyTimeoutMs).toBe(4_000);
+    expect(config.language.identifyMaxOutputTokens).toBe(8);
+  });
+
+  it('honours NATLAS_IDENTIFY_TIMEOUT_MS', () => {
+    const config = buildAiConfig(
+      new ConfigService({ NATLAS_IDENTIFY_TIMEOUT_MS: '2000' }),
+    );
+
+    expect(config.language.natlasIdentifyTimeoutMs).toBe(2_000);
+  });
 });

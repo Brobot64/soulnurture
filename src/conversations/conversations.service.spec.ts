@@ -15,6 +15,7 @@ import { AI_DISCLOSURE_CONSENT_VERSION } from '../ai/disclosure/ai-disclosure.js
 import { AuditService } from '../audit/audit.service.js';
 import { ConsentRequiredException } from '../consent/consent.errors.js';
 import { ConsentService } from '../consent/consent.service.js';
+import { NatlasLlmProvider } from '../ai/providers/natlas/natlas-llm.provider.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
 import { ConversationsService } from './conversations.service.js';
@@ -146,6 +147,10 @@ describe('ConversationsService', () => {
         { provide: StudentsService, useValue: studentsService },
         { provide: AiService, useValue: ai },
         IntentEngineService,
+        {
+          provide: NatlasLlmProvider,
+          useValue: { configured: false, completeLabel: vi.fn() },
+        },
         LanguageDetectorService,
         { provide: GuardrailService, useValue: guardrail },
         { provide: AuditService, useValue: auditService },

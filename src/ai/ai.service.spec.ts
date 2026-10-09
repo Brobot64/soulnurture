@@ -429,6 +429,25 @@ describe('AiService.generateAndApply', () => {
     expect(sent.systemPrompt).toContain('culturally grounded Yoruba');
   });
 
+  it('follows the language detected in the message over the standing language', async () => {
+    const generateResponse = vi.fn().mockResolvedValue(validModelResult());
+    const provider = {
+      generateResponse,
+      transcribeAudio: async () => ({ text: 'x' }),
+    };
+    const module = await createModule(provider);
+    const service = module.get(AiService);
+    await service.generateAndApply({
+      ...orchestrationInput,
+      messageLanguage: 'ha',
+      language: 'yo',
+    });
+
+    const sent = generateResponse.mock.calls[0][0] as { systemPrompt: string };
+    expect(sent.systemPrompt).toContain('REPLY FULLY in Hausa');
+    expect(sent.systemPrompt).not.toContain('REPLY FULLY in Yoruba');
+  });
+
   describe('reply render lane (n-atlas-translate)', () => {
     const translateConfig = {
       ...aiConfigStub,
@@ -507,6 +526,21 @@ describe('AiService.generateAndApply', () => {
 
       expect(replyRenderer.render).not.toHaveBeenCalled();
       expect(outcome.result.render).toBeUndefined();
+    });
+
+    it("'en' detected in this message beats a vernacular language — English turns stay English", async () => {
+      const { service, generateResponse } = await serviceWithSpy();
+      const outcome = await service.generateAndApply({
+        ...orchestrationInput,
+        messageLanguage: 'en',
+        language: 'yo',
+      });
+
+      expect(replyRenderer.render).not.toHaveBeenCalled();
+      expect(outcome.result.render).toBeUndefined();
+      const sent = generateResponse.mock.calls[0][0] as { systemPrompt: string };
+      expect(sent.systemPrompt).toContain('reply in English');
+      expect(sent.systemPrompt).not.toContain('REPLY FULLY');
     });
 
     it('swaps the language directive for interim English while the render lane is on', async () => {

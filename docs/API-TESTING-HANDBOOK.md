@@ -554,25 +554,29 @@ attempt failed and the async lane took over — see Chapter 6), and
 preference is still `"en"` — see below).
 
 **Vernacular messages (language layer).** Every message is language-detected
-synchronously with offline heuristics — marked letters (Yoruba ẹ/ọ/ṣ, Hausa
+synchronously: offline heuristics first — marked letters (Yoruba ẹ/ọ/ṣ, Hausa
 ƙ/ɓ/ɗ, Igbo ị/ọ/ụ/ṅ), Pidgin marker words, then Yoruba/Hausa/Igbo lexicon
 wordlists; franc only classifies long English text (it cannot separate the
-Nigerian languages — "mi o ti jeun lati aaro" reads as Igbo to franc). No
-model call sits in the realtime path, so the reply is never delayed.
-Detection does three things: when the student's preference is still `"en"`,
-the response carries `languageOffer: { detected, current }`; the reply for
-**this turn** is rendered into the detected language — generation stays
-English (context, guardrails and the intent floor all run on the English
-lane) and the finished reply is rendered by local N-ATLaS **within the same
-request**, so a Yoruba message is answered in Yoruba immediately, whatever
-the standing preference (per-message following; a voice note follows the
-same rule once its transcript is sent). Forced `dto.language` wins over the
-detection; the preference is the fallback when nothing is detected. Render
-fallback chain: N-ATLaS → OpenAI render → the English reply (total render
-failure never blocks the turn); scripted safety copy is never rendered —
-that wording is approved verbatim. Finally a `VERNACULAR` job (see §6.6) is
-queued to translate the message and run a second safeguarding sweep on the
-English translation.
+Nigerian languages — "mi o ti jeun lati aaro" reads as Igbo to franc). When
+every heuristic is silent the detector asks N-ATLaS itself to name the
+language (LANG_ID_016) — a strict 4s cap (`NATLAS_IDENTIFY_TIMEOUT_MS`) and
+fail-open in every direction: text under 8 characters, a missing/cold
+endpoint or any error leaves the preference fallback standing exactly as
+before, so the turn is never delayed more than the cap. Detection does three
+things: when the student's preference is still `"en"`, the response carries
+`languageOffer: { detected, current }`; the reply for **this turn** follows
+the detected language — `"en"` included, so whoever types English is answered
+in English — generation stays English (context, guardrails and the intent
+floor all run on the English lane) and a vernacular turn's finished reply is
+rendered by local N-ATLaS **within the same request**, whatever the standing
+preference (per-message following; a voice note follows the same rule once
+its transcript is sent). The forced `dto.language` and then the preference
+fill in only when the message text itself yields no signal. Render fallback
+chain: N-ATLaS → OpenAI render → the English reply (total render failure
+never blocks the turn); scripted safety copy is never rendered — that wording
+is approved verbatim. Finally a `VERNACULAR` job (see §6.6) is queued to
+translate the message and run a second safeguarding sweep on the English
+translation.
 
 **Vernacular probe** (optional — run after §5.4 so the 6-message assertion
 above stays valid). Send (omit `language`):
@@ -1003,8 +1007,10 @@ Follow-up statuses: `PENDING | SCHEDULED | COMPLETED | CANCELLED`.
   — `vernacularReplyMode` — `AI_VERNACULAR_REPLY_MODE`, `n-atlas-translate`
   by default — N-ATLaS
   endpoint/model — `NATLAS_LLM_BASE_URL`/`NATLAS_LLM_MODEL` — and the
-  understanding + render output/timeout caps: `NATLAS_LLM_TIMEOUT_MS`,
-  `NATLAS_RENDER_TIMEOUT_MS`, `renderMaxOutputTokens`), `intents`, `canonicalCategories`,
+  understanding + render + language-ID output/timeout caps:
+  `NATLAS_LLM_TIMEOUT_MS`, `NATLAS_RENDER_TIMEOUT_MS`,
+  `NATLAS_IDENTIFY_TIMEOUT_MS`, `renderMaxOutputTokens`,
+  `identifyMaxOutputTokens`), `intents`, `canonicalCategories`,
   `canonicalSeverities`, `canonicalTopics`,
   `guardrails` (`input` caps + injection probes, `output` caps + banned claims,
   `rate` per-student limits — see §5.3)
@@ -1780,4 +1786,6 @@ registers, and the §10 rows 17–19 fences.
 | 2026-10-09 | `SIGNUP_LOCK_011` — public sign-up closed with a uniform 400 `EMAIL_PASSWORD_SIGN_UP_DISABLED` (§14.8). |
 | 2026-10-09 | `DASH_DOCS_012` — Chapter 14 (this lane) + §10 rows 17–19 + Appendix B placeholder note; README dashboard routes; e2e `test/e2e-dashboards.mjs` (`npm run test:e2e:dashboards`). |
 | 2026-10-09 | `PLATFORM_ADMIN_013` — seed bootstrap accepts comma-separated `PLATFORM_ADMIN_EMAIL`/`PLATFORM_ADMIN_NAME` lists (positional names, generic fallback) so one seed run enrolls several owners; §13.1 + `.env.example` updated. |
+| 2026-10-09 | `NATLAS_LLM_014` — the vernacular lane trades the VPS Ollama for the hosted N-ATLaS endpoint: OpenAI chat shape + env-only `NATLAS_LLM_API_KEY` (never in `GET /api/v1/ai/config`), every failure path throws `NatlasUnavailableError` so the n-atlas-local→openai chain is untouched, `NATLAS_LLM_TIMEOUT_MS` (45s default), model default `NCAIR1/N-ATLaS`. |
 | 2026-10-09 | `VERNACULAR_REPLY_015` — per-message language following: lexicon detection replaces franc for yo/ha/ig (franc only classifies long English), and the `n-atlas-translate` reply mode renders the finished English reply into the turn's language within the same request (N-ATLaS → OpenAI render → English fallback; scripted safety copy never rendered); `aiPayload.render`, `NATLAS_RENDER_TIMEOUT_MS`; §5.3 + §9.5 + `.env.example` updated. |
+| 2026-10-09 | `LANG_ID_016` — language from the input itself: when every heuristic is silent the detector asks N-ATLaS to name the turn's language (`IDENTIFY_MIN_CHARS` 8, strict `NATLAS_IDENTIFY_TIMEOUT_MS` 4s, fail-open to the standing preference on cold/unparsable), and the detected language — `en` included — always beats the preference for that turn; §5.3 + §9.5 + `.env.example` updated. |

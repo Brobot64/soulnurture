@@ -76,8 +76,9 @@ export interface AiOrchestrationInput {
   userContent: string;
   language?: string;
   /** Language detected in THIS message's text (synchronous detector in the
-   * conversations lane). Beats `language`/preference for the reply language —
-   * a Yoruba turn answered in Yoruba, per-message, no manual switching. */
+   * conversations lane; N-ATLaS classifies when heuristics are silent). Beats
+   * `language`/preference for the reply language — 'en' included, so each
+   * turn follows the input, no manual switching. */
   messageLanguage?: SupportedLanguage | null;
   studentRef: string;
   classLabel: string | null;
@@ -248,10 +249,11 @@ export class AiService {
     }
 
     // Reply language for this turn: a language detected in THIS message's
-    // text beats the standing preference (per-message following), then the
-    // explicit/preference language, then English. With the n-atlas-translate
-    // mode a non-English turn also flips the generation directive to interim
-    // English — the finished reply is rendered afterwards by the local model.
+    // text beats the standing preference (per-message following) — 'en'
+    // included, so an English turn is answered in English whatever the
+    // preference. With the n-atlas-translate mode a non-English turn also
+    // flips the generation directive to interim English — the finished reply
+    // is rendered afterwards by the local model.
     const replyLanguage = this.resolveReplyLanguage(
       input,
       ctx.student.preferredLanguage,
@@ -269,9 +271,7 @@ export class AiService {
       `Prompt version: ${REFLECTION_PROMPT_VERSION}`,
       renderActive
         ? interimEnglishDirective(replyLanguage)
-        : languagePromptDirective(
-            input.language ?? ctx.student.preferredLanguage ?? 'en',
-          ),
+        : languagePromptDirective(replyLanguage),
       ...guidedLines,
       `Valid supportFlag.category values: ${CANONICAL_CATEGORIES.join(', ')}`,
       `Valid supportFlag.severity values: ${CANONICAL_SEVERITIES.join(', ')}`,
@@ -387,19 +387,18 @@ export class AiService {
     return { result, context: ctx, verdict, notes };
   }
 
-  /** messageLanguage (detected in this turn's text) ?? input.language ??
-   * student preference ?? 'en'. Unsupported codes and 'en' all fall to 'en'. */
+  /** Per-turn reply language, strict priority: the language detected in
+   * THIS message's text (any supported code — 'en' included, whoever types
+   * English can read it), then the explicit language, then the preference,
+   * then English. Detection is authoritative because it follows the input;
+   * the preference only fills in when detection found nothing. */
   private resolveReplyLanguage(
     input: AiOrchestrationInput,
     preferredLanguage: string | null | undefined,
   ): SupportedLanguage {
     const candidates = [input.messageLanguage, input.language, preferredLanguage];
     for (const code of candidates) {
-      if (
-        code &&
-        code !== 'en' &&
-        SUPPORTED_LANGUAGES.includes(code as SupportedLanguage)
-      ) {
+      if (code && SUPPORTED_LANGUAGES.includes(code as SupportedLanguage)) {
         return code as SupportedLanguage;
       }
     }
