@@ -1085,6 +1085,9 @@ Every row must produce exactly the stated status **with the stated actor**:
 | 14 | Grace | `GET /api/v1/schools/<schoolId>/overview` | `403` (SCHOOL_ADMIN/PLATFORM_ADMIN-only) |
 | 15 | Grace | `POST /api/v1/chat/threads` | `403` (STUDENT-role-only route) |
 | 16 | Jude | `POST /api/v1/chat/threads/<threadId>/claim` | `403` (staff-role-only route) |
+| 17 | School admin | `GET /api/v1/admin/analytics` | `403` (PLATFORM_ADMIN-only) |
+| 18 | School admin | `POST /api/v1/schools/<schoolId>/admins` | `403` (owner-only — school admins cannot mint peers) |
+| 19 | School A admin | `GET /api/v1/schools/<schoolBId>/analytics` | `403` `SCHOOL_ACCESS_DENIED` |
 
 ---
 
@@ -1484,6 +1487,215 @@ socket in the room dies while a second school's sockets are untouched.
 
 ---
 
+## 14. Admin & school dashboards (`ANALYTICS_009` → `DASH_DOCS_012`)
+
+The dashboard lane: windowed analytics for the platform owner and each school,
+activity feeds over the audit log, school settings, the chat-thread register,
+owner-only school-admin provisioning, the reset-to-default password flow —
+plus the closed sign-up door. Actors: the platform owner (§13.1) and a
+**school admin** (provision one in §14.5, or reuse `<schoolAdminEmail>` from
+a §13 run).
+
+### 14.1 Platform analytics
+
+**Request** (owner):
+
+```http
+GET /api/v1/admin/analytics
+GET /api/v1/admin/analytics?days=14
+GET /api/v1/admin/analytics?days=30
+GET /api/v1/admin/analytics?days=90
+```
+
+**Expected** `200` for all four. `data.windowDays` echoes the normalized
+window: `days` is validated against `[14, 30, 90]` and anything else (`7`,
+`abc`, empty) falls back to `14` — never a `400`. Assert:
+
+- `series` has exactly `windowDays` rows, one per **UTC day**, oldest first:
+  `{date: "YYYY-MM-DD", newUsers, checkIns, chatThreads, chatMessages}`.
+  The last row is today; every cell is an integer ≥ 0.
+- `deltas` has exactly those four counter keys, each `{current, previous,
+  pct}` — fixed **7d vs previous 7d** sums sliced from the series (every
+  window is ≥ 14 days, so both segments are always complete). `pct` is
+  `null` exactly when `previous === 0`; otherwise it is
+  `round((current − previous) / previous × 1000) / 10`.
+- `mood` = `{total, distribution}` with **all eight** student faces always
+  present (zeros included): `GREAT, NORMAL, SAD, ANGRY, CONFUSED,
+  INDIFFERENT, STRANGE, DISTRAUGHT`. `total` equals the distribution sum.
+  The backend folds the 12 `FeelingLabel` values into the nearest face
+  (`ANXIOUS → STRANGE`, `OVERWHELMED → CONFUSED`, `TIRED → INDIFFERENT`,
+  `STRESSED → DISTRAUGHT`, …) so no check-in is ever dropped.
+- `weekday` is exactly `[MON..SUN]` in order, each `{weekday, count}`.
+
+Write fresh data first (a check-in §5.1, a chat request §13.5): today's
+`checkIns` / `chatThreads` cells, `mood.distribution.STRANGE` (for
+`ANXIOUS`) and today's weekday bar each move by ≥ 1. Buckets are UTC days —
+around midnight assert `≥`, not `==`.
+
+### 14.2 School analytics (roster + onboarding)
+
+**Request** (school admin, own school):
+
+```http
+GET /api/v1/schools/<schoolId>/analytics?days=30
+```
+
+**Expected** `200`. Same shape as §14.1 (including the fallback ladder) plus
+two school blocks:
+
+- `roster` = `{students, professionals, admins, deactivated}` — live counts;
+  professionals = COUNSELLOR + PSYCHOLOGIST + SUPPORT_STAFF; admins =
+  SCHOOL_ADMIN + PLATFORM_ADMIN; `deactivated` counts `deactivatedAt`.
+- `onboarding` = `{incomplete, percentComplete}` — `incomplete` counts
+  accounts still on the default password (`mustChangePassword`) or
+  unverified (`emailVerified: false`); `percentComplete` carries one decimal
+  and a school with **no users** reports `100` (nothing left to onboard).
+
+Onboard one student (§13.3) into a school whose only member is the admin →
+`{incomplete: 1, percentComplete: 50}`; after the student verifies and
+completes the forced first-password flow (§13.4) → `{incomplete: 0,
+percentComplete: 100}`.
+
+Isolation: a second school with no activity answers `roster.students = 0`,
+`mood.total = 0` and all-zero series cells — nothing of school A leaks into
+school B.
+
+**Negatives**:
+
+| Request | Expected |
+| --- | --- |
+| School A admin on `GET /api/v1/schools/<schoolBId>/analytics` | `403` `SCHOOL_ACCESS_DENIED` |
+| Owner on a random UUID school | `404` |
+
+### 14.3 Activity feeds
+
+**Request** (owner / school admin):
+
+```http
+GET /api/v1/admin/activity?limit=20&kind=chat
+GET /api/v1/schools/<schoolId>/activity?kind=people
+```
+
+**Expected** `200`, `data.items[]` newest first —
+`{id, action, kind, entity, entityId, meta, createdAt, actor, school}`.
+`actor`/`school` are label objects (`{id, name[, shortCode]}`) or `null`
+(seeded/system rows; a deleted school's rows keep `school: null` — the FK is
+`ON DELETE SET NULL`). Known actions render with a `kind`:
+
+| `kind` | Actions |
+| --- | --- |
+| `schools` | `school.created`, `school.renamed`, `school.suspended`, `school.reactivated`, `school.settings_updated` |
+| `people` | `school.student_enrolled`, `school.professional_enrolled`, `school.admin_enrolled`, `school.user_updated`, `school.user_deactivated`, `school.user_reactivated`, `school.user_password_reset`, `staff.bootstrap_enrollment` |
+| `chat` | `chat.thread_created`, `chat.thread_claimed`, `chat.thread_closed` |
+
+`kind` defaults to `all` (every listed action); an unknown value → `422`.
+`limit` defaults 50, capped at 100. The school feed is school-scoped: assert
+every row's `school.id` is that school (or `null` for rows whose school was
+later deleted) and that a second school's events never appear. Assert by
+**finding your known rows by id**, not by counting — stale audit rows from
+earlier runs persist.
+
+### 14.4 School settings
+
+**Request** (school admin):
+
+```http
+GET /api/v1/schools/<schoolId>/settings
+```
+
+**Expected** `200` — `{id, name, shortCode, status, createdAt,
+hasDefaultPassword}`. The response never contains a hash or the plaintext.
+
+**Request** (school admin):
+
+```http
+PATCH /api/v1/schools/<schoolId>/settings
+```
+
+```json
+{ "defaultPassword": "NewDefault#2026" }
+```
+
+**Expected** `200` — `{defaultPasswordUpdated: true}`. The scrypt hash is
+replaced immediately and applies to every onboarding (§13.3, §14.5) and
+reset (§14.6) from now on; existing accounts keep their personal passwords.
+Negative: a password under 8 chars → `400` (Validation failed).
+
+### 14.5 Provision a school admin (owner-only)
+
+**Request** (owner):
+
+```http
+POST /api/v1/schools/<schoolId>/admins
+```
+
+```json
+{ "name": "Efua Boateng", "email": "efua@school.test" }
+```
+
+**Expected** `201` — `data.user {id, name, email, role: "SCHOOL_ADMIN"}` +
+`data.verificationEmailSent` (best-effort, SMTP-dependent). The account
+carries the school default password and the branded verification email (the
+starter password is never emailed). Verify (§0.3) → sign in with the default
+→ `403` `PASSWORD_CHANGE_REQUIRED` on any route outside the allowlist →
+`POST /api/v1/auth/first-password` (§13.4) → full school-admin access.
+
+Deliberately owner-only: the same call as a school admin → `403`
+(PLATFORM_ADMIN-only) — school admins cannot mint peers.
+
+### 14.6 Reset a school user to the default password
+
+**Request** (school admin):
+
+```http
+POST /api/v1/schools/<schoolId>/users/<userId>/reset-password
+```
+
+**Expected** `201` — `{id: "<userId>", passwordReset: true}`. Side effects:
+credential password back to the **current** school default (§14.4 updates
+what "current" means), `mustChangePassword` re-armed, every session revoked
+(the target's next request `401`). The §14.2 onboarding tile returns to
+incomplete and the next sign-in lands on the forced first-password flow.
+
+**Negatives**:
+
+| Request | Expected |
+| --- | --- |
+| School admin resets their own id | `403` `SELF_TARGET_FORBIDDEN` |
+| Target user id from another school (path = own school) | `404` |
+| School with no default password set | `422` `SCHOOL_DEFAULT_PASSWORD_REQUIRED` |
+
+### 14.7 Enriched registers
+
+`GET /api/v1/schools` (owner) carries per-school gauges beyond `_count.users`:
+`students`, `professionals`, `pendingChats` (live `PENDING` threads) and
+`lastActivityAt` — the newest session `updatedAt` across the school, i.e.
+real sign-ins, not data writes; `null` until someone signs in.
+
+`GET /api/v1/admin/users` (owner) returns `{items, total}` with filters:
+`role` (unknown value → `422`), `schoolId`, `q` (name/email, contains, case
+insensitive), `limit` (default 50, max 100) and `offset`. Rows include the
+`school {id, name, shortCode}` label.
+
+### 14.8 Sign-up lock (`SIGNUP_LOCK_011`)
+
+`POST /api/auth/sign-up/email` with any body → **always** `400`
+`EMAIL_PASSWORD_SIGN_UP_DISABLED` — the uniform answer for new and existing
+emails alike, so the route cannot probe which accounts exist. Every account
+enters by provisioning instead: §2.1 staff bootstrap, §13.2 platform schools,
+§13.3 students/professionals, §14.5 school admins.
+
+### 14.9 Automated coverage
+
+`test/e2e-dashboards.mjs` (`npm run test:e2e:dashboards`, server on :3000)
+walks this chapter live: the owner analytics ladder + shapes, school
+provisioning → admin minting → forced first password, student onboarding
+(50% → 100% tiles), check-in + chat reflected in the analytics, activity
+feeds with kind filters, settings + the reset-password roundtrip, enriched
+registers, and the §10 rows 17–19 fences.
+
+---
+
 ## Appendix A — Enum reference
 
 | Enum | Values |
@@ -1499,6 +1711,7 @@ socket in the room dies while a second school's sockets are untouched.
 | `SupportFlagSource` | `AI_CANDIDATE`, `SERVER_POLICY`, `PROFESSIONAL`, `SELF_REPORT` |
 | `AiJobKind` | `REPLY`, `SUMMARY`, `VERNACULAR` |
 | `ActivityStepType` (renderer contract) | `breath-pacing`, `timer`, `prompt-list`, `body-scan` |
+| `MoodId` (dashboard render contract) | `GREAT`, `NORMAL`, `SAD`, `ANGRY`, `CONFUSED`, `INDIFFERENT`, `STRANGE`, `DISTRAUGHT` |
 | `FollowUpStatus` | `PENDING`, `SCHEDULED`, `COMPLETED`, `CANCELLED` |
 | `SchoolStatus` | `ACTIVE`, `SUSPENDED` |
 | `ChatThreadStatus` | `PENDING`, `ACTIVE`, `CLOSED` |
@@ -1518,7 +1731,7 @@ socket in the room dies while a second school's sockets are untouched.
 | `<supportPersonId>` | §8.1 people list |
 | `<supportRequestId>` | §8.1 create |
 | `<judeProfileId>` | §6.2 SQL |
-| `<userId>` | session user id — second path segment of every upload key (§12) |
+| `<userId>` | session user id — second path segment of every upload key (§12); target of per-user school routes (§14.6) |
 | `<schoolId>` | §13.2 school create / list (`data.id`) |
 | `<threadId>` | §13.5 chat request create (`data.id`) |
 | `<notificationId>` | §13.6 notifications list |
@@ -1544,3 +1757,7 @@ socket in the room dies while a second school's sockets are untouched.
 | 2026-10-09 | `CHAT_POOL_006` — human chat: request → PENDING pool → race-safe claim → messages (`viaVoice`) → read → closable/idempotent close (§13.5); AI entry note from check-in context only; per-user send rate limit; true `{total, byThread}` unread summary. |
 | 2026-10-09 | `PROFILE_007` — `GET /api/v1/users/me` gains `school {id, name, shortCode}` + `mustChangePassword` (§13.4). |
 | 2026-10-09 | `DOCS_008` — Chapter 13 (this lane) + §10 rows 12–16 + Appendix A enums (SchoolStatus/ChatThreadStatus/ChatMessageRole/NotificationType) + Appendix B placeholders; `.env.example` tenancy block; DEPLOYMENT.md nginx WebSocket upgrade; README note; e2e `test/e2e-school-chat.mjs` (`npm run test:e2e:school-chat`). |
+| 2026-10-09 | `ANALYTICS_009` — audit-log school scope (`audit_log.schoolId`, `ON DELETE SET NULL`) + analytics module: platform & school windowed analytics (14/30/90 ladder, UTC day series, fixed 7d deltas, 8-face mood roll-up, weekday bars; school variant adds roster + onboarding completeness) and activity feeds with kind filters (§14.1–14.3, Appendix A `MoodId`). |
+| 2026-10-09 | `ADMIN_API_010` — dashboard admin APIs: school settings read/update (§14.4), owner-only school-admin provisioning (§14.5), reset-to-default password (§14.6), enriched `GET /schools` gauges + `GET /admin/users` filters, chat-thread register (§14.7, §14.3). |
+| 2026-10-09 | `SIGNUP_LOCK_011` — public sign-up closed with a uniform 400 `EMAIL_PASSWORD_SIGN_UP_DISABLED` (§14.8). |
+| 2026-10-09 | `DASH_DOCS_012` — Chapter 14 (this lane) + §10 rows 17–19 + Appendix B placeholder note; README dashboard routes; e2e `test/e2e-dashboards.mjs` (`npm run test:e2e:dashboards`). |

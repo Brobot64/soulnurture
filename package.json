@@ -22,6 +22,7 @@
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
     "test:e2e:journey": "node test/e2e-journey.mjs",
     "test:e2e:school-chat": "node test/e2e-school-chat.mjs",
+    "test:e2e:dashboards": "node test/e2e-dashboards.mjs",
     "prisma:generate": "prisma generate --config prisma7.config.ts",
     "prisma:studio": "prisma studio --config prisma7.config.ts",
     "prisma:migrate:dev": "prisma migrate dev --config prisma7.config.ts",

@@ -131,8 +131,9 @@ Email verification is required before full access. Use `credentials: "include"` 
 | Consent | `GET /consent/me`, `POST /consent/accept` |
 | Privacy | `GET /privacy/preferences`, `PATCH /privacy/preferences` |
 | Audit | `GET /audit` |
-| Platform console | `POST/GET /schools`, `PATCH /schools/:id`, `POST /schools/:id/suspend`, `POST /schools/:id/reactivate`, `GET /admin/overview`, `GET /admin/users` (PLATFORM_ADMIN) |
-| School management | `GET /schools/:id/overview`, `GET /schools/:id/users`, `POST /schools/:id/students`, `POST /schools/:id/professionals`, `PATCH /schools/:id/users/:userId`, `DELETE /schools/:id/users/:userId`, `POST .../reactivate`, `PATCH /schools/:id/settings` (PLATFORM_ADMIN any school; SCHOOL_ADMIN own school) |
+| Platform console | `POST/GET /schools` (register carries student/professional/pending-chat gauges + last activity), `PATCH /schools/:id`, `POST /schools/:id/suspend`, `POST /schools/:id/reactivate`, `GET /admin/overview`, `GET /admin/users` (`role` / `schoolId` / `q` filters, paginated `{items,total}`), `GET /admin/analytics?days=14\|30\|90`, `GET /admin/activity` (`kind=schools\|people\|chat`) (PLATFORM_ADMIN) |
+| School management | `GET /schools/:id/overview`, `GET /schools/:id/users`, `POST /schools/:id/students`, `POST /schools/:id/professionals`, `PATCH /schools/:id/users/:userId`, `DELETE /schools/:id/users/:userId`, `POST /schools/:id/users/:userId/reactivate`, `POST /schools/:id/users/:userId/reset-password`, `GET/PATCH /schools/:id/settings`, `GET /schools/:id/analytics?days=14\|30\|90`, `GET /schools/:id/activity`, `GET /schools/:id/chat-threads` (`status` filter) (PLATFORM_ADMIN any school; SCHOOL_ADMIN own school) |
+| School admin provisioning | `POST /schools/:id/admins` (owner-only — school admins cannot mint peers) (PLATFORM_ADMIN) |
 | Human chat | `POST /chat/threads`, `GET /chat/threads`, `GET /chat/inbox`, `POST /chat/threads/:id/claim`, `GET /chat/threads/:id`, `POST /chat/threads/:id/messages`, `GET /chat/unread`, `POST /chat/threads/:id/read`, `POST /chat/threads/:id/close` |
 | Notifications | `GET /notifications`, `GET /notifications/unread-count`, `POST /notifications/:id/read`, `POST /notifications/read-all` |
 | First password | `POST /auth/first-password` (session; no old password — school default → own password) |
@@ -261,6 +262,15 @@ In dev the backend stores and serves the latest verification links at `GET /api/
 ```bash
 # with the server running on :3000
 npm run test:e2e:school-chat
+```
+
+### End-to-end dashboards (live backend)
+
+`test/e2e-dashboards.mjs` walks the dashboard surface: platform analytics (window ladder 14/30/90 + fallback normalization, day series, 7d-vs-previous deltas, mood and weekday roll-ups), school provisioning → owner-only school admin minting → the forced first-password flow, student onboarding (student codes, roster + onboarding completeness tiles at 50% → 100%), check-in → chat request reflected in the analytics, activity feeds (kind filters, actor/school labels), the chat-thread register, enriched school/user lists, the default-password reset roundtrip, and the RBAC fences (school admin on `/admin/*` → 403, cross-school access → 403/404).
+
+```bash
+# with the server running on :3000
+npm run test:e2e:dashboards
 ```
 
 ## License
