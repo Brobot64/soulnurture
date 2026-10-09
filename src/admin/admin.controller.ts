@@ -30,10 +30,28 @@ export class AdminController {
   @Get('users')
   @ApiSessionAuth()
   @ApiStandardErrors()
-  @ApiOperation({ summary: 'List users across all schools (platform admin)' })
+  @ApiOperation({
+    summary: 'List users across all schools (platform admin)',
+    description:
+      'Filterable register with a total for paging. `q` matches name or email, case-insensitively.',
+  })
   @ApiQuery({ name: 'limit', required: false, description: 'Default 50, max 100' })
+  @ApiQuery({ name: 'offset', required: false, description: 'Default 0' })
+  @ApiQuery({
+    name: 'role',
+    required: false,
+    description: 'STUDENT, SCHOOL_ADMIN, PLATFORM_ADMIN, COUNSELLOR, PSYCHOLOGIST, SUPPORT_STAFF',
+  })
+  @ApiQuery({ name: 'schoolId', required: false, description: 'Filter by school uuid' })
+  @ApiQuery({ name: 'q', required: false, description: 'Name or email contains' })
   @ApiEnvelopeOk(Object)
-  listUsers(@Query('limit') limit?: string) {
-    return this.adminService.listUsers(limit);
+  listUsers(
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+    @Query('role') role?: string,
+    @Query('schoolId') schoolId?: string,
+    @Query('q') q?: string,
+  ) {
+    return this.adminService.listUsers({ limit, offset, role, schoolId, q });
   }
 }

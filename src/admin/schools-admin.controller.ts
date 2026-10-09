@@ -39,7 +39,11 @@ with it once and is forced to set a personal password.
   @Get()
   @ApiSessionAuth()
   @ApiStandardErrors()
-  @ApiOperation({ summary: 'List schools with user counts (platform admin)' })
+  @ApiOperation({
+    summary: 'List schools with live gauges (platform admin)',
+    description:
+      'Each school carries user counts, students, professionals, pending chat requests and lastActivityAt (newest session per school, null if never).',
+  })
   @ApiEnvelopeOk(Object)
   listSchools() {
     return this.adminService.listSchools();

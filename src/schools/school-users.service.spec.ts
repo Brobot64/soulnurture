@@ -27,11 +27,11 @@ describe('SchoolUsersService', () => {
       count: vi.fn(),
     },
     school: { findUnique: vi.fn(), update: vi.fn() },
-    account: { create: vi.fn() },
+    account: { create: vi.fn(), updateMany: vi.fn() },
     studentProfile: { create: vi.fn(), findUnique: vi.fn(), update: vi.fn() },
     professionalProfile: { create: vi.fn(), update: vi.fn() },
     session: { deleteMany: vi.fn() },
-    chatThread: { count: vi.fn() },
+    chatThread: { count: vi.fn(), findMany: vi.fn() },
     $transaction: vi.fn(),
   };
   const auditService = { log: vi.fn() };
@@ -300,6 +300,315 @@ describe('SchoolUsersService', () => {
     });
   });
 
+  describe('onboardSchoolAdmin', () => {
+    const school = {
+      id: 'school-1',
+      name: 'Achimota School',
+      shortCode: 'AS2345',
+      status: 'ACTIVE',
+      createdAt: new Date('2026-10-01T00:00:00Z'),
+      defaultPasswordHash: 'precomputed-scrypt-hash',
+    };
+
+    it('provisions a SCHOOL_ADMIN through the school default password and audits', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        role: 'PLATFORM_ADMIN',
+        schoolId: null,
+      });
+      prisma.school.findUnique.mockResolvedValue(school);
+      prisma.user.findFirst.mockResolvedValue(null);
+      prisma.user.create.mockResolvedValue({
+        id: 'admin-2',
+        name: 'Yaw Mensah',
+        email: 'yaw@example.com',
+        role: 'SCHOOL_ADMIN',
+      });
+      authService.resendVerificationEmail.mockResolvedValue({});
+
+      const result = await service.onboardSchoolAdmin('owner-1', 'school-1', {
+        name: 'Yaw Mensah',
+        email: 'yaw@example.com',
+      });
+
+      expect(prisma.user.create).toHaveBeenCalledWith({
+        data: {
+          name: 'Yaw Mensah',
+          email: 'yaw@example.com',
+          phone: null,
+          role: 'SCHOOL_ADMIN',
+          schoolId: 'school-1',
+          mustChangePassword: true,
+          emailVerified: false,
+        },
+      });
+      expect(prisma.account.create).toHaveBeenCalledWith({
+        data: {
+          userId: 'admin-2',
+          providerId: 'credential',
+          accountId: 'admin-2',
+          password: 'precomputed-scrypt-hash',
+        },
+      });
+      expect(auditService.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          actorId: 'owner-1',
+          action: 'school.admin_enrolled',
+          entity: 'User',
+          entityId: 'admin-2',
+          meta: { schoolId: 'school-1', role: 'SCHOOL_ADMIN' },
+          schoolId: 'school-1',
+        }),
+      );
+      expect(result.verificationEmailSent).toBe(true);
+      expect(result.user).toEqual({
+        id: 'admin-2',
+        name: 'Yaw Mensah',
+        email: 'yaw@example.com',
+        role: 'SCHOOL_ADMIN',
+      });
+    });
+
+    it('refuses provisioning until a school default password is set', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        role: 'PLATFORM_ADMIN',
+        schoolId: null,
+      });
+      prisma.school.findUnique.mockResolvedValue({
+        ...school,
+        defaultPasswordHash: null,
+      });
+
+      const rejection = await rejectionOf(
+        service.onboardSchoolAdmin('owner-1', 'school-1', {
+          name: 'Yaw Mensah',
+          email: 'yaw@example.com',
+        }),
+      );
+
+      expect(rejection.getStatus()).toBe(422);
+      expect(rejection.getResponse()).toMatchObject({
+        code: 'SCHOOL_DEFAULT_PASSWORD_REQUIRED',
+      });
+      expect(prisma.user.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('resetUserPassword', () => {
+    function setUpAdminContext() {
+      prisma.user.findUnique.mockResolvedValue({
+        role: 'SCHOOL_ADMIN',
+        schoolId: 'school-1',
+      });
+      prisma.school.findUnique.mockResolvedValue({
+        id: 'school-1',
+        name: 'Achimota School',
+        shortCode: 'AS2345',
+        status: 'ACTIVE',
+        createdAt: new Date('2026-10-01T00:00:00Z'),
+        defaultPasswordHash: 'precomputed-scrypt-hash',
+      });
+      prisma.$transaction.mockResolvedValue([]);
+    }
+
+    it('resets the credential password to the school default, forces change, revokes sessions, audits', async () => {
+      setUpAdminContext();
+      prisma.user.findFirst.mockResolvedValue({
+        id: 'u2',
+        role: 'STUDENT',
+        studentProfile: { id: 's1' },
+        professionalProfile: null,
+      });
+
+      const result = await service.resetUserPassword('admin-1', 'school-1', 'u2');
+
+      expect(result).toEqual({ id: 'u2', passwordReset: true });
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.account.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'u2', providerId: 'credential' },
+        data: { password: 'precomputed-scrypt-hash' },
+      });
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'u2' },
+        data: { mustChangePassword: true },
+      });
+      expect(prisma.session.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'u2' },
+      });
+      expect(auditService.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'school.user_password_reset',
+          entityId: 'u2',
+          meta: { schoolId: 'school-1' },
+        }),
+      );
+    });
+
+    it('refuses the caller’s own account with SELF_TARGET_FORBIDDEN', async () => {
+      setUpAdminContext();
+      prisma.user.findFirst.mockResolvedValue({
+        id: 'admin-1',
+        role: 'SCHOOL_ADMIN',
+        studentProfile: null,
+        professionalProfile: null,
+      });
+
+      const rejection = await rejectionOf(
+        service.resetUserPassword('admin-1', 'school-1', 'admin-1'),
+      );
+
+      expect(rejection.getStatus()).toBe(403);
+      expect(rejection.getResponse()).toMatchObject({
+        code: 'SELF_TARGET_FORBIDDEN',
+      });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('refuses a platform admin target with PLATFORM_ADMIN_TARGET_FORBIDDEN', async () => {
+      setUpAdminContext();
+      prisma.user.findFirst.mockResolvedValue({
+        id: 'owner-1',
+        role: 'PLATFORM_ADMIN',
+        studentProfile: null,
+        professionalProfile: null,
+      });
+
+      const rejection = await rejectionOf(
+        service.resetUserPassword('admin-1', 'school-1', 'owner-1'),
+      );
+
+      expect(rejection.getStatus()).toBe(403);
+      expect(rejection.getResponse()).toMatchObject({
+        code: 'PLATFORM_ADMIN_TARGET_FORBIDDEN',
+      });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('404s a user id that belongs to another school', async () => {
+      setUpAdminContext();
+      prisma.user.findFirst.mockResolvedValue(null);
+
+      const rejection = await rejectionOf(
+        service.resetUserPassword('admin-1', 'school-1', 'foreign-user'),
+      );
+
+      expect(rejection.getStatus()).toBe(404);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('settings', () => {
+    it('returns the identity panel with hasDefaultPassword and no hash', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        role: 'SCHOOL_ADMIN',
+        schoolId: 'school-1',
+      });
+      const createdAt = new Date('2026-10-01T00:00:00Z');
+      prisma.school.findUnique.mockResolvedValue({
+        id: 'school-1',
+        name: 'Achimota School',
+        shortCode: 'AS2345',
+        status: 'ACTIVE',
+        createdAt,
+        defaultPasswordHash: 'precomputed-scrypt-hash',
+      });
+
+      const result = await service.settings('admin-1', 'school-1');
+
+      expect(result).toEqual({
+        id: 'school-1',
+        name: 'Achimota School',
+        shortCode: 'AS2345',
+        status: 'ACTIVE',
+        createdAt,
+        hasDefaultPassword: true,
+      });
+      expect(result).not.toHaveProperty('defaultPasswordHash');
+    });
+  });
+
+  describe('listChatThreads', () => {
+    it('maps the register shape with participants, stamps and last message', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        role: 'SCHOOL_ADMIN',
+        schoolId: 'school-1',
+      });
+      prisma.school.findUnique.mockResolvedValue({ id: 'school-1' });
+      const createdAt = new Date('2026-10-09T08:00:00Z');
+      const claimedAt = new Date('2026-10-09T08:05:00Z');
+      const lastMessageAt = new Date('2026-10-09T08:10:00Z');
+      prisma.chatThread.findMany.mockResolvedValue([
+        {
+          id: 't1',
+          status: 'ACTIVE',
+          createdAt,
+          claimedAt,
+          closedAt: null,
+          student: { user: { id: 'u1', name: 'Ama' } },
+          professional: { user: { id: 'u2', name: 'Ms. Ada' } },
+          _count: { messages: 4 },
+          messages: [{ createdAt: lastMessageAt }],
+        },
+        {
+          id: 't2',
+          status: 'PENDING',
+          createdAt,
+          claimedAt: null,
+          closedAt: null,
+          student: { user: { id: 'u3', name: 'Kofi' } },
+          professional: null,
+          _count: { messages: 1 },
+          messages: [],
+        },
+      ]);
+
+      const result = await service.listChatThreads('admin-1', 'school-1', 'ACTIVE', '500');
+
+      const args = prisma.chatThread.findMany.mock.calls[0][0];
+      expect(args.where).toEqual({ schoolId: 'school-1', status: 'ACTIVE' });
+      expect(args.take).toBe(100);
+      expect(args.orderBy).toEqual({ createdAt: 'desc' });
+      expect(result.items).toEqual([
+        {
+          id: 't1',
+          status: 'ACTIVE',
+          createdAt,
+          claimedAt,
+          closedAt: null,
+          student: { id: 'u1', name: 'Ama' },
+          professional: { id: 'u2', name: 'Ms. Ada' },
+          lastMessageAt,
+          messageCount: 4,
+        },
+        {
+          id: 't2',
+          status: 'PENDING',
+          createdAt,
+          claimedAt: null,
+          closedAt: null,
+          student: { id: 'u3', name: 'Kofi' },
+          professional: null,
+          lastMessageAt: null,
+          messageCount: 1,
+        },
+      ]);
+    });
+
+    it('rejects an unknown status filter', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        role: 'SCHOOL_ADMIN',
+        schoolId: 'school-1',
+      });
+      prisma.school.findUnique.mockResolvedValue({ id: 'school-1' });
+
+      const rejection = await rejectionOf(
+        service.listChatThreads('admin-1', 'school-1', 'ARCHIVED'),
+      );
+
+      expect(rejection.getStatus()).toBe(422);
+      expect(prisma.chatThread.findMany).not.toHaveBeenCalled();
+    });
+  });
+
   describe('deactivateUser', () => {
     it('stamps deactivatedAt and revokes every session in one transaction', async () => {
       prisma.user.findUnique.mockResolvedValue({
@@ -344,6 +653,29 @@ describe('SchoolUsersService', () => {
       );
 
       expect(rejection.getStatus()).toBe(404);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('refuses deactivating your own account', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        role: 'SCHOOL_ADMIN',
+        schoolId: 'school-1',
+      });
+      prisma.user.findFirst.mockResolvedValue({
+        id: 'admin-1',
+        role: 'SCHOOL_ADMIN',
+        studentProfile: null,
+        professionalProfile: null,
+      });
+
+      const rejection = await rejectionOf(
+        service.deactivateUser('admin-1', 'school-1', 'admin-1'),
+      );
+
+      expect(rejection.getStatus()).toBe(403);
+      expect(rejection.getResponse()).toMatchObject({
+        code: 'SELF_TARGET_FORBIDDEN',
+      });
       expect(prisma.$transaction).not.toHaveBeenCalled();
     });
   });

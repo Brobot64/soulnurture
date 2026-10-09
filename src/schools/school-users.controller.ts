@@ -18,6 +18,7 @@ import {
 } from '../docs/openapi.helpers.js';
 import { Roles } from '../common/guards/roles.decorator.js';
 import { OnboardProfessionalDto } from './dto/onboard-professional.dto.js';
+import { OnboardSchoolAdminDto } from './dto/onboard-school-admin.dto.js';
 import { OnboardStudentDto } from './dto/onboard-student.dto.js';
 import { UpdateSchoolSettingsDto } from './dto/update-school-settings.dto.js';
 import { UpdateSchoolUserDto } from './dto/update-school-user.dto.js';
@@ -150,6 +151,85 @@ reactivated.
     @Param('userId') userId: string,
   ) {
     return this.schoolUsers.reactivateUser(session.user.id, id, userId);
+  }
+
+  @Get(':id/settings')
+  @ApiSessionAuth()
+  @ApiStandardErrors()
+  @ApiOperation({
+    summary: 'School identity panel (school admin)',
+    description:
+      'Read-only identity for the settings page: name, code, status, creation date and whether a default password is set.',
+  })
+  @ApiEnvelopeOk(Object)
+  settings(@Session() session: UserSession, @Param('id') id: string) {
+    return this.schoolUsers.settings(session.user.id, id);
+  }
+
+  @Get(':id/chat-threads')
+  @ApiSessionAuth()
+  @ApiStandardErrors()
+  @ApiOperation({
+    summary: 'Chat thread register of a school (school admin)',
+    description:
+      'Every thread with both participants, the lifecycle stamps and a last-message pointer, newest first.',
+  })
+  @ApiQuery({
+    name: 'status',
+    required: false,
+    description: 'Filter: PENDING, ACTIVE, CLOSED',
+  })
+  @ApiQuery({ name: 'limit', required: false, description: 'Default 50, max 100' })
+  @ApiEnvelopeOk(Object)
+  listChatThreads(
+    @Session() session: UserSession,
+    @Param('id') id: string,
+    @Query('status') status?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.schoolUsers.listChatThreads(session.user.id, id, status, limit);
+  }
+
+  @Post(':id/admins')
+  @Roles('PLATFORM_ADMIN')
+  @ApiSessionAuth()
+  @ApiStandardErrors()
+  @ApiOperation({
+    summary: 'Provision a school admin (platform admin only)',
+    description: `
+Grants admin rights for the school to a new SCHOOL_ADMIN account using the
+school default password (forced change at first sign-in) plus the branded
+verification email. Deliberately owner-only: school admins cannot mint peers.
+`,
+  })
+  @ApiBody({ type: OnboardSchoolAdminDto })
+  @ApiEnvelopeOk(Object)
+  onboardSchoolAdmin(
+    @Session() session: UserSession,
+    @Param('id') id: string,
+    @Body() body: OnboardSchoolAdminDto,
+  ) {
+    return this.schoolUsers.onboardSchoolAdmin(session.user.id, id, body);
+  }
+
+  @Post(':id/users/:userId/reset-password')
+  @ApiSessionAuth()
+  @ApiStandardErrors()
+  @ApiOperation({
+    summary: 'Reset a school user to the default password (school admin)',
+    description: `
+Puts the credential password back to the school default, forces the change
+screen again and revokes every session. Refused for the caller's own account
+and for platform admins.
+`,
+  })
+  @ApiEnvelopeOk(Object)
+  resetUserPassword(
+    @Session() session: UserSession,
+    @Param('id') id: string,
+    @Param('userId') userId: string,
+  ) {
+    return this.schoolUsers.resetUserPassword(session.user.id, id, userId);
   }
 
   @Patch(':id/settings')

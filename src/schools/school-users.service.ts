@@ -6,7 +6,7 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { Prisma, type UserRole } from '@prisma/client';
+import { Prisma, type ChatThreadStatus, type UserRole } from '@prisma/client';
 import { hashPassword } from 'better-auth/crypto';
 import { AuthService } from '../auth/auth.service.js';
 import { AuditService } from '../audit/audit.service.js';
@@ -15,6 +15,7 @@ import { STAFF_ROLES } from '../users/dto/staff-bootstrap.dto.js';
 import { generateStudentCode } from './short-code.js';
 
 const CODE_RETRY_ATTEMPTS = 5;
+const CHAT_THREAD_STATUSES = ['PENDING', 'ACTIVE', 'CLOSED'] as const;
 
 function isUniqueViolation(error: unknown): boolean {
   return (
@@ -109,6 +110,61 @@ export class SchoolUsersService {
       },
     });
     return { items };
+  }
+
+  /// The admin chat-thread register: every thread of the school with both
+  /// participants' display identity and a last-message preview pointer.
+  async listChatThreads(
+    actorId: string,
+    schoolId: string,
+    status?: string,
+    limit?: string,
+  ) {
+    await this.requireSchoolAccess(actorId, schoolId);
+    await this.requireSchool(schoolId);
+
+    if (status && !(CHAT_THREAD_STATUSES as readonly string[]).includes(status)) {
+      throw new UnprocessableEntityException('Unknown status filter');
+    }
+    const take = Math.min(Number(limit ?? 50) || 50, 100);
+
+    const threads = await this.prisma.chatThread.findMany({
+      where: {
+        schoolId,
+        ...(status ? { status: status as ChatThreadStatus } : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      take,
+      select: {
+        id: true,
+        status: true,
+        createdAt: true,
+        claimedAt: true,
+        closedAt: true,
+        student: { select: { user: { select: { id: true, name: true } } } },
+        professional: { select: { user: { select: { id: true, name: true } } } },
+        _count: { select: { messages: true } },
+        messages: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: { createdAt: true },
+        },
+      },
+    });
+
+    return {
+      items: threads.map((thread) => ({
+        id: thread.id,
+        status: thread.status,
+        createdAt: thread.createdAt,
+        claimedAt: thread.claimedAt,
+        closedAt: thread.closedAt,
+        student: thread.student.user,
+        professional: thread.professional?.user ?? null,
+        lastMessageAt: thread.messages[0]?.createdAt ?? null,
+        messageCount: thread._count.messages,
+      })),
+    };
   }
 
   async onboardStudent(
@@ -216,6 +272,42 @@ export class SchoolUsersService {
     };
   }
 
+  /// Admin rights are granted by the platform owner, never by peers — the
+  /// controller route carries a method-level PLATFORM_ADMIN @Roles override.
+  async onboardSchoolAdmin(
+    actorId: string,
+    schoolId: string,
+    input: { name: string; email: string },
+  ) {
+    await this.requireSchoolAccess(actorId, schoolId);
+    const school = await this.requireSchoolWithDefaults(schoolId);
+    const defaultPasswordHash = this.requireDefaultPassword(school);
+    const email = input.email.trim();
+    await this.requireEmailAvailable(email);
+
+    const user = await this.createCredentialUser({
+      name: input.name.trim(),
+      email,
+      role: 'SCHOOL_ADMIN',
+      schoolId,
+      defaultPasswordHash,
+    });
+
+    const verificationEmailSent = await this.trySendVerificationEmail(email);
+    await this.auditService.log({
+      actorId,
+      action: 'school.admin_enrolled',
+      entity: 'User',
+      entityId: user.id,
+      meta: { schoolId, role: 'SCHOOL_ADMIN' },
+      schoolId,
+    });
+    return {
+      user: { id: user.id, name: user.name, email: user.email, role: user.role },
+      verificationEmailSent,
+    };
+  }
+
   async updateUser(
     actorId: string,
     schoolId: string,
@@ -288,7 +380,8 @@ export class SchoolUsersService {
   /// TenantGuard) until reactivation.
   async deactivateUser(actorId: string, schoolId: string, userId: string) {
     await this.requireSchoolAccess(actorId, schoolId);
-    await this.requireSchoolMember(schoolId, userId);
+    const target = await this.requireSchoolMember(schoolId, userId);
+    this.assertManageableTarget(actorId, target);
 
     await this.prisma.$transaction([
       this.prisma.user.update({
@@ -327,6 +420,39 @@ export class SchoolUsersService {
     return { id: userId, deactivated: false };
   }
 
+  /// Puts the account back on the school default password (single source of
+  /// truth — no generated secrets to deliver) and forces the change screen
+  /// again. Sessions die with it so the old password is worthless everywhere.
+  async resetUserPassword(actorId: string, schoolId: string, userId: string) {
+    await this.requireSchoolAccess(actorId, schoolId);
+    const target = await this.requireSchoolMember(schoolId, userId);
+    this.assertManageableTarget(actorId, target);
+
+    const school = await this.requireSchoolWithDefaults(schoolId);
+    const defaultPasswordHash = this.requireDefaultPassword(school);
+
+    await this.prisma.$transaction([
+      this.prisma.account.updateMany({
+        where: { userId, providerId: 'credential' },
+        data: { password: defaultPasswordHash },
+      }),
+      this.prisma.user.update({
+        where: { id: userId },
+        data: { mustChangePassword: true },
+      }),
+      this.prisma.session.deleteMany({ where: { userId } }),
+    ]);
+    await this.auditService.log({
+      actorId,
+      action: 'school.user_password_reset',
+      entity: 'User',
+      entityId: userId,
+      meta: { schoolId },
+      schoolId,
+    });
+    return { id: userId, passwordReset: true };
+  }
+
   async updateSettings(
     actorId: string,
     schoolId: string,
@@ -350,6 +476,20 @@ export class SchoolUsersService {
     return { defaultPasswordUpdated: true };
   }
 
+  /// Read-only identity panel for the school settings page.
+  async settings(actorId: string, schoolId: string) {
+    await this.requireSchoolAccess(actorId, schoolId);
+    const school = await this.requireSchoolWithDefaults(schoolId);
+    return {
+      id: school.id,
+      name: school.name,
+      shortCode: school.shortCode,
+      status: school.status,
+      createdAt: school.createdAt,
+      hasDefaultPassword: school.defaultPasswordHash !== null,
+    };
+  }
+
   private async requireSchool(schoolId: string) {
     const school = await this.prisma.school.findUnique({
       where: { id: schoolId },
@@ -362,7 +502,14 @@ export class SchoolUsersService {
   private async requireSchoolWithDefaults(schoolId: string) {
     const school = await this.prisma.school.findUnique({
       where: { id: schoolId },
-      select: { id: true, name: true, shortCode: true, defaultPasswordHash: true },
+      select: {
+        id: true,
+        name: true,
+        shortCode: true,
+        status: true,
+        createdAt: true,
+        defaultPasswordHash: true,
+      },
     });
     if (!school) throw new NotFoundException('School not found');
     return school;
@@ -397,12 +544,35 @@ export class SchoolUsersService {
       where: { id: userId, schoolId },
       select: {
         id: true,
+        role: true,
         studentProfile: { select: { id: true } },
         professionalProfile: { select: { id: true } },
       },
     });
     if (!target) throw new NotFoundException('User not found in this school');
     return target;
+  }
+
+  /// Destructive school-scoped actions must never hit the actor's own
+  /// account (self-lockout) or a platform admin (outside a school's remit).
+  private assertManageableTarget(
+    actorId: string,
+    target: { id: string; role: UserRole },
+  ) {
+    if (target.id === actorId) {
+      throw new ForbiddenException({
+        message: 'You cannot perform this action on your own account.',
+        error: 'Forbidden',
+        code: 'SELF_TARGET_FORBIDDEN',
+      });
+    }
+    if (target.role === 'PLATFORM_ADMIN') {
+      throw new ForbiddenException({
+        message: 'Platform admin accounts cannot be managed from a school.',
+        error: 'Forbidden',
+        code: 'PLATFORM_ADMIN_TARGET_FORBIDDEN',
+      });
+    }
   }
 
   /// School accounts are created with the school's precomputed scrypt hash —

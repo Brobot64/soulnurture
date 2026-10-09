@@ -2,14 +2,16 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, UserRole } from '@prisma/client';
 import { hashPassword } from 'better-auth/crypto';
 import { AuditService } from '../audit/audit.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { RealtimeService } from '../realtime/realtime.service.js';
 import { generateShortCode } from '../schools/short-code.js';
+import { STAFF_ROLES } from '../users/dto/staff-bootstrap.dto.js';
 
 const CODE_RETRY_ATTEMPTS = 5;
 
@@ -65,19 +67,63 @@ export class AdminService {
     return school;
   }
 
+  /// Dashboard register: identity + live gauges. `lastActivityAt` rides the
+  /// session table — the newest `updatedAt` across a school's sessions — so
+  /// "activity" means genuine recent sign-ins, not data mutations.
   async listSchools() {
-    const schools = await this.prisma.school.findMany({
-      orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        name: true,
-        shortCode: true,
-        status: true,
-        createdAt: true,
-        _count: { select: { users: true } },
-      },
-    });
-    return { items: schools };
+    const [schools, studentCounts, professionalCounts, pendingCounts, lastActivity] =
+      await Promise.all([
+        this.prisma.school.findMany({
+          orderBy: { createdAt: 'desc' },
+          select: {
+            id: true,
+            name: true,
+            shortCode: true,
+            status: true,
+            createdAt: true,
+            _count: { select: { users: true } },
+          },
+        }),
+        this.prisma.user.groupBy({
+          by: ['schoolId'],
+          where: { schoolId: { not: null }, role: 'STUDENT' },
+          _count: { _all: true },
+        }),
+        this.prisma.user.groupBy({
+          by: ['schoolId'],
+          where: { schoolId: { not: null }, role: { in: [...STAFF_ROLES] } },
+          _count: { _all: true },
+        }),
+        this.prisma.chatThread.groupBy({
+          by: ['schoolId'],
+          where: { status: 'PENDING' },
+          _count: { _all: true },
+        }),
+        this.prisma.$queryRaw<{ schoolId: string; lastActivityAt: Date | null }[]>`
+          SELECT u."schoolId" AS "schoolId", MAX(s."updatedAt") AS "lastActivityAt"
+          FROM "session" s
+          JOIN "user" u ON u.id = s."userId"
+          WHERE u."schoolId" IS NOT NULL
+          GROUP BY 1
+        `,
+      ]);
+
+    const students = new Map(studentCounts.map((row) => [row.schoolId, row._count._all]));
+    const professionals = new Map(
+      professionalCounts.map((row) => [row.schoolId, row._count._all]),
+    );
+    const pending = new Map(pendingCounts.map((row) => [row.schoolId, row._count._all]));
+    const activity = new Map(lastActivity.map((row) => [row.schoolId, row.lastActivityAt]));
+
+    return {
+      items: schools.map((school) => ({
+        ...school,
+        students: students.get(school.id) ?? 0,
+        professionals: professionals.get(school.id) ?? 0,
+        pendingChats: pending.get(school.id) ?? 0,
+        lastActivityAt: activity.get(school.id) ?? null,
+      })),
+    };
   }
 
   async renameSchool(actorId: string, schoolId: string, name: string) {
@@ -183,7 +229,7 @@ export class AdminService {
       this.prisma.user.count(),
       this.prisma.user.count({ where: { role: 'STUDENT' } }),
       this.prisma.user.count({
-        where: { role: { in: ['COUNSELLOR', 'PSYCHOLOGIST', 'SUPPORT_STAFF'] } },
+        where: { role: { in: [...STAFF_ROLES] } },
       }),
       this.prisma.user.count({
         where: { role: { in: ['SCHOOL_ADMIN', 'PLATFORM_ADMIN'] } },
@@ -211,22 +257,52 @@ export class AdminService {
     };
   }
 
-  async listUsers(limit?: string) {
-    const take = Math.min(Number(limit ?? 50) || 50, 100);
-    const users = await this.prisma.user.findMany({
-      orderBy: { createdAt: 'desc' },
-      take,
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        emailVerified: true,
-        createdAt: true,
-        school: { select: { id: true, name: true, shortCode: true } },
-      },
-    });
-    return { items: users };
+  async listUsers(query: {
+    limit?: string;
+    role?: string;
+    schoolId?: string;
+    q?: string;
+    offset?: string;
+  }) {
+    const take = Math.min(Number(query.limit ?? 50) || 50, 100);
+    const offset = Math.max(Number(query.offset ?? 0) || 0, 0);
+
+    const where: Prisma.UserWhereInput = {};
+    if (query.role) {
+      if (!Object.values(UserRole).includes(query.role as UserRole)) {
+        throw new UnprocessableEntityException('Unknown role filter');
+      }
+      where.role = query.role as UserRole;
+    }
+    if (query.schoolId) where.schoolId = query.schoolId;
+    const term = query.q?.trim();
+    if (term) {
+      where.OR = [
+        { name: { contains: term, mode: 'insensitive' } },
+        { email: { contains: term, mode: 'insensitive' } },
+      ];
+    }
+
+    const [users, total] = await Promise.all([
+      this.prisma.user.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: offset,
+        take,
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          schoolId: true,
+          emailVerified: true,
+          createdAt: true,
+          school: { select: { id: true, name: true, shortCode: true } },
+        },
+      }),
+      this.prisma.user.count({ where }),
+    ]);
+    return { items: users, total };
   }
 
   private async requireSchool(schoolId: string) {

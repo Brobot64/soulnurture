@@ -671,6 +671,9 @@ model ChatThread {
   /// Per-participant read markers backing the unread badge.
   studentReadAt       DateTime?
   professionalReadAt  DateTime?
+  /// Lifecycle stamps for the admin chat-thread register.
+  claimedAt      DateTime?
+  closedAt       DateTime?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 

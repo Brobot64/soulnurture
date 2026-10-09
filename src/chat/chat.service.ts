@@ -310,12 +310,14 @@ export class ChatService {
     if (!professional) throw new NotFoundException('Professional profile not found');
 
     // Race-safe claim: only the first PENDING→ACTIVE update wins.
+    const now = new Date();
     const claimed = await this.prisma.chatThread.updateMany({
       where: { id: threadId, status: 'PENDING' },
       data: {
         professionalId: professional.id,
         status: 'ACTIVE',
-        professionalReadAt: new Date(),
+        professionalReadAt: now,
+        claimedAt: now,
       },
     });
     if (claimed.count === 0) {
@@ -534,7 +536,7 @@ export class ChatService {
 
     await this.prisma.chatThread.update({
       where: { id: threadId },
-      data: { status: 'CLOSED' },
+      data: { status: 'CLOSED', closedAt: new Date() },
     });
     await this.auditService.log({
       actorId: userId,

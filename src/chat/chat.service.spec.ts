@@ -332,6 +332,7 @@ describe('ChatService', () => {
           professionalId: 'p1',
           status: 'ACTIVE',
           professionalReadAt: expect.any(Date),
+          claimedAt: expect.any(Date),
         },
       });
       expect(auditService.log).toHaveBeenCalledWith(
@@ -630,7 +631,7 @@ describe('ChatService', () => {
 
       expect(prisma.chatThread.update).toHaveBeenCalledWith({
         where: { id: 't1' },
-        data: { status: 'CLOSED' },
+        data: { status: 'CLOSED', closedAt: expect.any(Date) },
       });
       expect(auditService.log).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'chat.thread_closed' }),
