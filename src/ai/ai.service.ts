@@ -74,11 +74,12 @@ export interface AiOrchestrationInput {
   conversationId: string;
   checkInId?: string | null;
   userContent: string;
-  language?: string;
   /** Language detected in THIS message's text (synchronous detector in the
-   * conversations lane; N-ATLaS classifies when heuristics are silent). Beats
-   * `language`/preference for the reply language — 'en' included, so each
-   * turn follows the input, no manual switching. */
+   * conversations lane; N-ATLaS classifies when heuristics are silent). The
+   * reply follows the message — 'en' included — so whoever types English
+   * gets English and whoever types Yoruba/Hausa/Igbo gets theirs, turn by
+   * turn; the client never passes a language. Null falls back to the
+   * student's standing preference, then English. */
   messageLanguage?: SupportedLanguage | null;
   studentRef: string;
   classLabel: string | null;
@@ -248,12 +249,11 @@ export class AiService {
       }
     }
 
-    // Reply language for this turn: a language detected in THIS message's
-    // text beats the standing preference (per-message following) — 'en'
-    // included, so an English turn is answered in English whatever the
-    // preference. With the n-atlas-translate mode a non-English turn also
-    // flips the generation directive to interim English — the finished reply
-    // is rendered afterwards by the local model.
+    // Reply language for this turn: the language detected in THIS message's
+    // text (per-message following — 'en' included; the preference only fills
+    // in when detection found nothing). With the n-atlas-translate mode a
+    // non-English turn also flips the generation directive to interim English
+    // — the finished reply is rendered afterwards by the local model.
     const replyLanguage = this.resolveReplyLanguage(
       input,
       ctx.student.preferredLanguage,
@@ -296,7 +296,6 @@ export class AiService {
       raw = await this.provider.generateResponse({
         systemPrompt,
         messages,
-        language: input.language,
       });
     } catch (error) {
       throw new AiGenerationError('AI generation unavailable', {
@@ -389,14 +388,15 @@ export class AiService {
 
   /** Per-turn reply language, strict priority: the language detected in
    * THIS message's text (any supported code — 'en' included, whoever types
-   * English can read it), then the explicit language, then the preference,
-   * then English. Detection is authoritative because it follows the input;
-   * the preference only fills in when detection found nothing. */
+   * English can read it), then the student's standing preference, then
+   * English. Detection is authoritative because it follows the input; the
+   * client passes no language, so the preference only ever fills in when
+   * detection found nothing. */
   private resolveReplyLanguage(
     input: AiOrchestrationInput,
     preferredLanguage: string | null | undefined,
   ): SupportedLanguage {
-    const candidates = [input.messageLanguage, input.language, preferredLanguage];
+    const candidates = [input.messageLanguage, preferredLanguage];
     for (const code of candidates) {
       if (code && SUPPORTED_LANGUAGES.includes(code as SupportedLanguage)) {
         return code as SupportedLanguage;

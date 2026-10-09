@@ -21,7 +21,10 @@ export class SendMessageDto {
   @MaxLength(4000)
   content!: string;
 
-  @ApiPropertyOptional({ example: 'en' })
+  /** Deprecated and ignored: the reply language is detected from `content`
+   * itself, per turn. Accepted — not rejected — only so clients built
+   * against the old contract keep working under `forbidNonWhitelisted`. */
+  @ApiPropertyOptional({ example: 'en', deprecated: true })
   @IsOptional()
   @IsString()
   language?: string;
