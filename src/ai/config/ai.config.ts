@@ -207,9 +207,9 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 1000;
 const DEFAULT_CHAIN = ['openai', 'groq'];
 
 function parseVernacularReplyMode(raw: string | undefined): VernacularReplyMode {
-  return raw?.trim().toLowerCase() === 'n-atlas-translate'
-    ? 'n-atlas-translate'
-    : DEFAULT_VERNACULAR_REPLY_MODE;
+  const value = raw?.trim().toLowerCase();
+  if (value === 'n-atlas-translate' || value === 'openai-native') return value;
+  return DEFAULT_VERNACULAR_REPLY_MODE;
 }
 
 export function buildAiConfig(config: ConfigService): AiConfig {

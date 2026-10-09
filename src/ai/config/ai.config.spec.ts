@@ -29,3 +29,37 @@ describe('buildAiConfig guided block', () => {
     expect(config.guided.maxExtendedTurns).toBe(7);
   });
 });
+
+describe('buildAiConfig language block', () => {
+  it('defaults the reply lane to n-atlas-translate', () => {
+    const config = buildAiConfig(new ConfigService({}));
+
+    expect(config.language.vernacularReplyMode).toBe('n-atlas-translate');
+    expect(config.language.natlasRenderTimeoutMs).toBe(12_000);
+    expect(config.language.renderMaxOutputTokens).toBe(400);
+  });
+
+  it('keeps openai-native as an explicit rollback', () => {
+    const config = buildAiConfig(
+      new ConfigService({ AI_VERNACULAR_REPLY_MODE: 'openai-native' }),
+    );
+
+    expect(config.language.vernacularReplyMode).toBe('openai-native');
+  });
+
+  it('falls back to the default on an unrecognised mode', () => {
+    const config = buildAiConfig(
+      new ConfigService({ AI_VERNACULAR_REPLY_MODE: 'bogus' }),
+    );
+
+    expect(config.language.vernacularReplyMode).toBe('n-atlas-translate');
+  });
+
+  it('honours NATLAS_RENDER_TIMEOUT_MS', () => {
+    const config = buildAiConfig(
+      new ConfigService({ NATLAS_RENDER_TIMEOUT_MS: '8000' }),
+    );
+
+    expect(config.language.natlasRenderTimeoutMs).toBe(8_000);
+  });
+});
