@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  IsBoolean,
   IsIn,
   IsOptional,
   IsString,
@@ -37,4 +38,12 @@ export class SendMessageDto {
   @IsOptional()
   @IsIn(QUICK_REPLY_VALUES)
   quickReply?: QuickReplyValue;
+
+  /** Set when the student spoke this turn and the client posts the
+   * transcription (the transcript itself rides `content`). Feeds the pilot
+   * voice-interaction analytics; reply behaviour is unaffected. */
+  @ApiPropertyOptional({ example: false })
+  @IsOptional()
+  @IsBoolean()
+  viaVoice?: boolean;
 }

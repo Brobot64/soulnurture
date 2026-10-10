@@ -208,6 +208,7 @@ export class ConversationsService {
         role: MessageRole.USER,
         content: dto.content,
         quickReply: dto.quickReply ?? null,
+        viaVoice: dto.viaVoice ?? false,
       },
     });
 

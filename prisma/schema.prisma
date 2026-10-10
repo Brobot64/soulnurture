@@ -377,6 +377,10 @@ model ConversationMessage {
   /// typing free text (TELL_MORE | SHOW_IDEA | TALK_TO_SOMEONE). null = the
   /// student typed; the turn budget counts only these free-text messages.
   quickReply          String?
+  /// True when the student sent this turn from a voice transcription (the
+  /// transcript is posted as plain content; this flag keeps the two lanes
+  /// distinguishable server-side). Pilot-analytics signal only.
+  viaVoice            Boolean     @default(false)
   aiPayload           Json?
   activeExerciseLabel String?
   createdAt           DateTime @default(now())
