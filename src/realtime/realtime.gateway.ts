@@ -33,6 +33,10 @@ function headersFromHandshake(raw: IncomingHttpHeaders): Headers {
 
 @WebSocketGateway({
   path: SOCKET_PATH,
+  // WebSocket-only: engine.io's request interception does not survive
+  // Fastify's request handling (polling handshakes 404 through to the
+  // Nest 404 envelope), while the upgrade path works everywhere we ship.
+  transports: ['websocket'],
   cors: {
     origin: (origin, callback) => {
       const origins = allowedOrigins();

@@ -117,6 +117,28 @@ export class ConversationsService {
   }
 
   async getOne(userId: string, id: string) {
+    // The review queue deep-links staff into the request's conversation, so
+    // school professionals read conversations of their own school's students.
+    // Write paths still go through owned() — this is a read-only widening.
+    const staffRoles = ['COUNSELLOR', 'PSYCHOLOGIST', 'SUPPORT_STAFF'];
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true, schoolId: true },
+    });
+    if (user && staffRoles.includes(user.role)) {
+      const conversation = await this.prisma.conversation.findUnique({
+        where: { id },
+        include: {
+          messages: { orderBy: { createdAt: 'asc' } },
+          student: { select: { user: { select: { schoolId: true } } } },
+        },
+      });
+      if (!conversation) throw new NotFoundException('Conversation not found');
+      if (conversation.student.user.schoolId !== user.schoolId) {
+        throw new ForbiddenException();
+      }
+      return conversation;
+    }
     const { conversation } = await this.owned(userId, id);
     return conversation;
   }

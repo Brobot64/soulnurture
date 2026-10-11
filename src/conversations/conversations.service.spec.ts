@@ -62,6 +62,7 @@ const aiConfigStub = {
 describe('ConversationsService', () => {
   let service: ConversationsService;
   let prisma: {
+    user: Record<string, ReturnType<typeof vi.fn>>;
     conversation: Record<string, ReturnType<typeof vi.fn>>;
     conversationMessage: Record<string, ReturnType<typeof vi.fn>>;
     aiGenerationJob: Record<string, ReturnType<typeof vi.fn>>;
@@ -117,6 +118,7 @@ describe('ConversationsService', () => {
 
   beforeEach(async () => {
     prisma = {
+      user: { findUnique: vi.fn().mockResolvedValue({ role: 'STUDENT', schoolId: null }) },
       conversation: {
         findUnique: vi.fn(),
         findMany: vi.fn(),
@@ -206,6 +208,59 @@ describe('ConversationsService', () => {
     await expect(
       service.sendMessage('user-1', 'missing', { content: 'hi' }),
     ).rejects.toThrow(NotFoundException);
+  });
+
+  describe('getOne staff read (review-queue deep link)', () => {
+    const staffConversation = {
+      id: 'conv-1',
+      studentId: 'student-1',
+      status: 'CLOSED',
+      messages: [
+        { id: 'm1', role: 'USER', content: 'exam fear', createdAt: new Date() },
+        { id: 'm2', role: 'ASSISTANT', content: 'let us breathe', createdAt: new Date() },
+      ],
+      student: { user: { schoolId: 'school-1' } },
+    };
+
+    it('lets same-school staff read the conversation without touching the student profile', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        role: 'COUNSELLOR',
+        schoolId: 'school-1',
+      });
+      prisma.conversation.findUnique.mockResolvedValue(staffConversation);
+
+      const result = await service.getOne('staff-1', 'conv-1');
+
+      expect(result.messages).toHaveLength(2);
+      expect(studentsService.ensureProfile).not.toHaveBeenCalled();
+    });
+
+    it('forbids staff from another school', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        role: 'PSYCHOLOGIST',
+        schoolId: 'school-2',
+      });
+      prisma.conversation.findUnique.mockResolvedValue(staffConversation);
+
+      await expect(service.getOne('staff-1', 'conv-1')).rejects.toThrow(
+        ForbiddenException,
+      );
+    });
+
+    it('still serves the owning student through the owned() path', async () => {
+      prisma.user.findUnique.mockResolvedValue({ role: 'STUDENT', schoolId: 'school-1' });
+      prisma.conversation.findUnique.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        status: 'ACTIVE',
+        messages: [],
+      });
+
+      const result = await service.getOne('user-1', 'conv-1');
+
+      expect(result.id).toBe('conv-1');
+      expect(studentsService.ensureProfile).toHaveBeenCalledWith('user-1');
+    });
   });
 
   it('creates user + assistant messages and returns the orchestrated AI result', async () => {
