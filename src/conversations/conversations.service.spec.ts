@@ -18,6 +18,7 @@ import { ConsentService } from '../consent/consent.service.js';
 import { NatlasLlmProvider } from '../ai/providers/natlas/natlas-llm.provider.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
+import { SupportFlagAlertsService } from '../support-flags/support-flag-alerts.service.js';
 import { ConversationsService } from './conversations.service.js';
 
 const HOLDING_MESSAGE =
@@ -152,6 +153,10 @@ describe('ConversationsService', () => {
           useValue: { configured: false, completeLabel: vi.fn() },
         },
         LanguageDetectorService,
+        {
+          provide: SupportFlagAlertsService,
+          useValue: { recommendImmediateFollowUp: vi.fn().mockResolvedValue('alerted') },
+        },
         { provide: GuardrailService, useValue: guardrail },
         { provide: AuditService, useValue: auditService },
         { provide: ConsentService, useValue: consentService },

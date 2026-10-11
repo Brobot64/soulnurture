@@ -14,6 +14,7 @@ import { AI_PROVIDER } from './providers/ai-provider.interface.js';
 import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js';
 import { NAtlasAsrProvider } from './providers/natlas/natlas-asr.provider.js';
 import { ReplyRendererService } from './language/reply-renderer.service.js';
+import { SupportFlagAlertsService } from '../support-flags/support-flag-alerts.service.js';
 
 const aiConfigStub = {
   context: { messageLimit: 12, characterLimit: 12_000 },
@@ -85,6 +86,10 @@ describe('AiService.summarizeConversation', () => {
         {
           provide: ReplyRendererService,
           useValue: { render: vi.fn().mockResolvedValue(null) },
+        },
+        {
+          provide: SupportFlagAlertsService,
+          useValue: { recommendImmediateFollowUp: vi.fn().mockResolvedValue('alerted') },
         },
       ],
     }).compile();

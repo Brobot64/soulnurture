@@ -14,6 +14,7 @@ import { MemoryRepository } from './memory/memory.repository.js';
 import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js';
 import { NAtlasAsrProvider } from './providers/natlas/natlas-asr.provider.js';
 import { ReplyRendererService } from './language/reply-renderer.service.js';
+import { SupportFlagAlertsService } from '../support-flags/support-flag-alerts.service.js';
 import type { MessageUnderstanding } from './language/understanding.schema.js';
 import type { AiGenerationResult } from './providers/ai-provider.interface.js';
 
@@ -144,6 +145,10 @@ describe('AiService.generateAndApply', () => {
         { provide: NatlasTranslationProvider, useValue: understandingProvider },
         { provide: NAtlasAsrProvider, useValue: asrProvider },
         { provide: ReplyRendererService, useValue: replyRenderer },
+        {
+          provide: SupportFlagAlertsService,
+          useValue: { recommendImmediateFollowUp: vi.fn().mockResolvedValue('alerted') },
+        },
       ],
     }).compile();
   }

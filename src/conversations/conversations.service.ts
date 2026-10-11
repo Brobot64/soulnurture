@@ -13,6 +13,7 @@ import { IntentEngineService } from '../ai/intents/intent-engine.service.js';
 import { GuardrailService } from '../ai/guardrails/guardrail.service.js';
 import { applyIntentVerdict } from '../ai/intents/intent-executors.js';
 import { LanguageDetectorService } from '../ai/language/language-detector.service.js';
+import type { SupportedLanguage } from '../ai/language/language.config.js';
 import { AI_CONFIG } from '../ai/config/ai.config.js';
 import type { AiConfig } from '../ai/config/ai.config.js';
 import type { AiGenerationResult } from '../ai/providers/ai-provider.interface.js';
@@ -24,6 +25,7 @@ import { ConsentRequiredException } from '../consent/consent.errors.js';
 import { ConsentService } from '../consent/consent.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
+import { SupportFlagAlertsService } from '../support-flags/support-flag-alerts.service.js';
 import type { CreateConversationDto } from './dto/create-conversation.dto.js';
 import type { SendMessageDto } from './dto/send-message.dto.js';
 
@@ -62,6 +64,7 @@ export class ConversationsService {
     private readonly intentEngine: IntentEngineService,
     private readonly guardrail: GuardrailService,
     private readonly languageDetector: LanguageDetectorService,
+    private readonly flagAlerts: SupportFlagAlertsService,
     private readonly auditService: AuditService,
     private readonly consentService: ConsentService,
     @Inject(AI_CONFIG) private readonly aiConfig: AiConfig,
@@ -398,6 +401,18 @@ export class ConversationsService {
 
     let notes: string[] = [];
     if (verdict) {
+      // Acute flags only: resolve the alert language from the message itself
+      // (dominant rule). Detection must never break this degraded lane.
+      let alertLanguage: SupportedLanguage | undefined;
+      if (verdict.severity === 'TIER_3_ACUTE') {
+        try {
+          alertLanguage =
+            (await this.languageDetector.detect(input.userContent)).lang ??
+            undefined;
+        } catch {
+          alertLanguage = undefined;
+        }
+      }
       notes = await applyIntentVerdict(verdict, {
         prisma: this.prisma,
         auditService: this.auditService,
@@ -408,6 +423,8 @@ export class ConversationsService {
         conversationId: input.conversationId,
         userContent: input.userContent,
         relevantResources: emptyContext().relevantResources,
+        flagAlerts: this.flagAlerts,
+        alertLanguage,
       });
     }
 
