@@ -1,5 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import type { SupportFlag } from '@prisma/client';
+import {
+  SupportRequestStatus,
+  SupportTiming,
+} from '@prisma/client';
 import { AuditService } from '../audit/audit.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -22,11 +26,11 @@ interface AlertMessages {
   quoteLabel: string;
 }
 
-/// Framing copy per message language — the dominant rule (reply in the
-/// language of the message) applies to staff-facing recommendations too, so a
-/// Yoruba crisis message yields a Yoruba alert around the verbatim quote.
-/// AI-drafted 2026-10-11 and pending the same native-speaker review pass as
-/// the safety corpus translations; the student quote itself stays verbatim.
+/// Framing copy — ALWAYS English. Professionals receive the escalation in
+/// English regardless of the student's message language; the dominant-rule
+/// (reply in the language of the message) governs the STUDENT-facing reply,
+/// never the staff alert. The student quote itself stays verbatim, with the
+/// detected language named beside it.
 const MESSAGES: Record<SupportedLanguage, AlertMessages> = {
   en: {
     title: 'Immediate follow-up recommended — {ref}',
@@ -74,8 +78,10 @@ export interface AcuteFlagAlertInput {
 /**
  * Delivers an acute (TIER_3) safeguarding flag to the school's professionals
  * as an AI recommendation for immediate human follow-up: one notification row
- * per professional (realtime push rides NotificationsService) plus an audit
- * record. Alerting never blocks flag creation — callers treat this as a note.
+ * per professional (realtime push rides NotificationsService), one support
+ * request in the staff review tray, plus an audit record. Staff-facing copy
+ * is always English; the student quote stays verbatim. Alerting never blocks
+ * flag creation — callers treat this as a note.
  */
 @Injectable()
 export class SupportFlagAlertsService {
@@ -113,13 +119,13 @@ export class SupportFlagAlertsService {
       input.language,
       student?.preferredLanguage ?? null,
     );
-    const copy = MESSAGES[language];
+    const copy = MESSAGES.en;
     const excerpt = input.studentMessage
       .slice(0, 180)
       .replace(/\s+/g, ' ')
       .trim();
     const title = copy.title.replace('{ref}', flag.studentRef);
-    const body = `${copy.reason}\n\n${copy.quoteLabel}: “${excerpt}”`;
+    const body = `${copy.reason}\n\n${copy.quoteLabel} (${language}): “${excerpt}”`;
 
     if (recipients.length > 0) {
       await this.notifications.pushMany({
@@ -141,6 +147,36 @@ export class SupportFlagAlertsService {
       });
     }
 
+    // The recommendation must also land in the staff review TRAY as a
+    // support request — a notification alone is not pick-up-able. URGENT_UNSAFE
+    // maps to ESCALATED, which the queue derives as NEW, and the request is
+    // attached to the first active support person so any professional can
+    // pick it up from their school's queue.
+    const person = await this.prisma.supportPerson.findFirst({
+      where: { active: true },
+      orderBy: { name: 'asc' },
+      select: { id: true, type: true },
+    });
+    if (person) {
+      const note =
+        `AI safeguarding escalation — ${flag.triggerLabel}` +
+        ` (${flag.severity}). Student ${flag.studentRef}` +
+        `${flag.classLabel ? ` (${flag.classLabel})` : ''}. ` +
+        `Flagged message (${language}): "${excerpt}". ` +
+        `Please review the conversation and follow up with the student today.`;
+      await this.prisma.supportRequest.create({
+        data: {
+          studentId: flag.studentId,
+          supportPersonId: person.id,
+          personType: person.type,
+          timing: SupportTiming.URGENT_UNSAFE,
+          status: SupportRequestStatus.ESCALATED,
+          note,
+          conversationId: flag.conversationId,
+        },
+      });
+    }
+
     await this.auditService.log({
       action: 'support_flag.school_alerted',
       entity: 'SupportFlag',
@@ -156,7 +192,7 @@ export class SupportFlagAlertsService {
     });
 
     return recipients.length > 0
-      ? `School professionals alerted (${recipients.length}) in ${language}.`
+      ? `School professionals alerted (${recipients.length}); escalation queued in English.`
       : 'Acute flag recorded; no school professionals to alert.';
   }
 

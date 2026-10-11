@@ -350,40 +350,32 @@ export class AiService {
     result.asyncState = 'COMPLETE';
 
     // Render lane (n-atlas-translate): the finished English reply is rendered
-    // into the turn's language within this same request, so the student's
-    // next reply already comes back in their language. Scripted safety copy
-    // is never rendered — that wording is approved verbatim. Total render
-    // failure keeps the English reply (enhancement, never a blocker).
+    // into the turn's language within this same request — the dominant rule
+    // (reply in the language of the message) applies to scripted safety copy
+    // too, so a student writing Hausa gets the safety line in Hausa, not
+    // generic English. Total render failure keeps the English reply
+    // (enhancement, never a blocker).
     if (renderActive) {
-      const scriptedSafety = verdict?.actions.some(
-        (action) => action.type === 'SAFETY_MESSAGE',
-      );
-      if (scriptedSafety) {
+      const rendered = await this.replyRenderer.render({
+        englishReply: result.message,
+        language: replyLanguage,
+        contextLines: [
+          `Student: ${input.studentRef}${input.classLabel ? ` (${input.classLabel})` : ''}`,
+          `The student just wrote: ${input.userContent}`,
+        ],
+      });
+      if (rendered) {
+        result.render = {
+          language: replyLanguage,
+          via: rendered.via,
+          englishSource: result.message,
+        };
+        result.message = rendered.rendered;
         notes.push(
-          'Reply render skipped: scripted safety message stays in its approved English wording.',
+          `Reply rendered in ${LANGUAGE_DISPLAY_NAMES[replyLanguage]} via ${rendered.via}.`,
         );
       } else {
-        const rendered = await this.replyRenderer.render({
-          englishReply: result.message,
-          language: replyLanguage,
-          contextLines: [
-            `Student: ${input.studentRef}${input.classLabel ? ` (${input.classLabel})` : ''}`,
-            `The student just wrote: ${input.userContent}`,
-          ],
-        });
-        if (rendered) {
-          result.render = {
-            language: replyLanguage,
-            via: rendered.via,
-            englishSource: result.message,
-          };
-          result.message = rendered.rendered;
-          notes.push(
-            `Reply rendered in ${LANGUAGE_DISPLAY_NAMES[replyLanguage]} via ${rendered.via}.`,
-          );
-        } else {
-          notes.push('Reply render unavailable; kept the English reply.');
-        }
+        notes.push('Reply render unavailable; kept the English reply.');
       }
     }
 
