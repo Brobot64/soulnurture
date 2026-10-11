@@ -18,11 +18,22 @@ export const DevVerificationLinks = new Map<string, string>();
  * better-auth builds the verify link as `{baseURL}/verify-email?token=…&callbackURL=…`
  * and, after consuming the token, redirects to that callbackURL (default "/" —
  * the API root). Point it at the web app so clicking the emailed link lands the
- * freshly signed-in user in the app instead of on the API.
+ * freshly signed-in user in the app instead of on the API. School-provisioned
+ * accounts still carry the temporary password at this point — they go straight
+ * to choosing their own; everyone else continues to onboarding. The
+ * /first-password screen bounces verified users without the flag to their home,
+ * so the routing stays safe when the flag was already cleared.
  */
-function withWebAppCallback(url: string, webAppUrl: string): string {
+function withWebAppCallback(
+    url: string,
+    webAppUrl: string,
+    mustChangePassword?: boolean | null,
+): string {
     const target = new URL(url);
-    target.searchParams.set('callbackURL', `${webAppUrl}/welcome`);
+    target.searchParams.set(
+        'callbackURL',
+        `${webAppUrl}${mustChangePassword ? '/first-password' : '/welcome'}`,
+    );
     return target.toString();
 }
 
@@ -163,18 +174,24 @@ export function createAuth(
             autoSignInAfterVerification: true,
 
             sendVerificationEmail: async ({ user, url }) => {
-                const verificationUrl = webAppUrl ? withWebAppCallback(url, webAppUrl) : url;
+                // School onboarding carries the school's name into the email —
+                // "added to Soul Nurture AI from <School>" — and decides where
+                // the link drops the user afterwards.
+                const dbUser = await prisma.user.findUnique({
+                    where: { email: user.email },
+                    select: {
+                        mustChangePassword: true,
+                        school: { select: { name: true } },
+                    },
+                });
+                const verificationUrl = webAppUrl
+                    ? withWebAppCallback(url, webAppUrl, dbUser?.mustChangePassword)
+                    : url;
                 if (process.env.NODE_ENV !== 'production') {
                     // Dev/test aid: the journey reads links via the dev-links
                     // endpoint; production never records them.
                     DevVerificationLinks.set(user.email, verificationUrl);
                 }
-                // School onboarding carries the school's name into the email —
-                // "added to Soul Nurture AI from <School>".
-                const dbUser = await prisma.user.findUnique({
-                    where: { email: user.email },
-                    select: { school: { select: { name: true } } },
-                });
                 const schoolName = dbUser?.school?.name ?? null;
                 await mailer.sendMail({
                     to: user.email,

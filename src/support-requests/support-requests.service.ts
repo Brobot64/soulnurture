@@ -275,6 +275,7 @@ export interface SupportQueueItem {
   followUpId: string | null;
   followUpDueAt: Date | null;
   followUpCompletedAt: Date | null;
+  conversationId: string | null;
   student: SupportQueueStudent;
   supportPerson: { id: string; name: string; type: SupportPersonType } | null;
 }
@@ -371,6 +372,7 @@ function toQueueItem(
     followUpId: openFollowUps[0]?.id ?? null,
     followUpDueAt: openFollowUps[0]?.dueAt ?? null,
     followUpCompletedAt: lastCompletedAt,
+    conversationId: request.conversationId,
     student: { ...student, email: user.email },
     supportPerson: request.supportPerson,
   };

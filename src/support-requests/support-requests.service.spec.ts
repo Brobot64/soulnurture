@@ -394,6 +394,20 @@ describe('SupportRequestsService', () => {
       expect(result.items.find((i) => i.id === 'clean')?.prompt).toBe('NONE');
     });
 
+    it('carries the linked conversationId on the row for the deep link', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({ id: 'req-linked', conversationId: 'conv-9' }),
+        queueRow({ id: 'req-plain', conversationId: null }),
+      ]);
+
+      const result = await service.listQueue('staff-1', {});
+
+      expect(result.items.find((i) => i.id === 'req-linked')?.conversationId).toBe(
+        'conv-9',
+      );
+      expect(result.items.find((i) => i.id === 'req-plain')?.conversationId).toBeNull();
+    });
+
     it('treats acknowledged flags as no prompt and skips the flag query without conversations', async () => {
       prisma.supportFlag.findMany.mockResolvedValue([
         { conversationId: 'conv-1', status: 'ACKNOWLEDGED' },
