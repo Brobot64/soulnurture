@@ -123,6 +123,8 @@ export const INTENTS: IntentDefinition[] = [
         'suicide',
         'suicidal',
         'kill myself',
+        'killing myself',
+        "don't want to be alive",
         'end it all',
         'no reason to live',
         'wish i was dead',
@@ -247,6 +249,78 @@ export const INTENTS: IntentDefinition[] = [
       {
         type: 'RECOMMEND_ACTIVITY',
         activitySlugs: ['thought-recap', 'mindful-body-scan'],
+      },
+    ],
+  },
+  {
+    id: 'ABUSE_DISCLOSURE',
+    label: 'Possible abuse or neglect',
+    description:
+      'Disclosures of physical, sexual or emotional abuse, neglect, exploitation or unsafe adults; never investigated by the AI — routed straight to the safeguarding pathway.',
+    severity: SupportFlagSeverity.TIER_3_ACUTE,
+    serverSignals: {
+      keywords: [
+        'not to tell anyone',
+        'private meetings secret',
+        'hurting my younger sibling',
+        'hits me when',
+        'hurts me when they are',
+        'leaves me alone for days',
+        'private pictures',
+        'sexually harassing',
+        'sexually harassed',
+        'find out that i told',
+        'exploiting my friend',
+        // Vernacular packs (yo/ha/ig/pcm) — pending clinical review.
+        ...vernacularKeywordsFor('ABUSE_DISCLOSURE'),
+      ],
+      aiCategories: ['ABUSE'],
+    },
+    actions: [
+      { type: 'SUPPORT_FLAG' },
+      {
+        type: 'SAFETY_MESSAGE',
+        message:
+          "Thank you for telling me — that took courage, and what is happening is not your fault. Keeping you safe is the most important thing, so I'm connecting you with a trusted adult who knows how to help. You don't have to handle this alone.",
+      },
+      {
+        type: 'HUMAN_SUPPORT_PROMPT',
+        reason:
+          'What you shared needs a caring adult who can protect you. A school safeguarding person is there for exactly this — reaching out is the right next step.',
+      },
+    ],
+  },
+  {
+    id: 'THREAT_OR_COERCION',
+    label: 'Threat or coercion',
+    description:
+      'Being threatened, forced, attacked or made to feel unsafe; goes straight to the urgent safeguarding pathway.',
+    severity: SupportFlagSeverity.TIER_3_ACUTE,
+    serverSignals: {
+      keywords: [
+        'threatening me',
+        'threatened to seriously hurt',
+        'threatened to hurt',
+        'threatened online',
+        'forcing me to meet',
+        'attacked',
+        "don't feel safe going home",
+        // Vernacular packs (yo/ha/ig/pcm) — pending clinical review.
+        ...vernacularKeywordsFor('THREAT_OR_COERCION'),
+      ],
+      aiCategories: [],
+    },
+    actions: [
+      { type: 'SUPPORT_FLAG' },
+      {
+        type: 'SAFETY_MESSAGE',
+        message:
+          "Thank you for telling me — you were right to say this. What is happening is serious, and you shouldn't have to face it alone. I'm connecting you with a trusted adult who can help keep you safe.",
+      },
+      {
+        type: 'HUMAN_SUPPORT_PROMPT',
+        reason:
+          'Being threatened or forced is not something you should carry alone. A trusted adult can step in and keep you safe — let them.',
       },
     ],
   },
