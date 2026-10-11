@@ -11,6 +11,8 @@ describe('SupportRequestsService', () => {
   let prisma: {
     supportPerson: Record<string, ReturnType<typeof vi.fn>>;
     supportRequest: Record<string, ReturnType<typeof vi.fn>>;
+    user: Record<string, ReturnType<typeof vi.fn>>;
+    supportFlag: Record<string, ReturnType<typeof vi.fn>>;
   };
   let audit: { log: ReturnType<typeof vi.fn> };
 
@@ -30,6 +32,8 @@ describe('SupportRequestsService', () => {
         findUnique: vi.fn(),
         update: vi.fn(),
       },
+      user: { findUnique: vi.fn() },
+      supportFlag: { findMany: vi.fn() },
     };
     audit = { log: vi.fn() };
 
@@ -198,5 +202,264 @@ describe('SupportRequestsService', () => {
     await expect(
       service.review('staff-1', 'missing', { status: SupportRequestStatus.ACCEPTED }),
     ).rejects.toThrow(NotFoundException);
+  });
+
+  describe('listQueue (staff review queue)', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+
+    function queueRow(overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'req-1',
+        createdAt: new Date('2026-10-10T09:00:00Z'),
+        timing: SupportTiming.GENTLE_1_2_DAYS,
+        note: null,
+        reviewNote: null,
+        status: SupportRequestStatus.PENDING,
+        conversationId: null,
+        followUps: [],
+        supportPerson: { id: 'p1', name: 'Mrs. Adebayo', type: 'COUNSELLOR' },
+        student: {
+          firstName: 'Amara',
+          lastName: 'Nwosu',
+          displayName: null,
+          classLabel: 'Year 10',
+          studentCode: 'GSS/2026/0142',
+          studentRef: null,
+          user: { email: 'amara@school.edu.ng' },
+        },
+        ...overrides,
+      };
+    }
+
+    beforeEach(() => {
+      prisma.user.findUnique.mockResolvedValue({ schoolId: 'school-1' });
+      prisma.supportFlag.findMany.mockResolvedValue([]);
+    });
+
+    it('returns an empty queue for a staff user with no school', async () => {
+      prisma.user.findUnique.mockResolvedValue({ schoolId: null });
+
+      const result = await service.listQueue('staff-1', {});
+
+      expect(result).toEqual({
+        items: [],
+        counts: {
+          all: 0,
+          new: 0,
+          reviewed: 0,
+          followUpRequired: 0,
+          followUpCompleted: 0,
+        },
+      });
+      expect(prisma.supportRequest.findMany).not.toHaveBeenCalled();
+    });
+
+    it('scopes the query to the school and excludes cancelled requests', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([]);
+
+      await service.listQueue('staff-1', {});
+
+      expect(prisma.supportRequest.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            status: { not: SupportRequestStatus.CANCELLED },
+            student: { user: { schoolId: 'school-1' } },
+          },
+        }),
+      );
+    });
+
+    it('maps pending and escalated requests without follow-ups to NEW', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({ id: 'req-1', status: SupportRequestStatus.PENDING }),
+        queueRow({ id: 'req-2', status: SupportRequestStatus.ESCALATED }),
+      ]);
+
+      const result = await service.listQueue('staff-1', {});
+
+      expect(result.items.map((item) => item.queueStatus)).toEqual([
+        'NEW',
+        'NEW',
+      ]);
+      expect(result.counts).toEqual(
+        expect.objectContaining({ all: 2, new: 2, reviewed: 0 }),
+      );
+    });
+
+    it('maps accepted/scheduled/in-progress/completed requests to REVIEWED', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({ id: 'a', status: SupportRequestStatus.ACCEPTED }),
+        queueRow({ id: 'b', status: SupportRequestStatus.SCHEDULED }),
+        queueRow({ id: 'c', status: SupportRequestStatus.IN_PROGRESS }),
+        queueRow({ id: 'd', status: SupportRequestStatus.COMPLETED }),
+      ]);
+
+      const result = await service.listQueue('staff-1', {});
+
+      expect(result.items.every((item) => item.queueStatus === 'REVIEWED')).toBe(
+        true,
+      );
+      expect(result.counts.reviewed).toBe(4);
+    });
+
+    it('derives FOLLOW_UP_REQUIRED from an open follow-up and surfaces its due date', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({
+          status: SupportRequestStatus.ACCEPTED,
+          followUps: [
+            {
+              status: 'SCHEDULED',
+              dueAt: new Date('2026-10-12T12:00:00Z'),
+              completedAt: null,
+            },
+          ],
+        }),
+      ]);
+
+      const result = await service.listQueue('staff-1', {});
+
+      expect(result.items[0].queueStatus).toBe('FOLLOW_UP_REQUIRED');
+      expect(result.items[0].followUpDueAt).toEqual(
+        new Date('2026-10-12T12:00:00Z'),
+      );
+      expect(result.counts.followUpRequired).toBe(1);
+    });
+
+    it('a completed follow-up wins over an open one and over the request status', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({
+          status: SupportRequestStatus.PENDING,
+          followUps: [
+            {
+              status: 'COMPLETED',
+              dueAt: null,
+              completedAt: new Date(Date.now() - DAY),
+            },
+            { status: 'PENDING', dueAt: null, completedAt: null },
+          ],
+        }),
+      ]);
+
+      const result = await service.listQueue('staff-1', {});
+
+      expect(result.items[0].queueStatus).toBe('FOLLOW_UP_COMPLETED');
+      expect(result.counts).toEqual(
+        expect.objectContaining({ new: 0, followUpCompleted: 1 }),
+      );
+    });
+
+    it('counts completed-this-week only for follow-ups completed within 7 days', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({
+          id: 'recent',
+          followUps: [
+            {
+              status: 'COMPLETED',
+              dueAt: null,
+              completedAt: new Date(Date.now() - 2 * DAY),
+            },
+          ],
+        }),
+        queueRow({
+          id: 'stale',
+          followUps: [
+            {
+              status: 'COMPLETED',
+              dueAt: null,
+              completedAt: new Date(Date.now() - 10 * DAY),
+            },
+          ],
+        }),
+      ]);
+
+      const result = await service.listQueue('staff-1', {});
+
+      expect(result.counts.followUpCompleted).toBe(1);
+    });
+
+    it('flags the prompt as REVIEW_SUGGESTED for an active flag on the conversation', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({ id: 'flagged', conversationId: 'conv-1' }),
+        queueRow({ id: 'clean', conversationId: 'conv-2' }),
+      ]);
+      prisma.supportFlag.findMany.mockResolvedValue([
+        { conversationId: 'conv-1', status: 'OPEN' },
+      ]);
+
+      const result = await service.listQueue('staff-1', {});
+
+      expect(result.items.find((i) => i.id === 'flagged')?.prompt).toBe(
+        'REVIEW_SUGGESTED',
+      );
+      expect(result.items.find((i) => i.id === 'clean')?.prompt).toBe('NONE');
+    });
+
+    it('treats acknowledged flags as no prompt and skips the flag query without conversations', async () => {
+      prisma.supportFlag.findMany.mockResolvedValue([
+        { conversationId: 'conv-1', status: 'ACKNOWLEDGED' },
+      ]);
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({ conversationId: 'conv-1' }),
+      ]);
+
+      const result = await service.listQueue('staff-1', {});
+
+      expect(result.items[0].prompt).toBe('NONE');
+
+      prisma.supportFlag.findMany.mockClear();
+      prisma.supportRequest.findMany.mockResolvedValue([queueRow()]);
+      await service.listQueue('staff-1', {});
+      expect(prisma.supportFlag.findMany).not.toHaveBeenCalled();
+    });
+
+    it('applies the status filter to items but never to the chip counts', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({ id: 'req-new', status: SupportRequestStatus.PENDING }),
+        queueRow({ id: 'req-reviewed', status: SupportRequestStatus.ACCEPTED }),
+      ]);
+
+      const result = await service.listQueue('staff-1', { status: 'NEW' });
+
+      expect(result.items.map((item) => item.id)).toEqual(['req-new']);
+      expect(result.counts).toEqual(
+        expect.objectContaining({ all: 2, new: 1, reviewed: 1 }),
+      );
+    });
+
+    it('narrows rows by student code, ref or email search but never the chip counts', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({
+          id: 'req-hit',
+          student: {
+            user: { email: 'amara@school.test' },
+            firstName: 'Amara',
+            lastName: 'N',
+            displayName: null,
+            classLabel: 'Year 10',
+            studentRef: null,
+            studentCode: 'GSS/2026/0142',
+          },
+        }),
+        queueRow({
+          id: 'req-miss',
+          student: {
+            user: { email: 'jude@school.test' },
+            firstName: 'Jude',
+            lastName: 'O',
+            displayName: null,
+            classLabel: 'Year 10',
+            studentRef: null,
+            studentCode: 'GSS/2026/0999',
+          },
+        }),
+      ]);
+
+      const result = await service.listQueue('staff-1', { q: 'amara@school' });
+
+      expect(result.items.map((item) => item.id)).toEqual(['req-hit']);
+      expect(result.counts).toEqual(
+        expect.objectContaining({ all: 2, new: 2 }),
+      );
+    });
   });
 });

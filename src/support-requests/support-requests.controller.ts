@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -6,8 +7,9 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
-import { ApiBody, ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
+import { ApiBody, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { Session } from '@thallesp/nestjs-better-auth';
 import type { UserSession } from '@thallesp/nestjs-better-auth';
 import {
@@ -19,6 +21,7 @@ import {
 import { Roles } from '../common/guards/roles.decorator.js';
 import { CreateSupportRequestDto } from './dto/create-support-request.dto.js';
 import { ReviewSupportRequestDto } from './dto/review-support-request.dto.js';
+import { QUEUE_STATUSES, type QueueStatus } from './queue-status.js';
 import { SupportRequestsService } from './support-requests.service.js';
 
 @ApiTags('Support Requests (contract)')
@@ -57,6 +60,41 @@ export class SupportRequestsController {
   @ApiEnvelopeOk(Object)
   list(@Session() session: UserSession) {
     return this.supportRequestsService.listMine(session.user.id);
+  }
+
+  /**
+   * Staff review queue (figma node 146:914). Declared before `:id` so the
+   * literal segment wins over the UUID param.
+   */
+  @Get('queue')
+  @Roles('COUNSELLOR', 'PSYCHOLOGIST', 'SUPPORT_STAFF')
+  @ApiSessionAuth()
+  @ApiStandardErrors()
+  @ApiOperation({
+    summary:
+      'Staff queue: school support requests with derived review status, prompt, counts',
+  })
+  @ApiQuery({ name: 'status', required: false, enum: QUEUE_STATUSES })
+  @ApiQuery({ name: 'q', required: false })
+  @ApiEnvelopeOk(Object)
+  listQueue(
+    @Session() session: UserSession,
+    @Query('status') status?: string,
+    @Query('q') q?: string,
+  ) {
+    let queueStatus: QueueStatus | undefined;
+    if (status !== undefined) {
+      if (!QUEUE_STATUSES.includes(status as QueueStatus)) {
+        throw new BadRequestException(
+          `status must be one of ${QUEUE_STATUSES.join(', ')}`,
+        );
+      }
+      queueStatus = status as QueueStatus;
+    }
+    return this.supportRequestsService.listQueue(session.user.id, {
+      status: queueStatus,
+      q,
+    });
   }
 
   @Get(':id')
