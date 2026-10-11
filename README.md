@@ -69,6 +69,8 @@ OpenAPI docs: `http://localhost:3000/api/docs` (Swagger UI) and `http://localhos
 
 **Production deployment** (Contabo VPS runbook: security baseline, Docker infra, PostgreSQL, RustFS uploads, N-ATLaS/Ollama, systemd, Nginx/TLS, Prometheus + Grafana + Loki monitoring, backups): see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
+**N-ATLaS integration** (how the vernacular language layer integrates N-ATLaS — lanes, env contract, failover, license, evidence): see [docs/N-ATLAS-INTEGRATION.md](docs/N-ATLAS-INTEGRATION.md).
+
 **Agent/dev handoff** (full working memory: decisions ledger, debugging stories, traps, resume steps): see [docs/HANDOFF.md](docs/HANDOFF.md). Phase C plan (approved, paused): [docs/PHASE-C-PLAN.md](docs/PHASE-C-PLAN.md).
 
 ### Seed data
