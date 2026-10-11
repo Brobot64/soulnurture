@@ -4,6 +4,7 @@ import { AuditModule } from '../audit/audit.module.js';
 import { ConsentModule } from '../consent/consent.module.js';
 import { PrismaModule } from '../prisma/prisma.module.js';
 import { StudentsModule } from '../students/students.module.js';
+import { SupportFlagsModule } from '../support-flags/support-flags.module.js';
 import { AiController } from './ai.controller.js';
 import { AiService } from './ai.service.js';
 import { AiContextService } from './context/ai-context.service.js';
@@ -34,7 +35,14 @@ import { NAtlasAsrProvider } from './providers/natlas/natlas-asr.provider.js';
 import { ReplyRendererService } from './language/reply-renderer.service.js';
 
 @Module({
-  imports: [PrismaModule, AuditModule, ConsentModule, ConfigModule, StudentsModule],
+  imports: [
+    PrismaModule,
+    AuditModule,
+    ConsentModule,
+    ConfigModule,
+    StudentsModule,
+    SupportFlagsModule,
+  ],
   controllers: [AiController, AiDisclosureController],
   providers: [
     AiService,

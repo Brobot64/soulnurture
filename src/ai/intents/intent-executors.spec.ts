@@ -261,6 +261,74 @@ describe('applyIntentVerdict', () => {
     expect(ctx.result.activity ?? null).toBeNull();
     expect(notes.join(' ')).toContain('No approved activity');
   });
+
+  it('alerts the school when an acute flag is created, passing the resolved language', async () => {
+    prisma.supportFlag.findFirst.mockResolvedValue(null);
+    prisma.supportFlag.create.mockResolvedValue({ id: 'flag-1' });
+    const recommendImmediateFollowUp = vi
+      .fn()
+      .mockResolvedValue('School professionals alerted (2) in yo.');
+    const flagAlerts = { recommendImmediateFollowUp } as never;
+
+    const notes = await applyIntentVerdict(
+      verdict(),
+      context(prisma, auditService, {
+        flagAlerts,
+        alertLanguage: 'yo',
+      }),
+    );
+
+    expect(recommendImmediateFollowUp).toHaveBeenCalledWith({
+      flag: { id: 'flag-1' },
+      studentMessage: 'there is no reason to live here anymore',
+      language: 'yo',
+    });
+    expect(notes.join(' ')).toContain('alerted (2) in yo');
+  });
+
+  it('does not alert for non-acute severities', async () => {
+    prisma.supportFlag.findFirst.mockResolvedValue(null);
+    prisma.supportFlag.create.mockResolvedValue({ id: 'flag-1' });
+    const recommendImmediateFollowUp = vi.fn();
+    const flagAlerts = { recommendImmediateFollowUp } as never;
+
+    await applyIntentVerdict(
+      verdict({ severity: 'TIER_2_HIGH' }),
+      context(prisma, auditService, { flagAlerts }),
+    );
+
+    expect(recommendImmediateFollowUp).not.toHaveBeenCalled();
+  });
+
+  it('does not alert when an active flag de-duped', async () => {
+    prisma.supportFlag.findFirst.mockResolvedValue({ id: 'flag-existing' });
+    const recommendImmediateFollowUp = vi.fn();
+    const flagAlerts = { recommendImmediateFollowUp } as never;
+
+    await applyIntentVerdict(
+      verdict(),
+      context(prisma, auditService, { flagAlerts }),
+    );
+
+    expect(recommendImmediateFollowUp).not.toHaveBeenCalled();
+  });
+
+  it('a failing alert never fails the flag', async () => {
+    prisma.supportFlag.findFirst.mockResolvedValue(null);
+    prisma.supportFlag.create.mockResolvedValue({ id: 'flag-1' });
+    const recommendImmediateFollowUp = vi
+      .fn()
+      .mockRejectedValue(new Error('notifications down'));
+    const flagAlerts = { recommendImmediateFollowUp } as never;
+
+    const notes = await applyIntentVerdict(
+      verdict(),
+      context(prisma, auditService, { flagAlerts }),
+    );
+
+    expect(prisma.supportFlag.create).toHaveBeenCalled();
+    expect(notes.join(' ')).toContain('School alert failed');
+  });
 });
 
 describe('RECOMMEND_ACTIVITY catalogue integrity', () => {

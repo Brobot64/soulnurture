@@ -1,9 +1,11 @@
 import { Logger } from '@nestjs/common';
-import { SupportFlagStatus } from '@prisma/client';
+import { SupportFlagSeverity, SupportFlagStatus } from '@prisma/client';
 import type { PrismaService } from '../../prisma/prisma.service.js';
 import type { AuditService } from '../../audit/audit.service.js';
 import type { AiGenerationResult } from '../providers/ai-provider.interface.js';
 import type { AiContext } from '../context/ai-context.service.js';
+import type { SupportedLanguage } from '../language/language.config.js';
+import type { SupportFlagAlertsService } from '../../support-flags/support-flag-alerts.service.js';
 import type { IntentAction } from './intents.config.js';
 import type { IntentVerdict } from './intent-engine.service.js';
 
@@ -35,6 +37,13 @@ export interface IntentApplyContext {
   /** Overrides the derived flag source — the vernacular second pass flags on
    * translated text (SERVER_KEYWORDS match) but must stay AI_CANDIDATE. */
   flagSourceOverride?: 'SERVER_POLICY' | 'AI_CANDIDATE';
+  /** Present at every production call site: delivers an acute (TIER_3) flag
+   * to the school's professionals as an immediate-follow-up recommendation. */
+  flagAlerts?: SupportFlagAlertsService;
+  /** Language the caller already resolved per the dominant chain
+   * [messageLanguage, preferredLanguage] → 'en'; the alert falls back to the
+   * standing preference, then English, when absent. */
+  alertLanguage?: SupportedLanguage;
 }
 
 const logger = new Logger('IntentExecutors');
@@ -100,6 +109,25 @@ const SUPPORT_FLAG_EXECUTOR: IntentExecutor = {
       },
     });
     notes.push(`Safeguarding flag persisted (${verdict.severity}, ${verdict.matchedBy}).`);
+
+    // Over the line: an acute flag must reach the school's professionals even
+    // when nothing else does. Alert failure never fails the flag.
+    if (verdict.severity === SupportFlagSeverity.TIER_3_ACUTE && ctx.flagAlerts) {
+      try {
+        const note = await ctx.flagAlerts.recommendImmediateFollowUp({
+          flag: created,
+          studentMessage: ctx.userContent,
+          language: ctx.alertLanguage,
+        });
+        notes.push(note);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.warn(
+          `Acute-flag school alert failed for flag ${created.id}: ${message}`,
+        );
+        notes.push(`School alert failed: ${message}`);
+      }
+    }
   },
 };
 

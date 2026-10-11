@@ -7,6 +7,7 @@ import {
   REFLECTION_PROMPT_VERSION,
 } from './prompts/system.prompt.js';
 import { IntentEngineService } from './intents/intent-engine.service.js';
+import { SupportFlagAlertsService } from '../support-flags/support-flag-alerts.service.js';
 import {
   CANONICAL_CATEGORIES,
   CANONICAL_SEVERITIES,
@@ -202,6 +203,7 @@ export class AiService {
     private readonly understandingProvider: NatlasTranslationProvider,
     private readonly natlasAsr: NAtlasAsrProvider,
     private readonly replyRenderer: ReplyRendererService,
+    private readonly flagAlerts: SupportFlagAlertsService,
     @Inject(AI_CONFIG) private readonly aiConfig: AiConfig,
   ) {}
 
@@ -328,6 +330,8 @@ export class AiService {
           conversationId: input.conversationId,
           userContent: input.userContent,
           relevantResources: ctx.relevantResources,
+          flagAlerts: this.flagAlerts,
+          alertLanguage: replyLanguage,
         })),
       );
     }
@@ -602,6 +606,8 @@ export class AiService {
             userContent: understanding.englishTranslation,
             relevantResources: [],
             flagSourceOverride: 'AI_CANDIDATE',
+            flagAlerts: this.flagAlerts,
+            alertLanguage: input.language,
           })),
         );
         escalated = true;
