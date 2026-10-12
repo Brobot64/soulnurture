@@ -15,13 +15,6 @@ const aiConfig = {
   language: { renderMaxOutputTokens: 400, understandingTimeoutMs: 15_000 },
 } as unknown as AiConfig;
 
-function openAiReply(content: string): Response {
-  return {
-    ok: true,
-    status: 200,
-    json: async () => ({ choices: [{ message: { content } }], usage: {} }),
-  } as unknown as Response;
-}
 
 describe('ReplyRendererService — the render must be in the target language', () => {
   let natlas: { configured: boolean; completeText: ReturnType<typeof vi.fn> };
@@ -132,13 +125,12 @@ describe('ReplyRendererService — the render must be in the target language', (
     expect(out?.via).toBe('n-atlas-local');
   });
 
-  it('when N-ATLaS echoes the English, the OpenAI lane gets the chance to render', async () => {
+  it('when N-ATLaS echoes the English, OpenAI is never asked to render (N-ATLaS-only)', async () => {
     config.get.mockImplementation((key: string) => (key === 'OPENAI_API_KEY' ? 'sk-test' : undefined));
     natlas.completeText.mockResolvedValue({ text: ENGLISH, usage: {} });
-    fetchMock.mockResolvedValue(openAiReply('Mo wà níbí pẹ̀lú rẹ. Ṣé o fẹ́ sọ púpọ̀ sí i?'));
 
     const out = await make().render({ englishReply: ENGLISH, language: 'yo' });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(out?.via).toBe('openai');
+    expect(out).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

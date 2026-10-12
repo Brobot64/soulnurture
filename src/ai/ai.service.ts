@@ -608,7 +608,7 @@ export class AiService {
   /**
    * Vernacular understanding (Phase C step 4). The worker's VERNACULAR lane
    * calls this for every non-English USER message: the translation lane
-   * (local N-ATLaS → OpenAI fallback) produces a strict understanding, which
+   * (N-ATLaS only) produces a strict understanding, which
    * is merged onto the message's aiPayload. When the synchronous first pass
    * did not flag, the intent engine re-runs on the ENGLISH TRANSLATION as a
    * second safety sweep — a crisis phrase invisible to the keyword floor in

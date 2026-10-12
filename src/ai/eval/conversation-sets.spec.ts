@@ -70,6 +70,9 @@ const world: {
  * (set only when a real render passed its own target-language checks). */
 let renderedTo: EvalLang | null = null;
 
+/** Notes from the last turn's generateAndApply (translation status etc.). */
+let lastNotes: string[] = [];
+
 /** Live mode only: load NATLAS_* values from .env into process.env. Values
  * are never logged. */
 function loadNatlasEnv(): void {
@@ -173,7 +176,9 @@ describe(`End-to-end conversation sets ES-01 … ES-51 (${LIVE ? 'LIVE N-ATLaS' 
       configured: boolean;
       completeLabel: (system: string, user: string) => Promise<{ text: string; usage: object }>;
       completeText: (system: string, user: string) => Promise<{ text: string; usage: object }>;
+      completeJson: (system: string, user: string) => Promise<{ raw: unknown; usage: object }>;
     };
+    let translator: { understand: (input: { text: string; language: string }) => Promise<unknown> };
     let renderer: { render: (input: ReplyRenderInput) => Promise<unknown> };
     let aiConfig: AiConfig = aiConfigStub;
     const configGet = (key: string) =>
@@ -199,7 +204,18 @@ describe(`End-to-end conversation sets ES-01 … ES-51 (${LIVE ? 'LIVE N-ATLaS' 
           return realNatlas.completeLabel(system, user);
         },
         completeText: (system, user) => realNatlas.completeText(system, user),
+        completeJson: (system, user) => {
+          if (world.natlas === 'down') throw new Error('N-ATLaS down (simulated)');
+          return realNatlas.completeJson(system, user);
+        },
       };
+      // The real translation provider: N-ATLaS translates, OpenAI is the fallback.
+      translator = new NatlasTranslationProvider(
+        { get: configGet } as unknown as ConfigService,
+        natlasLlm as unknown as NatlasLlmProvider,
+        meter as unknown as AiUsageMeterService,
+        aiConfig,
+      ) as unknown as typeof translator;
       const realRenderer = new ReplyRendererService(
         { get: configGet } as unknown as ConfigService,
         natlasLlm as unknown as NatlasLlmProvider,
@@ -222,6 +238,16 @@ describe(`End-to-end conversation sets ES-01 … ES-51 (${LIVE ? 'LIVE N-ATLaS' 
           return { text: `Language: ${world.natlas ?? 'Other'}\nMeaning: (english)`, usage: {} };
         },
         completeText: async () => ({ text: '', usage: {} }),
+        completeJson: async () => {
+          throw new Error('N-ATLaS JSON not used in stub mode');
+        },
+      };
+      // Stub translator: passes the text through as its own English translation.
+      translator = {
+        understand: async ({ text }) => ({
+          understanding: { englishTranslation: text, tone: 'NEUTRAL', keyFacts: [], lang: 'en', via: 'n-atlas-local' },
+          via: 'n-atlas-local',
+        }),
       };
       renderer = {
         render: async (input) =>
@@ -309,7 +335,7 @@ describe(`End-to-end conversation sets ES-01 … ES-51 (${LIVE ? 'LIVE N-ATLaS' 
         GuardrailService,
         { provide: AI_CONFIG, useValue: aiConfig },
         { provide: MemoryRepository, useValue: { embedAndStore: vi.fn(), recall: vi.fn() } },
-        { provide: NatlasTranslationProvider, useValue: { understand: vi.fn() } },
+        { provide: NatlasTranslationProvider, useValue: translator },
         { provide: NAtlasAsrProvider, useValue: { transcribeAudio: vi.fn() } },
         { provide: ReplyRendererService, useValue: renderer },
         {
@@ -344,6 +370,7 @@ describe(`End-to-end conversation sets ES-01 … ES-51 (${LIVE ? 'LIVE N-ATLaS' 
     text: string,
     language: EvalLang,
   ): Promise<{ reply: string; flag: string | null }> {
+    lastNotes = [];
     try {
       const outcome = await service.generateAndApply({
         studentId: 's1',
@@ -353,6 +380,7 @@ describe(`End-to-end conversation sets ES-01 … ES-51 (${LIVE ? 'LIVE N-ATLaS' 
         classLabel: null,
         messageLanguage: language,
       });
+      lastNotes = outcome.notes;
       return { reply: outcome.result.message, flag: outcome.verdict?.intentId ?? null };
     } catch (error) {
       if (!(error instanceof AiGenerationError)) throw error;
@@ -398,6 +426,15 @@ describe(`End-to-end conversation sets ES-01 … ES-51 (${LIVE ? 'LIVE N-ATLaS' 
           }
 
           const { reply, flag } = await runTurn(turn.text, turnLanguage);
+          // Live: a non-English draft must come from the N-ATLaS translation.
+          // Outage turns are excluded: natlas 'down' expects the fallback, and a
+          // provider 'down' turn takes the holding lane, which returns no notes.
+          if (LIVE && turnLanguage !== 'en' && turn.natlas !== 'down' && turn.provider !== 'down') {
+            expect(
+              lastNotes.join(' '),
+              `turn ${index + 1} did not draft from a translation: "${turn.text}"`,
+            ).toContain('Drafted from the English translation');
+          }
           const actual = { turn: index + 1, replyLanguage: await replyLanguageOf(reply), flag };
           transcript.push({ ...actual, text: turn.text, reply });
           expect(
