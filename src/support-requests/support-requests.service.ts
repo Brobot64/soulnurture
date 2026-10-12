@@ -11,6 +11,7 @@ import {
   SupportTiming,
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service.js';
+import { ChatService } from '../chat/chat.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
 import type { CreateSupportRequestDto } from './dto/create-support-request.dto.js';
@@ -29,6 +30,7 @@ export class SupportRequestsService {
     private readonly prisma: PrismaService,
     private readonly studentsService: StudentsService,
     private readonly auditService: AuditService,
+    private readonly chatService: ChatService,
   ) {}
 
   listPeople() {
@@ -247,7 +249,27 @@ export class SupportRequestsService {
       meta: { from: existing.status, to: dto.status },
     });
 
-    return updated;
+    let chatThreadId: string | null = null;
+    if (dto.status === SupportRequestStatus.ACCEPTED) {
+      const staff = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { schoolId: true, name: true },
+      });
+      if (staff?.schoolId) {
+        const note = existing.note?.trim();
+        const summary =
+          `${staff.name} accepted your request to talk.` +
+          (note ? ` You asked: "${note}"` : '');
+        const opened = await this.chatService.openDirectThread(userId, {
+          studentProfileId: existing.studentId,
+          schoolId: staff.schoolId,
+          summary,
+        });
+        chatThreadId = opened.id;
+      }
+    }
+
+    return { ...updated, chatThreadId };
   }
 }
 

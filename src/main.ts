@@ -24,9 +24,12 @@ async function bootstrap() {
     .map((o) => o.trim())
     .filter(Boolean);
 
+  // @fastify/cors defaults allow-methods to GET,HEAD,POST only — without an
+  // explicit list the browser blocks PATCH/PUT/DELETE preflights cross-origin.
   await app.register(cors, {
     origin: origins.length ? origins : true,
     credentials: true,
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
   });
   await app.register(cookie, { secret: process.env.BETTER_AUTH_SECRET });
   await app.register(multipart, { limits: { fileSize: 10 * 1024 * 1024 } });

@@ -377,6 +377,91 @@ export class ChatService {
     });
   }
 
+  /**
+   * Staff-accept lane: a counsellor marking a support request ACCEPTED opens
+   * an ACTIVE thread with the student straight away — no PENDING pool stop.
+   * Idempotent: an existing ACTIVE thread between the same professional and
+   * student is reused, never duplicated.
+   */
+  async openDirectThread(
+    professionalUserId: string,
+    input: { studentProfileId: string; schoolId: string; summary: string },
+  ): Promise<{ id: string; created: boolean }> {
+    const professional = await this.prisma.professionalProfile.findUnique({
+      where: { userId: professionalUserId },
+      select: { id: true, user: { select: { name: true } } },
+    });
+    if (!professional) {
+      throw new NotFoundException('Professional profile not found');
+    }
+    const student = await this.prisma.studentProfile.findUnique({
+      where: { id: input.studentProfileId },
+      select: { userId: true },
+    });
+    if (!student) throw new NotFoundException('Student profile not found');
+
+    const existing = await this.prisma.chatThread.findFirst({
+      where: {
+        studentId: input.studentProfileId,
+        professionalId: professional.id,
+        status: 'ACTIVE',
+      },
+      select: { id: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (existing) return { id: existing.id, created: false };
+
+    const now = new Date();
+    const thread = await this.prisma.chatThread.create({
+      data: {
+        schoolId: input.schoolId,
+        studentId: input.studentProfileId,
+        professionalId: professional.id,
+        status: 'ACTIVE',
+        claimedAt: now,
+        professionalReadAt: now,
+        studentReadAt: now,
+        aiEntrySummary: input.summary,
+        messages: {
+          create: {
+            role: 'SYSTEM',
+            content: input.summary,
+            meta: { source: 'support_request_accept' },
+          },
+        },
+      },
+    });
+
+    await this.auditService.log({
+      actorId: professionalUserId,
+      action: 'chat.thread_opened_from_request',
+      entity: 'ChatThread',
+      entityId: thread.id,
+      meta: { studentId: input.studentProfileId },
+      schoolId: input.schoolId,
+    });
+
+    const payload = {
+      threadId: thread.id,
+      professionalName: professional.user.name,
+    };
+    this.realtime.emitToUser(
+      student.userId,
+      REALTIME_EVENTS.CHAT_THREAD_CLAIMED,
+      payload,
+    );
+    await this.notifications.push({
+      userId: student.userId,
+      type: 'CHAT_CLAIMED',
+      title: `${professional.user.name} is here to talk with you`,
+      body: input.summary,
+      data: { threadId: thread.id },
+    });
+    await this.emitUnread(student.userId);
+
+    return { id: thread.id, created: true };
+  }
+
   async sendMessage(userId: string, threadId: string, dto: SendChatMessageDto) {
     const thread = await this.prisma.chatThread.findUnique({
       where: { id: threadId },

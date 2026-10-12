@@ -2,6 +2,7 @@ import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { SupportRequestStatus, SupportTiming } from '@prisma/client';
 import { AuditService } from '../audit/audit.service.js';
+import { ChatService } from '../chat/chat.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
 import { SupportRequestsService } from './support-requests.service.js';
@@ -15,6 +16,7 @@ describe('SupportRequestsService', () => {
     supportFlag: Record<string, ReturnType<typeof vi.fn>>;
   };
   let audit: { log: ReturnType<typeof vi.fn> };
+  let chat: { openDirectThread: ReturnType<typeof vi.fn> };
 
   const student = {
     id: 'student-1',
@@ -36,6 +38,7 @@ describe('SupportRequestsService', () => {
       supportFlag: { findMany: vi.fn() },
     };
     audit = { log: vi.fn() };
+    chat = { openDirectThread: vi.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -46,6 +49,7 @@ describe('SupportRequestsService', () => {
           useValue: { ensureProfile: vi.fn().mockResolvedValue(student) },
         },
         { provide: AuditService, useValue: audit },
+        { provide: ChatService, useValue: chat },
       ],
     }).compile();
 
@@ -169,6 +173,66 @@ describe('SupportRequestsService', () => {
       }),
     );
     expect(result.status).toBe(SupportRequestStatus.ACCEPTED);
+  });
+
+  it('opens a chat with the student when the review accepts the request', async () => {
+    prisma.supportRequest.findUnique.mockResolvedValue({
+      id: 'req-1',
+      status: 'PENDING',
+      reviewNote: null,
+      studentId: 'student-1',
+      note: 'I would like to talk about exam stress',
+    });
+    prisma.supportRequest.update.mockResolvedValue({
+      id: 'req-1',
+      status: SupportRequestStatus.ACCEPTED,
+      reviewNote: null,
+      supportPerson: { id: 'p1' },
+    });
+    prisma.user.findUnique.mockResolvedValue({
+      schoolId: 'school-1',
+      name: 'Mrs. Adebayo',
+    });
+    chat.openDirectThread.mockResolvedValue({ id: 'thread-9', created: true });
+
+    const result = await service.review('staff-1', 'req-1', {
+      status: SupportRequestStatus.ACCEPTED,
+    });
+
+    expect(chat.openDirectThread).toHaveBeenCalledWith(
+      'staff-1',
+      expect.objectContaining({
+        studentProfileId: 'student-1',
+        schoolId: 'school-1',
+      }),
+    );
+    expect(chat.openDirectThread.mock.calls[0][1].summary).toContain(
+      'accepted your request to talk',
+    );
+    expect(chat.openDirectThread.mock.calls[0][1].summary).toContain(
+      'I would like to talk about exam stress',
+    );
+    expect(result.chatThreadId).toBe('thread-9');
+  });
+
+  it('does not open a chat for non-accept review statuses', async () => {
+    prisma.supportRequest.findUnique.mockResolvedValue({
+      id: 'req-1',
+      status: 'PENDING',
+      reviewNote: 'called yesterday',
+    });
+    prisma.supportRequest.update.mockResolvedValue({
+      id: 'req-1',
+      status: 'SCHEDULED',
+      reviewNote: 'called yesterday',
+    });
+
+    const result = await service.review('staff-1', 'req-1', {
+      status: SupportRequestStatus.SCHEDULED,
+    });
+
+    expect(chat.openDirectThread).not.toHaveBeenCalled();
+    expect(result.chatThreadId).toBeNull();
   });
 
   it('keeps the existing review note when the PATCH omits one', async () => {
