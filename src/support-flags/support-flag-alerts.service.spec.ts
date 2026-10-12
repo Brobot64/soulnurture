@@ -34,6 +34,8 @@ describe('SupportFlagAlertsService', () => {
   let prisma: {
     studentProfile: Record<string, ReturnType<typeof vi.fn>>;
     user: Record<string, ReturnType<typeof vi.fn>>;
+    supportPerson: Record<string, ReturnType<typeof vi.fn>>;
+    supportRequest: Record<string, ReturnType<typeof vi.fn>>;
   };
   let notifications: { pushMany: ReturnType<typeof vi.fn> };
   let audit: { log: ReturnType<typeof vi.fn> };
@@ -42,6 +44,8 @@ describe('SupportFlagAlertsService', () => {
     prisma = {
       studentProfile: { findUnique: vi.fn() },
       user: { findMany: vi.fn() },
+      supportPerson: { findFirst: vi.fn() },
+      supportRequest: { create: vi.fn().mockResolvedValue({ id: 'request-1' }) },
     };
     notifications = { pushMany: vi.fn().mockResolvedValue([]) };
     audit = { log: vi.fn().mockResolvedValue({ id: 'audit-1' }) };
@@ -58,12 +62,16 @@ describe('SupportFlagAlertsService', () => {
     service = module.get(SupportFlagAlertsService);
   });
 
-  it('notifies the school professionals with the verbatim quote, in the given language', async () => {
+  it('notifies the school professionals in English with the verbatim quote and its language labelled', async () => {
     prisma.studentProfile.findUnique.mockResolvedValue({
       preferredLanguage: 'en',
       user: { schoolId: 'school-1' },
     });
     prisma.user.findMany.mockResolvedValue([{ id: 'u1' }, { id: 'u2' }]);
+    prisma.supportPerson.findFirst.mockResolvedValue({
+      id: 'person-1',
+      type: 'COUNSELLOR',
+    });
 
     const note = await service.recommendImmediateFollowUp({
       flag: flag(),
@@ -94,7 +102,8 @@ describe('SupportFlagAlertsService', () => {
       body: string;
       data: Record<string, unknown>;
     };
-    expect(payload.title).toContain('Ẹ ṣàyẹ̀wò');
+    expect(payload.title).toContain('Immediate follow-up recommended');
+    expect(payload.body).toContain('(yo)');
     expect(payload.data).toEqual(
       expect.objectContaining({
         flagId: 'flag-1',
@@ -115,12 +124,65 @@ describe('SupportFlagAlertsService', () => {
     expect(note).toContain('(2)');
   });
 
+  it('queues a support request in the staff tray for the escalation', async () => {
+    prisma.studentProfile.findUnique.mockResolvedValue({
+      preferredLanguage: 'en',
+      user: { schoolId: 'school-1' },
+    });
+    prisma.user.findMany.mockResolvedValue([{ id: 'u1' }]);
+    prisma.supportPerson.findFirst.mockResolvedValue({
+      id: 'person-1',
+      type: 'COUNSELLOR',
+    });
+
+    await service.recommendImmediateFollowUp({
+      flag: flag(),
+      studentMessage: 'there is no reason to live here anymore',
+      language: 'ha',
+    });
+
+    expect(prisma.supportRequest.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        studentId: 'student-1',
+        supportPersonId: 'person-1',
+        personType: 'COUNSELLOR',
+        timing: 'URGENT_UNSAFE',
+        status: 'ESCALATED',
+        conversationId: 'conv-1',
+        note: expect.stringContaining(
+          'there is no reason to live here anymore',
+        ),
+      }),
+    });
+  });
+
+  it('skips the tray request when no active support person exists', async () => {
+    prisma.studentProfile.findUnique.mockResolvedValue({
+      preferredLanguage: 'en',
+      user: { schoolId: 'school-1' },
+    });
+    prisma.user.findMany.mockResolvedValue([{ id: 'u1' }]);
+    prisma.supportPerson.findFirst.mockResolvedValue(null);
+
+    await service.recommendImmediateFollowUp({
+      flag: flag(),
+      studentMessage: 'help me',
+      language: 'en',
+    });
+
+    expect(prisma.supportRequest.create).not.toHaveBeenCalled();
+  });
+
   it('falls back to the standing preference when no language is given', async () => {
     prisma.studentProfile.findUnique.mockResolvedValue({
       preferredLanguage: 'ha',
       user: { schoolId: 'school-1' },
     });
     prisma.user.findMany.mockResolvedValue([{ id: 'u1' }]);
+    prisma.supportPerson.findFirst.mockResolvedValue({
+      id: 'person-1',
+      type: 'COUNSELLOR',
+    });
 
     await service.recommendImmediateFollowUp({
       flag: flag(),
@@ -131,7 +193,7 @@ describe('SupportFlagAlertsService', () => {
       title: string;
       data: Record<string, unknown>;
     };
-    expect(payload.title).toContain('Bukatar saurin kulawa');
+    expect(payload.title).toContain('Immediate follow-up recommended');
     expect(payload.data.language).toBe('ha');
   });
 

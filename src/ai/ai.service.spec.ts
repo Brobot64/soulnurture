@@ -588,9 +588,13 @@ describe('AiService.generateAndApply', () => {
       expect(sent.systemPrompt).not.toContain('REPLY FULLY in Yoruba');
     });
 
-    it('never renders scripted safety copy — approved wording stays English', async () => {
+    it('renders scripted safety copy into the detected language like any reply', async () => {
       prisma.supportFlag.findFirst = vi.fn().mockResolvedValue(null);
       prisma.supportFlag.create = vi.fn().mockResolvedValue({ id: 'flag-1' });
+      replyRenderer.render.mockResolvedValue({
+        rendered: 'Mo dúpẹ́ pé o sọ ọ̀rọ̀ yìí fún mi.',
+        via: 'n-atlas-local',
+      });
       const { service } = await serviceWithSpy();
       const outcome = await service.generateAndApply({
         ...orchestrationInput,
@@ -598,9 +602,22 @@ describe('AiService.generateAndApply', () => {
         messageLanguage: 'yo',
       });
 
-      expect(replyRenderer.render).not.toHaveBeenCalled();
-      expect(outcome.result.message).toContain('you matter');
-      expect(outcome.notes.join(' ')).toContain('scripted safety message stays in its approved English wording');
+      expect(replyRenderer.render).toHaveBeenCalledWith(
+        expect.objectContaining({ language: 'yo' }),
+      );
+      const sent = replyRenderer.render.mock.calls[0][0] as {
+        englishReply: string;
+      };
+      expect(sent.englishReply).toContain('you matter');
+      expect(outcome.result.message).toBe('Mo dúpẹ́ pé o sọ ọ̀rọ̀ yìí fún mi.');
+      expect(outcome.result.render).toEqual({
+        language: 'yo',
+        via: 'n-atlas-local',
+        englishSource: sent.englishReply,
+      });
+      expect(outcome.notes.join(' ')).toContain(
+        'Reply rendered in Yoruba via n-atlas-local',
+      );
     });
   });
 
