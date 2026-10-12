@@ -103,7 +103,7 @@ describe('ReplyRendererService', () => {
     expect(outcome?.rendered).toBe('Mo wà níbí fún ọ.');
   });
 
-  it('falls back to OpenAI when the N-ATLaS render fails and meters with latency', async () => {
+  it('never calls OpenAI when the N-ATLaS render fails: returns null so the scripted line is used', async () => {
     completeText.mockRejectedValue(new NatlasUnavailableError('cold start'));
     let capturedBody: Record<string, unknown> | undefined;
     vi.stubGlobal(
@@ -121,17 +121,9 @@ describe('ReplyRendererService', () => {
 
     const outcome = await buildService().render(renderInput);
 
-    expect(outcome).toMatchObject({ rendered: 'Mo wà níbí fún ọ.', via: 'openai' });
-    expect(meter.record).toHaveBeenCalledWith('openai', {
-      inputTokens: 18,
-      outputTokens: 9,
-      latencyMs: expect.any(Number),
-    });
-    expect(capturedBody).toMatchObject({
-      model: 'gpt-5.6-luna',
-      max_completion_tokens: 400,
-    });
-    expect(capturedBody).not.toHaveProperty('response_format');
+    expect(outcome).toBeNull();
+    expect(capturedBody).toBeUndefined();
+    expect(meter.record).not.toHaveBeenCalledWith('openai', expect.anything());
   });
 
   it('returns null when every render lane fails — never throws', async () => {
@@ -149,12 +141,14 @@ describe('ReplyRendererService', () => {
   it('skips the N-ATLaS lane when it is not configured', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => jsonResponse(openAiBody('Rendered.'))),
+      // A real Yoruba render: renders must carry evidence of the target language.
+      vi.fn(async () => jsonResponse(openAiBody('Mo wà níbí pẹ̀lú rẹ.'))),
     );
 
     const outcome = await buildService(false).render(renderInput);
 
-    expect(outcome?.via).toBe('openai');
+    // N-ATLaS-only: no N-ATLaS call and no OpenAI render; the scripted line is used.
+    expect(outcome).toBeNull();
     expect(completeText).not.toHaveBeenCalled();
     expect(meter.record).not.toHaveBeenCalledWith(
       'n-atlas-local',

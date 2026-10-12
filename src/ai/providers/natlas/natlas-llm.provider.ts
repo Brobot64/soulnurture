@@ -4,7 +4,8 @@ import { AI_CONFIG } from '../../config/ai.config.js';
 import type { AiConfig } from '../../config/ai.config.js';
 
 /** Thrown for every N-ATLaS failure (unconfigured, unreachable, bad
- * payload). The translation lane catches this and falls back to OpenAI. */
+ * payload). The translation and render lanes catch this and fall back to the
+ * scripted in-language copy — OpenAI does not translate or render. */
 export class NatlasUnavailableError extends Error {
   override name = 'NatlasUnavailableError';
 
@@ -49,9 +50,12 @@ export class NatlasLlmProvider {
     return this.config.get<string>('NATLAS_LLM_API_KEY')?.trim() ?? '';
   }
 
+  /** `timeoutMs` defaults to the long budget; translation passes its own short
+   * deadline (natlasTranslateTimeoutMs) so the synchronous reply is not held. */
   async completeJson(
     systemPrompt: string,
     userContent: string,
+    timeoutMs: number = this.aiConfig.language.natlasTimeoutMs,
   ): Promise<NatlasCompletion> {
     const { content, usage } = await this.postChat(
       {
@@ -64,7 +68,7 @@ export class NatlasLlmProvider {
           { role: 'user', content: userContent },
         ],
       },
-      this.aiConfig.language.natlasTimeoutMs,
+      timeoutMs,
     );
 
     let raw: unknown;

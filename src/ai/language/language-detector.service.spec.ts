@@ -1,5 +1,13 @@
+import type { ConfigService } from '@nestjs/config';
+import type { AiConfig } from '../config/ai.config.js';
 import type { NatlasLlmProvider } from '../providers/natlas/natlas-llm.provider.js';
+import type { AiUsageMeterService } from '../providers/usage-meter.service.js';
 import { LanguageDetectorService } from './language-detector.service.js';
+
+const aiConfigStub = {
+  openai: { model: 'gpt-test' },
+  language: { identifyMaxOutputTokens: 64, natlasIdentifyTimeoutMs: 4_000 },
+} as unknown as AiConfig;
 
 describe('LanguageDetectorService', () => {
   let detector: LanguageDetectorService;
@@ -9,6 +17,9 @@ describe('LanguageDetectorService', () => {
     natlasLlm = { configured: false, completeLabel: vi.fn() };
     detector = new LanguageDetectorService(
       natlasLlm as unknown as NatlasLlmProvider,
+      { get: vi.fn().mockReturnValue(undefined) } as unknown as ConfigService,
+      { record: vi.fn().mockResolvedValue(undefined) } as unknown as AiUsageMeterService,
+      aiConfigStub,
     );
   });
 
@@ -146,7 +157,7 @@ describe('LanguageDetectorService', () => {
     });
 
     it('asks N-ATLaS when every heuristic is silent — Hausa without diacritics', async () => {
-      const text = 'Ina jin dadi amma ba zan iya sanya jin dadi ba';
+      const text = 'Ina so in yi magana da wani a gida';
       natlasLlm.completeLabel.mockResolvedValue({
         text: 'Language: Hausa\nMeaning: I am happy but I cannot hide my happiness.',
         usage: {},
@@ -170,7 +181,7 @@ describe('LanguageDetectorService', () => {
       });
 
       expect(
-        await detector.detect('Ina jin dadi amma ba zan iya sanya jin dadi ba'),
+        await detector.detect('Ina so in yi magana da wani a gida'),
       ).toEqual({ lang: 'ha', confidence: 'medium', method: 'model' });
     });
 
@@ -181,7 +192,7 @@ describe('LanguageDetectorService', () => {
       });
 
       expect(
-        await detector.detect('Ina jin dadi amma ba zan iya sanya jin dadi ba'),
+        await detector.detect('Ina so in yi magana da wani a gida'),
       ).toEqual({ lang: null, confidence: 'low', method: 'fallback' });
     });
 
@@ -224,7 +235,7 @@ describe('LanguageDetectorService', () => {
         usage: {},
       });
 
-      expect(await detector.detect('Ina jin dadi sosai yau')).toEqual({
+      expect(await detector.detect('Ina so in yi magana da wani a gida')).toEqual({
         lang: 'ha',
         confidence: 'medium',
         method: 'model',
@@ -277,7 +288,7 @@ describe('LanguageDetectorService', () => {
       natlasLlm.configured = false;
 
       expect(
-        await detector.detect('Ina jin dadi amma ba zan iya sanya ba'),
+        await detector.detect('Ina so in yi magana da wani a gida'),
       ).toEqual({ lang: null, confidence: 'low', method: 'fallback' });
       expect(natlasLlm.completeLabel).not.toHaveBeenCalled();
     });
@@ -286,7 +297,7 @@ describe('LanguageDetectorService', () => {
       natlasLlm.completeLabel.mockRejectedValue(new Error('cold start'));
 
       expect(
-        await detector.detect('Ina jin dadi amma ba zan iya sanya ba'),
+        await detector.detect('Ina so in yi magana da wani a gida'),
       ).toEqual({ lang: null, confidence: 'low', method: 'fallback' });
     });
 
@@ -297,7 +308,7 @@ describe('LanguageDetectorService', () => {
       });
 
       expect(
-        await detector.detect('Ina jin dadi amma ba zan iya sanya ba'),
+        await detector.detect('Ina so in yi magana da wani a gida'),
       ).toEqual({ lang: null, confidence: 'low', method: 'fallback' });
     });
   });

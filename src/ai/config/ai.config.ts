@@ -125,6 +125,10 @@ export interface AiConfig {
      * strictest of the three: it runs inside sendMessage before the reply
      * lane even starts, so on timeout the heuristics' verdict stands. */
     natlasIdentifyTimeoutMs: number;
+    /** Synchronous translation deadline. N-ATLaS is the only translator; a
+     * cold endpoint must not hold the reply, so past this the draft goes on the
+     * original text and the second safety pass runs later. */
+    natlasTranslateTimeoutMs: number;
     /** Strict output budget for the understanding contract (small JSON). */
     understandingMaxOutputTokens: number;
     /** Output budget for a rendered reply (the reply in another language). */
@@ -327,6 +331,9 @@ export function buildAiConfig(config: ConfigService): AiConfig {
       ),
       natlasIdentifyTimeoutMs: Number(
         config.get<string>('NATLAS_IDENTIFY_TIMEOUT_MS') ?? 4_000,
+      ),
+      natlasTranslateTimeoutMs: Number(
+        config.get<string>('NATLAS_TRANSLATE_TIMEOUT_MS') ?? 10_000,
       ),
       understandingMaxOutputTokens: 120,
       renderMaxOutputTokens: 400,

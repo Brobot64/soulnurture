@@ -57,6 +57,7 @@ import {
   type SupportedLanguage,
 } from './language/language.config.js';
 import { interimEnglishDirective } from './language/render.prompt.js';
+import { genericReplyLine } from './language/scripted-copy.js';
 import { ReplyRendererService } from './language/reply-renderer.service.js';
 import { NAtlasAsrProvider } from './providers/natlas/natlas-asr.provider.js';
 
@@ -82,6 +83,9 @@ export interface AiOrchestrationInput {
    * turn; the client never passes a language. Null falls back to the
    * student's standing preference, then English. */
   messageLanguage?: SupportedLanguage | null;
+  /** The saved student message this turn answers; excluded from history so it
+   * appears once, as the current turn. */
+  currentMessageId?: string | null;
   studentRef: string;
   classLabel: string | null;
   /** Guided-reply marker from the DTO; drives the directive selection. */
@@ -215,6 +219,7 @@ export class AiService {
       conversationId: input.conversationId,
       checkInId: input.checkInId,
       currentMessageText: input.userContent,
+      excludeMessageId: input.currentMessageId ?? null,
     });
 
     // Guided-mode directives. An OPEN support flag on the conversation
@@ -268,6 +273,32 @@ export class AiService {
     // below still evaluates the RAW userContent — safety is never truncated.
     const sanitized = this.guardrail.sanitizeInput(input.userContent);
 
+    // Translate, then draft. In the English-draft mode a non-English message is
+    // translated by N-ATLaS first, and OpenAI drafts the reply from that English
+    // — not from the raw text. The raw text still goes to the intent engine
+    // below, so keyword safety never depends on the translation.
+    const translationNotes: string[] = [];
+    let draftSource = sanitized.content;
+    if (renderActive) {
+      try {
+        const { understanding } = await this.understandingProvider.understand({
+          text: input.userContent,
+          language: replyLanguage,
+        });
+        draftSource = this.guardrail.sanitizeInput(
+          understanding.englishTranslation,
+        ).content;
+        translationNotes.push(
+          `Drafted from the English translation (via ${understanding.via}).`,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        translationNotes.push(
+          `Translation unavailable; drafted from the original message (${message}).`,
+        );
+      }
+    }
+
     const systemPrompt = [
       SYSTEM_PROMPT,
       `Prompt version: ${REFLECTION_PROMPT_VERSION}`,
@@ -277,7 +308,8 @@ export class AiService {
       ...guidedLines,
       `Valid supportFlag.category values: ${CANONICAL_CATEGORIES.join(', ')}`,
       `Valid supportFlag.severity values: ${CANONICAL_SEVERITIES.join(', ')}`,
-      `Approved context JSON: ${JSON.stringify(ctx)}`,
+      // History travels once, as the messages array below — not twice.
+      `Approved context JSON: ${JSON.stringify({ ...ctx, recentConversation: undefined })}`,
       ...(sanitized.injected
         ? [this.guardrail.promptHardeningLine()]
         : []),
@@ -288,9 +320,14 @@ export class AiService {
         role: (m.role === 'USER' ? 'user' : 'assistant') as
           | 'user'
           | 'assistant',
-        content: m.content,
+        // Non-English turns are tagged so the model can see the language each
+        // turn was in; English is the default and stays untagged.
+        content:
+          m.language && m.language !== 'en'
+            ? `[${LANGUAGE_DISPLAY_NAMES[m.language as SupportedLanguage] ?? m.language}] ${m.content}`
+            : m.content,
       })),
-      { role: 'user' as const, content: sanitized.content },
+      { role: 'user' as const, content: draftSource },
     ];
 
     let raw: unknown;
@@ -317,7 +354,11 @@ export class AiService {
       aiResult: result,
     });
 
-    const notes: string[] = [...sanitized.notes, ...filtered.notes];
+    const notes: string[] = [
+      ...sanitized.notes,
+      ...translationNotes,
+      ...filtered.notes,
+    ];
     if (verdict) {
       notes.push(
         ...(await applyIntentVerdict(verdict, {
@@ -332,6 +373,7 @@ export class AiService {
           relevantResources: ctx.relevantResources,
           flagAlerts: this.flagAlerts,
           alertLanguage: replyLanguage,
+          replyLanguage,
         })),
       );
     }
@@ -350,14 +392,28 @@ export class AiService {
     result.asyncState = 'COMPLETE';
 
     // Render lane (n-atlas-translate): the finished English reply is rendered
-    // into the turn's language within this same request — the dominant rule
-    // (reply in the language of the message) applies to scripted safety copy
-    // too, so a student writing Hausa gets the safety line in Hausa, not
-    // generic English. Total render failure keeps the English reply
-    // (enhancement, never a blocker).
-    if (renderActive) {
+    // into the turn's language within this same request (enhancement on the
+    // happy path, never a blocker).
+    //
+    // Acute copy is NOT live-translated: a SAFETY_MESSAGE verdict already put
+    // the pre-approved in-language line on the result (intent-executors), so
+    // the crisis line never depends on a translator being up. If every render
+    // lane fails, the student still gets a scripted line in their language —
+    // never the English reply.
+    const safetyAction = verdict?.actions.find((a) => a.type === 'SAFETY_MESSAGE');
+    if (renderActive && safetyAction?.type === 'SAFETY_MESSAGE') {
+      result.render = {
+        language: replyLanguage,
+        via: 'scripted',
+        englishSource: safetyAction.message,
+      };
+      notes.push(
+        `Scripted ${LANGUAGE_DISPLAY_NAMES[replyLanguage]} safety copy applied; no live translation.`,
+      );
+    } else if (renderActive) {
+      const englishReply = result.message;
       const rendered = await this.replyRenderer.render({
-        englishReply: result.message,
+        englishReply,
         language: replyLanguage,
         contextLines: [
           `Student: ${input.studentRef}${input.classLabel ? ` (${input.classLabel})` : ''}`,
@@ -368,14 +424,22 @@ export class AiService {
         result.render = {
           language: replyLanguage,
           via: rendered.via,
-          englishSource: result.message,
+          englishSource: englishReply,
         };
         result.message = rendered.rendered;
         notes.push(
           `Reply rendered in ${LANGUAGE_DISPLAY_NAMES[replyLanguage]} via ${rendered.via}.`,
         );
       } else {
-        notes.push('Reply render unavailable; kept the English reply.');
+        result.message = genericReplyLine(replyLanguage);
+        result.render = {
+          language: replyLanguage,
+          via: 'scripted',
+          englishSource: englishReply,
+        };
+        notes.push(
+          `Reply render unavailable; sent the scripted ${LANGUAGE_DISPLAY_NAMES[replyLanguage]} reply.`,
+        );
       }
     }
 
@@ -544,7 +608,7 @@ export class AiService {
   /**
    * Vernacular understanding (Phase C step 4). The worker's VERNACULAR lane
    * calls this for every non-English USER message: the translation lane
-   * (local N-ATLaS → OpenAI fallback) produces a strict understanding, which
+   * (N-ATLaS only) produces a strict understanding, which
    * is merged onto the message's aiPayload. When the synchronous first pass
    * did not flag, the intent engine re-runs on the ENGLISH TRANSLATION as a
    * second safety sweep — a crisis phrase invisible to the keyword floor in

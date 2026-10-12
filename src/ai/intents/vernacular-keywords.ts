@@ -40,7 +40,16 @@ export const VERNACULAR_KEYWORDS: Record<string, VernacularKeyword[]> = {
       gloss: 'my life is over (no diacritics)',
     },
     { term: 'ina son in mutu', language: 'ha', gloss: 'I want to die' },
+    // Live N-ATLaS check: "ina so in mutu" was mis-identified as Yoruba and
+    // matched no keyword. Drafted variants, PENDING_CLINICAL_REVIEW.
+    { term: 'ina so in mutu', language: 'ha', gloss: 'I want to die' },
+    { term: 'ina so mutuwa', language: 'ha', gloss: 'I want death' },
+    { term: 'ina son mutuwa', language: 'ha', gloss: 'I want death' },
     { term: 'in kashe kaina', language: 'ha', gloss: 'I will kill myself' },
+    { term: 'zan kashe kaina', language: 'ha', gloss: 'I will kill myself' },
+    { term: 'mo fẹ́ pa ara mi', language: 'yo', gloss: 'I want to kill myself' },
+    { term: 'mo fe pa ara mi', language: 'yo', gloss: 'I want to kill myself (no diacritics)' },
+    { term: 'i wan kill myself', language: 'pcm', gloss: 'I want to kill myself' },
     { term: 'na gaji da rayuwa', language: 'ha', gloss: 'I am tired of life' },
     { term: 'achọrọ m ịnwụ', language: 'ig', gloss: 'I want to die' },
     {
@@ -113,6 +122,13 @@ export const VERNACULAR_KEYWORDS: Record<string, VernacularKeyword[]> = {
       language: 'ig',
       gloss: 'hurt myself (harmful act, no diacritics)',
     },
+    // Igbo verb prefixes ("e-meru") are not separate words, so whole-word
+    // matching would miss them: the prefixed forms are listed explicitly.
+    {
+      term: 'emeru onwe m ahu',
+      language: 'ig',
+      gloss: 'hurt myself (harmful act, prefixed, no diacritics)',
+    },
     {
       term: 'cuci kaina',
       language: 'ha',
@@ -156,6 +172,9 @@ export const VERNACULAR_KEYWORDS: Record<string, VernacularKeyword[]> = {
     { term: 'my heart dey beat fast', language: 'pcm', gloss: 'my heart is racing' },
   ],
   PROLONGED_LOW_MOOD: [
+    // Eval ES-15 — drafted, PENDING_CLINICAL_REVIEW.
+    { term: 'babu wanda ya damu da ni', language: 'ha', gloss: 'nobody cares about me' },
+    { term: 'bakin ciki kullum', language: 'ha', gloss: 'sad every day' },
     { term: 'ìrètí mi kò sí', language: 'yo', gloss: 'I have no hope' },
     { term: 'ireti mi ko si', language: 'yo', gloss: 'I have no hope (no diacritics)' },
     { term: 'inú mi kò dùn', language: 'yo', gloss: 'I am unhappy' },
@@ -187,6 +206,14 @@ export const VERNACULAR_KEYWORDS: Record<string, VernacularKeyword[]> = {
   // drafted to match the vernacular-corpus.ts fixture rows; every term and
   // gloss is PENDING_NATIVE_REVIEW like the rest of this file.
   ABUSE_DISCLOSURE: [
+    // Eval ES-11 / ES-20 / ES-36 — drafted, PENDING_CLINICAL_REVIEW.
+    { term: 'mahaifina yana cin zarafina', language: 'ha', gloss: 'my father is abusing me' },
+    { term: 'cin zarafina kullum', language: 'ha', gloss: 'abusing me every day' },
+    { term: 'ẹ má sọ fún ẹnikẹ́ni', language: 'yo', gloss: "don't tell anyone (said to you)" },
+    { term: 'maa ń lù mí', language: 'yo', gloss: 'he keeps beating me' },
+    { term: 'máa ń lù mí', language: 'yo', gloss: 'he keeps beating me' },
+    { term: 'na-ata m ahụhụ', language: 'ig', gloss: 'someone is hurting me' },
+    { term: 'na-ata m ahuhu', language: 'ig', gloss: 'someone is hurting me (no diacritics)' },
     {
       term: 'kí n má sọ fún ẹnikẹ́ni',
       language: 'yo',
@@ -506,4 +533,15 @@ for (const [intentId, entries] of Object.entries(VERNACULAR_KEYWORDS)) {
 /** Terms merged into the given intent's server keyword list. */
 export function vernacularKeywordsFor(intentId: string): string[] {
   return (VERNACULAR_KEYWORDS[intentId] ?? []).map((entry) => entry.term);
+}
+
+const GLOSS_BY_TERM = new Map(
+  Object.values(VERNACULAR_KEYWORDS)
+    .flat()
+    .map((entry) => [entry.term, entry.gloss] as const),
+);
+
+/** English meaning of a vernacular keyword, for the staff-facing summary. */
+export function vernacularGloss(term: string): string | null {
+  return GLOSS_BY_TERM.get(term) ?? null;
 }

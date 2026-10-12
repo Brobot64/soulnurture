@@ -10,6 +10,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AI_PROVIDER } from './providers/ai-provider.interface.js';
 import { IntentEngineService } from './intents/intent-engine.service.js';
+import { genericReplyLine, SCRIPTED_SAFETY } from './language/scripted-copy.js';
 import { MemoryRepository } from './memory/memory.repository.js';
 import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js';
 import { NAtlasAsrProvider } from './providers/natlas/natlas-asr.provider.js';
@@ -538,16 +539,36 @@ describe('AiService.generateAndApply', () => {
       );
     });
 
-    it('keeps the English reply when every render lane fails', async () => {
+    it('sends the scripted in-language reply, never English, when every render lane fails', async () => {
+      replyRenderer.render.mockResolvedValue(null);
       const { service } = await serviceWithSpy();
       const outcome = await service.generateAndApply({
         ...orchestrationInput,
         messageLanguage: 'yo',
       });
 
-      expect(outcome.result.message).toBe('hello');
-      expect(outcome.result.render).toBeUndefined();
-      expect(outcome.notes.join(' ')).toContain('Reply render unavailable; kept the English reply.');
+      expect(outcome.result.message).toBe(genericReplyLine('yo'));
+      expect(outcome.result.render).toEqual({
+        language: 'yo',
+        via: 'scripted',
+        englishSource: 'hello',
+      });
+      expect(outcome.notes.join(' ')).toContain('Reply render unavailable; sent the scripted Yoruba reply.');
+    });
+
+    it('a Hausa acute turn gets the approved Hausa crisis line with no live translation', async () => {
+      prisma.supportFlag.findFirst = vi.fn().mockResolvedValue(null);
+      prisma.supportFlag.create = vi.fn().mockResolvedValue({ id: 'flag-2' });
+      const { service } = await serviceWithSpy();
+      const outcome = await service.generateAndApply({
+        ...orchestrationInput,
+        userContent: 'I want to kill myself and end it all',
+        messageLanguage: 'ha',
+      });
+
+      expect(replyRenderer.render).not.toHaveBeenCalled();
+      expect(outcome.result.message).toBe(SCRIPTED_SAFETY.SUICIDAL_IDEATION?.ha);
+      expect(outcome.result.render).toMatchObject({ language: 'ha', via: 'scripted' });
     });
 
     it('does not render for an English turn', async () => {
@@ -588,13 +609,9 @@ describe('AiService.generateAndApply', () => {
       expect(sent.systemPrompt).not.toContain('REPLY FULLY in Yoruba');
     });
 
-    it('renders scripted safety copy into the detected language like any reply', async () => {
+    it('uses the approved scripted Yoruba safety line for acute copy, not a live translation', async () => {
       prisma.supportFlag.findFirst = vi.fn().mockResolvedValue(null);
       prisma.supportFlag.create = vi.fn().mockResolvedValue({ id: 'flag-1' });
-      replyRenderer.render.mockResolvedValue({
-        rendered: 'Mo dúpẹ́ pé o sọ ọ̀rọ̀ yìí fún mi.',
-        via: 'n-atlas-local',
-      });
       const { service } = await serviceWithSpy();
       const outcome = await service.generateAndApply({
         ...orchestrationInput,
@@ -602,22 +619,153 @@ describe('AiService.generateAndApply', () => {
         messageLanguage: 'yo',
       });
 
-      expect(replyRenderer.render).toHaveBeenCalledWith(
-        expect.objectContaining({ language: 'yo' }),
-      );
-      const sent = replyRenderer.render.mock.calls[0][0] as {
-        englishReply: string;
-      };
-      expect(sent.englishReply).toContain('you matter');
-      expect(outcome.result.message).toBe('Mo dúpẹ́ pé o sọ ọ̀rọ̀ yìí fún mi.');
-      expect(outcome.result.render).toEqual({
+      expect(replyRenderer.render).not.toHaveBeenCalled();
+      expect(outcome.result.message).toBe(SCRIPTED_SAFETY.SUICIDAL_IDEATION?.yo);
+      expect(outcome.result.render).toMatchObject({
         language: 'yo',
-        via: 'n-atlas-local',
-        englishSource: sent.englishReply,
+        via: 'scripted',
+        englishSource: expect.stringContaining('you matter'),
       });
-      expect(outcome.notes.join(' ')).toContain(
-        'Reply rendered in Yoruba via n-atlas-local',
+      expect(outcome.notes.join(' ')).toContain('Scripted Yoruba safety copy applied');
+    });
+  });
+
+  describe('history and the current turn in the model prompt', () => {
+    it('sends history once as messages, not again inside the JSON context', async () => {
+      const generateResponse = vi.fn().mockResolvedValue(validModelResult());
+      const module = await createModule(
+        { generateResponse, transcribeAudio: async () => ({ text: 'x' }) },
+        aiConfigStub,
+        { ...ctx, recentConversation: [{ role: 'USER', content: 'earlier', language: null }] } as typeof ctx,
       );
+      await module.get(AiService).generateAndApply({
+        ...orchestrationInput,
+        userContent: 'hi',
+        currentMessageId: 'cur-1',
+      });
+
+      const sent = generateResponse.mock.calls[0][0] as {
+        systemPrompt: string;
+        messages: { role: string; content: string }[];
+      };
+      expect(sent.messages.map((m) => m.content)).toEqual(['earlier', 'hi']);
+      expect(sent.systemPrompt).not.toContain('"recentConversation"');
+    });
+
+    it('tags a vernacular history message with its language and leaves English untagged', async () => {
+      const generateResponse = vi.fn().mockResolvedValue(validModelResult());
+      const module = await createModule(
+        { generateResponse, transcribeAudio: async () => ({ text: 'x' }) },
+        aiConfigStub,
+        {
+          ...ctx,
+          recentConversation: [
+            { role: 'USER', content: 'Ina jin tsoro', language: 'ha' },
+            { role: 'ASSISTANT', content: 'I hear you', language: 'en' },
+          ],
+        } as typeof ctx,
+      );
+      await module.get(AiService).generateAndApply({ ...orchestrationInput, userContent: 'ok' });
+
+      const sent = generateResponse.mock.calls[0][0] as {
+        messages: { content: string }[];
+      };
+      expect(sent.messages.map((m) => m.content)).toEqual([
+        '[Hausa] Ina jin tsoro',
+        'I hear you',
+        'ok',
+      ]);
+    });
+  });
+
+  describe('translate, then draft in English (n-atlas-translate)', () => {
+    const translateConfig = {
+      ...aiConfigStub,
+      language: {
+        ...aiConfigStub.language,
+        vernacularReplyMode: 'n-atlas-translate' as const,
+      },
+    };
+
+    async function serviceWithSpy(config: AiConfig = translateConfig) {
+      const generateResponse = vi.fn().mockResolvedValue(validModelResult());
+      const module = await createModule(
+        { generateResponse, transcribeAudio: async () => ({ text: 'x' }) },
+        config,
+      );
+      return { service: module.get(AiService), generateResponse };
+    }
+
+    it('drafts the reply from the N-ATLaS English translation, not the raw message', async () => {
+      understandingProvider.understand.mockResolvedValue(
+        understandingOutcome({ englishTranslation: 'I am tired of school.', lang: 'ha' }),
+      );
+      const { service, generateResponse } = await serviceWithSpy();
+
+      const outcome = await service.generateAndApply({
+        ...orchestrationInput,
+        userContent: 'Ina gajiya da makaranta',
+        messageLanguage: 'ha',
+      });
+
+      expect(understandingProvider.understand).toHaveBeenCalledWith({
+        text: 'Ina gajiya da makaranta',
+        language: 'ha',
+      });
+      const sent = generateResponse.mock.calls[0][0] as {
+        messages: { role: string; content: string }[];
+      };
+      expect(sent.messages.at(-1)?.content).toBe('I am tired of school.');
+      expect(sent.messages.map((m) => m.content)).not.toContain('Ina gajiya da makaranta');
+      expect(outcome.notes.join(' ')).toContain('Drafted from the English translation');
+    });
+
+    it('does not translate an English turn', async () => {
+      const { service, generateResponse } = await serviceWithSpy();
+
+      await service.generateAndApply({
+        ...orchestrationInput,
+        userContent: 'I am tired of school',
+        messageLanguage: 'en',
+      });
+
+      expect(understandingProvider.understand).not.toHaveBeenCalled();
+      const sent = generateResponse.mock.calls[0][0] as {
+        messages: { content: string }[];
+      };
+      expect(sent.messages.at(-1)?.content).toBe('I am tired of school');
+    });
+
+    it('falls back to the original message when translation fails, and says so', async () => {
+      understandingProvider.understand.mockRejectedValue(new Error('translation down'));
+      const { service, generateResponse } = await serviceWithSpy();
+
+      const outcome = await service.generateAndApply({
+        ...orchestrationInput,
+        userContent: 'Ina gajiya da makaranta',
+        messageLanguage: 'ha',
+      });
+
+      const sent = generateResponse.mock.calls[0][0] as {
+        messages: { content: string }[];
+      };
+      expect(sent.messages.at(-1)?.content).toBe('Ina gajiya da makaranta');
+      expect(outcome.notes.join(' ')).toContain('Translation unavailable; drafted from the original message');
+    });
+
+    it('does not translate in the openai-native mode, where the model writes the language itself', async () => {
+      const { service } = await serviceWithSpy({
+        ...translateConfig,
+        language: { ...translateConfig.language, vernacularReplyMode: 'openai-native' },
+      } as unknown as AiConfig);
+
+      await service.generateAndApply({
+        ...orchestrationInput,
+        userContent: 'Ina gajiya da makaranta',
+        messageLanguage: 'ha',
+      });
+
+      expect(understandingProvider.understand).not.toHaveBeenCalled();
     });
   });
 

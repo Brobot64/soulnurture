@@ -352,6 +352,10 @@ model Conversation {
   studentId String             @db.Uuid
   checkInId String?            @db.Uuid
   source    String?
+  /// Last confident language used in this conversation. A silent message
+  /// (short / unmarked text) continues this language instead of snapping back
+  /// to the student's preference. null until the first confident detection.
+  language  String?
   status    ConversationStatus @default(ACTIVE)
   createdAt DateTime           @default(now())
   updatedAt DateTime           @updatedAt
@@ -381,6 +385,10 @@ model ConversationMessage {
   /// transcript is posted as plain content; this flag keeps the two lanes
   /// distinguishable server-side). Pilot-analytics signal only.
   viaVoice            Boolean     @default(false)
+  /// Language this turn was in (student's message: detected language; reply:
+  /// the language it was written in). Lets history show the model each
+  /// turn's language. null on messages written before this column existed.
+  language            String?
   aiPayload           Json?
   activeExerciseLabel String?
   createdAt           DateTime @default(now())

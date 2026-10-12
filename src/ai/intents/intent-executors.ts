@@ -4,7 +4,10 @@ import type { PrismaService } from '../../prisma/prisma.service.js';
 import type { AuditService } from '../../audit/audit.service.js';
 import type { AiGenerationResult } from '../providers/ai-provider.interface.js';
 import type { AiContext } from '../context/ai-context.service.js';
+import { LANGUAGE_DISPLAY_NAMES } from '../language/language.config.js';
 import type { SupportedLanguage } from '../language/language.config.js';
+import { safetyLine } from '../language/scripted-copy.js';
+import { vernacularGloss } from './vernacular-keywords.js';
 import type { SupportFlagAlertsService } from '../../support-flags/support-flag-alerts.service.js';
 import type { IntentAction } from './intents.config.js';
 import type { IntentVerdict } from './intent-engine.service.js';
@@ -44,6 +47,9 @@ export interface IntentApplyContext {
    * [messageLanguage, preferredLanguage] → 'en'; the alert falls back to the
    * standing preference, then English, when absent. */
   alertLanguage?: SupportedLanguage;
+  /** The turn's reply language. SAFETY_MESSAGE uses the pre-approved line for
+   * it; absent or 'en' keeps the English copy. */
+  replyLanguage?: SupportedLanguage;
 }
 
 const logger = new Logger('IntentExecutors');
@@ -147,9 +153,15 @@ const HUMAN_SUPPORT_PROMPT_EXECUTOR: IntentExecutor = {
 
 const SAFETY_MESSAGE_EXECUTOR: IntentExecutor = {
   type: 'SAFETY_MESSAGE',
-  async execute(action, _verdict, ctx, notes) {
+  async execute(action, verdict, ctx, notes) {
     if (action.type !== 'SAFETY_MESSAGE') return;
-    ctx.result.message = action.message;
+    // Pre-approved in-language line for the turn's language; English original
+    // when there is none (English turns, or an intent without a translation).
+    ctx.result.message = safetyLine(
+      verdict.intentId,
+      ctx.replyLanguage ?? 'en',
+      action.message,
+    );
     notes.push('Scripted safety message applied (server-side, model wording not trusted for acute risk).');
   },
 };
@@ -273,6 +285,17 @@ export async function applyIntentVerdict(
   return notes;
 }
 
+/** Staff-facing risk labels. The stored severity stays TIER_1/2/3; this is the
+ * wording a professional reads. */
+const RISK_LABELS: Record<SupportFlagSeverity, string> = {
+  TIER_1_MODERATE: 'MONITOR',
+  TIER_2_HIGH: 'HIGH',
+  TIER_3_ACUTE: 'IMMEDIATE',
+};
+
+/** English summary for the professional — always English, whatever the
+ * student's language. Vernacular phrases carry their English meaning; the
+ * student's own words stay verbatim (truncated) as the evidence. */
 function flagSummary(verdict: IntentVerdict, ctx: IntentApplyContext): string {
   const excerpt = ctx.userContent.slice(0, 180).replace(/\s+/g, ' ').trim();
   const studentLine = `Student ${ctx.studentRef ?? 'Unknown'}${
@@ -281,9 +304,17 @@ function flagSummary(verdict: IntentVerdict, ctx: IntentApplyContext): string {
   const descriptionLine = verdict.intentDescription
     ? `${verdict.intentDescription} `
     : '';
+  const riskLine = `Risk: ${RISK_LABELS[verdict.severity]}. `;
+  const language = ctx.replyLanguage ?? ctx.alertLanguage;
+  const languageLine = language ? `Language: ${LANGUAGE_DISPLAY_NAMES[language]}. ` : '';
   const keywordLine = verdict.keywordEvidence.length
-    ? `Matched keywords: ${verdict.keywordEvidence.join(', ')}. `
+    ? `Matched: ${verdict.keywordEvidence.map(describePhrase).join(', ')}. `
     : '';
   const actionLine = `Actions: ${verdict.actions.map((a) => String(a.type)).join(', ')}.`;
-  return `${studentLine}${descriptionLine}Detected by ${verdict.matchedBy}. ${keywordLine}Student message: "${excerpt}". ${actionLine}`;
+  return `${studentLine}${descriptionLine}${riskLine}Detected by ${verdict.matchedBy}. ${languageLine}${keywordLine}Student message: "${excerpt}". ${actionLine}`;
+}
+
+function describePhrase(term: string): string {
+  const gloss = vernacularGloss(term);
+  return gloss ? `"${term}" (meaning: ${gloss})` : `"${term}"`;
 }

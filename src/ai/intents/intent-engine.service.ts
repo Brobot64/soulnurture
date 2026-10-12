@@ -51,7 +51,7 @@ export class IntentEngineService {
     userContent: string;
     aiResult: AiGenerationResult;
   }): IntentVerdict | null {
-    const lowered = (input.userContent ?? '').toLowerCase();
+    const haystack = normalizeForMatch(input.userContent ?? '');
     const modelFlag = input.aiResult?.supportFlag;
     const modelCategory =
       modelFlag?.category && modelFlag.category !== 'NONE'
@@ -63,7 +63,7 @@ export class IntentEngineService {
     const keywordMatches: { intent: IntentDefinition; evidence: string[] }[] = [];
     for (const intent of INTENTS) {
       const evidence = intent.serverSignals.keywords.filter((keyword) =>
-        lowered.includes(keyword),
+        containsPhrase(haystack, keyword),
       );
       if (evidence.length > 0) keywordMatches.push({ intent, evidence });
     }
@@ -139,6 +139,33 @@ export class IntentEngineService {
 
     return null;
   }
+}
+
+/**
+ * Match-time normalisation, applied to both the student's text and every
+ * keyword: lowercase, curly apostrophes straightened, combining marks stripped
+ * (so "mo fẹ́ pa ara mi" and "mo fe pa ara mi" are the same phrase), whitespace
+ * collapsed. Keyword lists stay in their written form.
+ */
+export function normalizeForMatch(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[’‘]/g, "'")
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Whole-phrase match: the phrase must not be part of a longer word, so
+ * "wish i was dead" does not fire inside "wish i was deadline". */
+export function containsPhrase(haystack: string, phrase: string): boolean {
+  const needle = normalizeForMatch(phrase);
+  if (!needle) return false;
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'u').test(
+    haystack,
+  );
 }
 
 function maxSeverity(
