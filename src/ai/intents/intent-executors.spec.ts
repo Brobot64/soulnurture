@@ -59,6 +59,42 @@ describe('applyIntentVerdict', () => {
     auditService = { log: vi.fn().mockResolvedValue({ id: 'audit-1' }) };
   });
 
+  it('writes an English summary with the risk level, the message language and the phrase gloss (items 9–10)', async () => {
+    prisma.supportFlag.findFirst.mockResolvedValue(null);
+    prisma.supportFlag.create.mockResolvedValue({ id: 'flag-2' });
+
+    await applyIntentVerdict(
+      verdict({ keywordEvidence: ['in kashe kaina'] }),
+      context(prisma, auditService, {
+        userContent: 'Ina jin kamar in kashe kaina',
+        replyLanguage: 'ha',
+      }),
+    );
+
+    const summary = (prisma.supportFlag.create.mock.calls[0][0].data as {
+      aiContextSummary: string;
+    }).aiContextSummary;
+    expect(summary).toContain('Risk: IMMEDIATE');
+    expect(summary).toContain('Language: Hausa');
+    expect(summary).toContain('"in kashe kaina" (meaning: I will kill myself)');
+    expect(summary).toContain('Student message: "Ina jin kamar in kashe kaina"');
+  });
+
+  it('maps the risk tiers to LOW/MONITOR/HIGH/IMMEDIATE labels', async () => {
+    prisma.supportFlag.findFirst.mockResolvedValue(null);
+    prisma.supportFlag.create.mockResolvedValue({ id: 'flag-3' });
+
+    await applyIntentVerdict(
+      verdict({ severity: 'TIER_2_HIGH', keywordEvidence: [] }),
+      context(prisma, auditService),
+    );
+
+    const summary = (prisma.supportFlag.create.mock.calls[0][0].data as {
+      aiContextSummary: string;
+    }).aiContextSummary;
+    expect(summary).toContain('Risk: HIGH');
+  });
+
   it('persists the SUPPORT_FLAG with intent binding, reason and audit', async () => {
     prisma.supportFlag.findFirst.mockResolvedValue(null);
     prisma.supportFlag.create.mockResolvedValue({ id: 'flag-1' });

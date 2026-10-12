@@ -14,6 +14,8 @@ import { GuardrailService } from '../ai/guardrails/guardrail.service.js';
 import { applyIntentVerdict } from '../ai/intents/intent-executors.js';
 import { LanguageDetectorService } from '../ai/language/language-detector.service.js';
 import type { SupportedLanguage } from '../ai/language/language.config.js';
+import { resolveTurnLanguage } from '../ai/language/turn-language.js';
+import { holdingLine } from '../ai/language/scripted-copy.js';
 import { AI_CONFIG } from '../ai/config/ai.config.js';
 import type { AiConfig } from '../ai/config/ai.config.js';
 import type { AiGenerationResult } from '../ai/providers/ai-provider.interface.js';
@@ -227,6 +229,29 @@ export class ConversationsService {
         ? { detected: detectedLanguage, current: student.preferredLanguage }
         : null;
 
+    // Per-turn reply language: this message's detection, else the language
+    // this conversation is already using, else the preference. A confident
+    // detection becomes the conversation's language, so later silent messages
+    // ("ok", short unmarked text) keep replying in it.
+    const turnLanguage = resolveTurnLanguage({
+      detected: detection.lang,
+      conversationLanguage: conversation.language,
+      preferredLanguage: student.preferredLanguage,
+    });
+    // Low-confidence reads (code-switched text) reply in their language for
+    // this turn only; they never change the conversation's language.
+    const confident = detection.confidence !== 'low';
+    if (
+      confident &&
+      detection.lang !== null &&
+      detection.lang !== conversation.language
+    ) {
+      await this.prisma.conversation.update({
+        where: { id: conversation.id },
+        data: { language: detection.lang },
+      });
+    }
+
     const userMessage = await this.prisma.conversationMessage.create({
       data: {
         conversationId: conversation.id,
@@ -234,6 +259,7 @@ export class ConversationsService {
         content: dto.content,
         quickReply: dto.quickReply ?? null,
         viaVoice: dto.viaVoice ?? false,
+        language: turnLanguage,
       },
     });
 
@@ -265,7 +291,8 @@ export class ConversationsService {
       conversationId: conversation.id,
       checkInId: conversation.checkInId,
       userContent: dto.content,
-      messageLanguage: detection.lang,
+      messageLanguage: turnLanguage,
+      currentMessageId: userMessage.id,
       studentRef: student.displayName ?? student.firstName ?? 'Student',
       classLabel: student.classLabel ?? null,
       quickReply: dto.quickReply ?? null,
@@ -292,6 +319,9 @@ export class ConversationsService {
         conversationId: conversation.id,
         role: MessageRole.ASSISTANT,
         content: aiResult.message,
+        // The language this reply is actually written in (a render may have
+        // moved it off the turn language, e.g. a scripted line).
+        language: aiResult.render?.language ?? turnLanguage,
         aiPayload: {
           ...aiResult,
           applicationNotes: outcome.notes,
@@ -327,7 +357,12 @@ export class ConversationsService {
     // store understanding → second intent sweep on the English translation).
     // Queued after the outcome so the job knows whether the first pass
     // already flagged (skips the second sweep when it did).
-    if (detectedLanguage) {
+    // Every non-English turn gets the translation sweep: a confident detection,
+    // or — for a silent message — the language the conversation is using. A
+    // silent message is not a skipped safety check.
+    const understandingLanguage: SupportedLanguage | null =
+      detectedLanguage ?? (turnLanguage !== 'en' ? turnLanguage : null);
+    if (understandingLanguage) {
       await this.prisma.aiGenerationJob.create({
         data: {
           kind: 'VERNACULAR',
@@ -337,7 +372,7 @@ export class ConversationsService {
             conversationId: conversation.id,
             studentRef: orchestrationInput.studentRef,
             classLabel: orchestrationInput.classLabel,
-            language: detectedLanguage,
+            language: understandingLanguage,
             firstPassFlagged: Boolean(outcome.verdict),
           } as unknown as Prisma.InputJsonValue,
         },
@@ -349,7 +384,7 @@ export class ConversationsService {
         entityId: userMessage.id,
         meta: {
           conversationId: conversation.id,
-          language: detectedLanguage,
+          language: understandingLanguage,
           detectedBy: detection.method,
           confidence: detection.confidence,
           firstPassFlagged: Boolean(outcome.verdict),
@@ -415,7 +450,12 @@ export class ConversationsService {
   private async holdAndQueue(
     input: AiOrchestrationInput,
   ): Promise<LaneOutcome> {
-    const placeholder = holdingResult(this.aiConfig.async.holdingMessage);
+    // Holding reply and any acute copy follow the turn's language — the
+    // degraded lane must not answer a Hausa student in English.
+    const language: SupportedLanguage = input.messageLanguage ?? 'en';
+    const placeholder = holdingResult(
+      holdingLine(language, this.aiConfig.async.holdingMessage),
+    );
     const verdict = this.intentEngine.evaluate({
       userContent: input.userContent,
       aiResult: placeholder,
@@ -423,18 +463,10 @@ export class ConversationsService {
 
     let notes: string[] = [];
     if (verdict) {
-      // Acute flags only: resolve the alert language from the message itself
-      // (dominant rule). Detection must never break this degraded lane.
-      let alertLanguage: SupportedLanguage | undefined;
-      if (verdict.severity === 'TIER_3_ACUTE') {
-        try {
-          alertLanguage =
-            (await this.languageDetector.detect(input.userContent)).lang ??
-            undefined;
-        } catch {
-          alertLanguage = undefined;
-        }
-      }
+      // The turn language already resolved this message's language (or the
+      // conversation's), so the degraded lane does not re-run detection.
+      const alertLanguage: SupportedLanguage | undefined =
+        input.messageLanguage ?? undefined;
       notes = await applyIntentVerdict(verdict, {
         prisma: this.prisma,
         auditService: this.auditService,
@@ -447,6 +479,7 @@ export class ConversationsService {
         relevantResources: emptyContext().relevantResources,
         flagAlerts: this.flagAlerts,
         alertLanguage,
+        replyLanguage: language,
       });
     }
 

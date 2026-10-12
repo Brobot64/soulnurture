@@ -83,7 +83,8 @@ export const FRANC_TO_LANGUAGE: Record<string, SupportedLanguage> = {
  * to the next detection stage instead of guessing.
  */
 export const DIACRITIC_SETS: Record<'yo' | 'ha' | 'ig', readonly string[]> = {
-  yo: ['ẹ', 'ọ', 'ṣ'],
+  // 'ń' is Yoruba-only (Igbo uses 'ṅ'); 'ọ' and tonal marks are shared with Igbo.
+  yo: ['ẹ', 'ọ', 'ṣ', 'ń'],
   ha: ['ƙ', 'ɓ', 'ɗ'],
   ig: ['ị', 'ọ', 'ụ', 'ṅ'],
 };
@@ -98,6 +99,7 @@ export const PIDGIN_MARKERS = [
   'abeg',
   'dey',
   'wetin',
+  'wey',
   'sabi',
   'wahala',
   'sha',
@@ -124,10 +126,39 @@ export const PIDGIN_MARKER_PHRASES = [
   'small small',
   'well well',
   'e don',
+  'no fit',
+  'na so',
+  'no be',
+  'make we',
+  'think say',
 ] as const;
 
 export const PIDGIN_MIN_MARKERS = 2;
 export const PIDGIN_HIGH_MARKERS = 3;
+
+/** Markers so specific to Pidgin that one of them is enough in a sentence —
+ * "dey" / "wetin" / "wey" have no everyday English use. A single marker still
+ * needs PIDGIN_SINGLE_MIN_TOKENS words, so a lone word stays noise. */
+export const PIDGIN_STRONG_MARKERS: readonly string[] = [
+  'dey',
+  'wetin',
+  'wey',
+  'abeg',
+  'comot',
+  'pikin',
+  'sabi',
+  'wahala',
+];
+export const PIDGIN_SINGLE_MIN_TOKENS = 4;
+
+/** Mixed-language (code-switched) lexicon reads: a sentence is read as a
+ * local language at LOW confidence when its lexicon hits make up at least
+ * this share of its words, with a minimum weighted score of 1. Low confidence
+ * replies in that language for the turn but never becomes the conversation's
+ * language, so one stray word in English cannot flip a conversation. */
+export const MIXED_MIN_TOKENS = 4;
+export const MIXED_MIN_SHARE = 0.1;
+export const MIXED_MIN_SCORE = 1;
 
 /**
  * Yoruba/Hausa/Igbo lexicon wordlists — the primary signal for the three
@@ -178,6 +209,21 @@ export const LEXICON_WORDS: Record<'yo' | 'ha' | 'ig', readonly string[]> = {
     'ruwa',
     'yaya',
     'yanzu',
+    // Everyday Hausa with no Yoruba/Igbo/Pidgin homograph (eval ES-16/17/50).
+    'babu',
+    'bakin',
+    'barci',
+    'damu',
+    'dadi',
+    'gode',
+    'jarrabawa',
+    'kullum',
+    'makaranta',
+    'taimakon',
+    'tsoro',
+    'tsoron',
+    'wanda',
+    'yau',
   ],
   ig: [
     'akwukwo',

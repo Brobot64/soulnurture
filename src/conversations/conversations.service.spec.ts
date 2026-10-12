@@ -1,5 +1,7 @@
 import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
+import { AiUsageMeterService } from '../ai/providers/usage-meter.service.js';
 import { MessageRole } from '@prisma/client';
 import { AiService } from '../ai/ai.service.js';
 import { AiGenerationError } from '../ai/ai.errors.js';
@@ -7,6 +9,7 @@ import { AI_CONFIG } from '../ai/config/ai.config.js';
 import type { AiConfig } from '../ai/config/ai.config.js';
 import { IntentEngineService } from '../ai/intents/intent-engine.service.js';
 import { LanguageDetectorService } from '../ai/language/language-detector.service.js';
+import { holdingLine, SCRIPTED_SAFETY } from '../ai/language/scripted-copy.js';
 import {
   GuardrailService,
   RateLimitExceededException,
@@ -155,6 +158,8 @@ describe('ConversationsService', () => {
           useValue: { configured: false, completeLabel: vi.fn() },
         },
         LanguageDetectorService,
+        { provide: ConfigService, useValue: { get: vi.fn() } },
+        { provide: AiUsageMeterService, useValue: { record: vi.fn() } },
         {
           provide: SupportFlagAlertsService,
           useValue: { recommendImmediateFollowUp: vi.fn().mockResolvedValue('alerted') },
@@ -421,6 +426,49 @@ describe('ConversationsService', () => {
       }),
     );
     expect(prisma.supportFlag.create).not.toHaveBeenCalled();
+  });
+
+  describe('holding lane in the conversation language (items 5 and 6)', () => {
+    function mockFailingLane(language: string) {
+      prisma.conversation.findUnique.mockResolvedValue({
+        id: 'conv-1',
+        studentId: student.id,
+        checkInId: null,
+        status: 'ACTIVE',
+        language,
+        messages: [],
+      });
+      prisma.conversationMessage.create.mockImplementation(async (args: {
+        data: { role: MessageRole; content: string };
+      }) => ({ id: 'assistant-1', role: args.data.role, content: args.data.content }));
+      prisma.conversation.update.mockResolvedValue({ id: 'conv-1' });
+      ai.generateAndApply.mockRejectedValue(
+        new AiGenerationError('AI generation unavailable'),
+      );
+    }
+
+    it('a Hausa student gets the Hausa holding reply, not the English one', async () => {
+      mockFailingLane('ha');
+
+      const result = await service.sendMessage('user-1', 'conv-1', {
+        content: 'ok',
+      });
+
+      expect(result.assistantMessage.content).toBe(holdingLine('ha', HOLDING_MESSAGE));
+      expect(result.assistantMessage.content).not.toBe(HOLDING_MESSAGE);
+    });
+
+    it('an acute Hausa message in the holding lane gets the approved Hausa crisis line', async () => {
+      prisma.supportFlag.findFirst = vi.fn().mockResolvedValue(null);
+      prisma.supportFlag.create = vi.fn().mockResolvedValue({ id: 'flag-3' });
+      mockFailingLane('ha');
+
+      const result = await service.sendMessage('user-1', 'conv-1', {
+        content: 'Ina so in kashe kaina',
+      });
+
+      expect(result.assistantMessage.content).toBe(SCRIPTED_SAFETY.SUICIDAL_IDEATION?.ha);
+    });
   });
 
   it('AI failure lane still persists safeguarding state for crisis wording', async () => {
@@ -844,6 +892,110 @@ describe('ConversationsService', () => {
           conversationMessageId: 'user-msg-3',
           input: expect.objectContaining({ language: 'ha' }),
         }),
+      });
+    });
+
+    describe('per-turn language follows the conversation', () => {
+      function mockConversationLanguage(language: string | null) {
+        prisma.conversation.findUnique.mockResolvedValue({
+          id: 'conv-1',
+          studentId: student.id,
+          checkInId: null,
+          status: 'ACTIVE',
+          language,
+          messages: [],
+        });
+      }
+
+      it('a silent message inside a Hausa conversation is replied to in Hausa, not the English preference', async () => {
+        mockHappyPath('user-msg-4', 'assistant-msg-4');
+        mockConversationLanguage('ha');
+
+        await service.sendMessage('user-1', 'conv-1', { content: 'ok' });
+
+        expect(ai.generateAndApply).toHaveBeenCalledWith(
+          expect.objectContaining({ messageLanguage: 'ha' }),
+        );
+      });
+
+      it('passes the saved student message id to the AI and stores the turn language on both messages', async () => {
+        mockHappyPath('user-msg-10', 'assistant-msg-10');
+
+        await service.sendMessage('user-1', 'conv-1', {
+          content: 'Mo ti rẹ̀ rẹ̀ lónìí',
+        });
+
+        expect(ai.generateAndApply).toHaveBeenCalledWith(
+          expect.objectContaining({ currentMessageId: 'user-msg-10' }),
+        );
+        const creates = prisma.conversationMessage.create.mock.calls;
+        expect(creates[0][0].data).toEqual(expect.objectContaining({ language: 'yo' }));
+        expect(creates[1][0].data).toEqual(expect.objectContaining({ language: 'yo' }));
+      });
+
+      it('persists a confident detection as the conversation language', async () => {
+        mockHappyPath('user-msg-5', 'assistant-msg-5');
+
+        await service.sendMessage('user-1', 'conv-1', {
+          content: 'Mo ti rẹ̀ rẹ̀ lónìí',
+        });
+
+        expect(prisma.conversation.update).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: { id: 'conv-1' },
+            data: expect.objectContaining({ language: 'yo' }),
+          }),
+        );
+      });
+
+      it('a silent message in a Hausa conversation still gets the translation safety sweep', async () => {
+        mockHappyPath('user-msg-8', 'assistant-msg-8');
+        mockConversationLanguage('ha');
+
+        await service.sendMessage('user-1', 'conv-1', { content: 'ok' });
+
+        expect(prisma.aiGenerationJob.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({
+            kind: 'VERNACULAR',
+            conversationMessageId: 'user-msg-8',
+            input: expect.objectContaining({ language: 'ha' }),
+          }),
+        });
+      });
+
+      it('a low-confidence Hausa-English mix replies in Hausa but is not saved as the conversation language', async () => {
+        mockHappyPath('user-msg-7', 'assistant-msg-7');
+        mockConversationLanguage('en');
+
+        await service.sendMessage('user-1', 'conv-1', {
+          content: "Ina so in daina school, I can't do this again.",
+        });
+
+        expect(ai.generateAndApply).toHaveBeenCalledWith(
+          expect.objectContaining({ messageLanguage: 'ha' }),
+        );
+        const languageWrites = prisma.conversation.update.mock.calls.filter(
+          ([args]) => 'language' in (args.data as Record<string, unknown>),
+        );
+        expect(languageWrites).toHaveLength(0);
+      });
+
+      it('a confident English message switches a Hausa conversation back to English', async () => {
+        mockHappyPath('user-msg-6', 'assistant-msg-6');
+        mockConversationLanguage('ha');
+
+        await service.sendMessage('user-1', 'conv-1', {
+          content: 'I feel overwhelmed today because of my exams.',
+        });
+
+        expect(ai.generateAndApply).toHaveBeenCalledWith(
+          expect.objectContaining({ messageLanguage: 'en' }),
+        );
+        expect(prisma.conversation.update).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({ language: 'en' }),
+          }),
+        );
       });
     });
   });

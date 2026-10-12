@@ -12,7 +12,13 @@ export interface AiContext {
     intensity: string | null;
     description: string | null;
   } | null;
-  recentConversation: { role: 'USER' | 'ASSISTANT'; content: string }[];
+  /** Chronological history, excluding the current turn. `language` is the
+   * language that turn was in (null for older messages). */
+  recentConversation: {
+    role: 'USER' | 'ASSISTANT';
+    content: string;
+    language: string | null;
+  }[];
   relevantReflection: { content: string } | null;
   relevantResources: {
     id: string;
@@ -40,6 +46,16 @@ export interface AiContext {
   } | null;
 }
 
+/** A holding reply queued for the async lane: the model never saw it, so it is
+ * not part of the conversation it should continue. */
+function isQueuedPlaceholder(aiPayload: unknown): boolean {
+  return (
+    typeof aiPayload === 'object' &&
+    aiPayload !== null &&
+    (aiPayload as { asyncState?: unknown }).asyncState === 'PENDING_AI'
+  );
+}
+
 @Injectable()
 export class AiContextService {
   constructor(
@@ -54,6 +70,8 @@ export class AiContextService {
     checkInId?: string | null;
     /** Current user message — drives vector-similar memory recall. */
     currentMessageText?: string;
+    /** The student message being answered; it is excluded from history. */
+    excludeMessageId?: string | null;
   }): Promise<AiContext> {
     const messageLimit = this.aiConfig.context.messageLimit;
     const charLimit = this.aiConfig.context.characterLimit;
@@ -70,28 +88,40 @@ export class AiContextService {
         })
       : null;
 
-    const messages = await this.prisma.conversationMessage.findMany({
+    // The current student message is excluded by id (it is passed to the model
+    // as the turn itself, once). Queued holding placeholders are not real
+    // replies, so they never enter history.
+    const rows = await this.prisma.conversationMessage.findMany({
       where: {
         conversationId: params.conversationId,
         role: { in: [MessageRole.USER, MessageRole.ASSISTANT] },
+        ...(params.excludeMessageId
+          ? { id: { not: params.excludeMessageId } }
+          : {}),
       },
       orderBy: { createdAt: 'desc' },
       take: messageLimit,
-      select: { role: true, content: true },
+      select: { id: true, role: true, content: true, language: true, aiPayload: true },
     });
 
-    const recent = messages.reverse().map((m) => ({
-      role: m.role as 'USER' | 'ASSISTANT',
-      content: m.content,
-    }));
-
+    // Newest-first from the query: keep the NEWEST messages that fit the
+    // character budget, then return them in chronological order.
+    const chronological = rows
+      .filter((m) => !isQueuedPlaceholder(m.aiPayload))
+      .reverse();
+    const kept: typeof chronological = [];
     let used = 0;
-    const trimmed: typeof recent = [];
-    for (const m of recent) {
+    for (let i = chronological.length - 1; i >= 0; i--) {
+      const m = chronological[i];
       if (used + m.content.length > charLimit) break;
-      trimmed.push(m);
+      kept.unshift(m);
       used += m.content.length;
     }
+    const trimmed = kept.map((m) => ({
+      role: m.role as 'USER' | 'ASSISTANT',
+      content: m.content,
+      language: m.language ?? null,
+    }));
 
     const resources = await this.prisma.wellbeingResource.findMany({
       where: { active: true, approved: true },

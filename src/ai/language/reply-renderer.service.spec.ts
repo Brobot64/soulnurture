@@ -149,7 +149,8 @@ describe('ReplyRendererService', () => {
   it('skips the N-ATLaS lane when it is not configured', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => jsonResponse(openAiBody('Rendered.'))),
+      // A real Yoruba render: renders must carry evidence of the target language.
+      vi.fn(async () => jsonResponse(openAiBody('Mo wà níbí pẹ̀lú rẹ.'))),
     );
 
     const outcome = await buildService(false).render(renderInput);
