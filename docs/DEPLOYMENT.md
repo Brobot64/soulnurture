@@ -43,7 +43,7 @@ Rationale: **infra with state runs in Docker Compose** (clean upgrades, isolated
 
 Memory budget on 12 GB: model resident ≈ 5–6 GB (Q4_K_M) + Postgres 1.5 GB + app 0.5 GB + observability ~1.5 GB + OS ~1 GB ≈ 10 GB → we add 4 GB swap as a pressure valve.
 
-**Deferred to phase 2 — the vernacular ASR sidecar.** `services/n-atlas-asr` (Yoruba/Hausa/Igbo whisper-small) is **not** part of this bring-up: with `NATLAS_ASR_BASE_URL` left empty in §6, yo/ha/ig voice notes get the friendly "type your message instead" 503, while English and Pidgin ride the Groq Whisper chain normally. RAM stays free for the LLM. Run + systemd unit live at the end of §5 when you want it.
+**Vernacular ASR — hosted by default.** Yoruba/Hausa/Igbo voice notes run on the NCAIR1 whisper-small fine-tunes served as three Hugging Face Inference Endpoints (one per language, `NATLAS_ASR_URL_*` in §6): a T4 each, scale-to-zero so idle hours cost nothing, ~2.5 s per note when warm and ~3 min to wake from cold — the provider retries inside `NATLAS_ASR_TIMEOUT_MS` and then answers "the voice model is starting up, try again in a moment". Those endpoints decode audio with libsndfile, so the browser records 16 kHz mono WAV and webm/opus is rejected. `services/n-atlas-asr` stays as the self-hosted alternative when there is no HF account (run + systemd unit at the end of §5); a per-language endpoint URL wins over `NATLAS_ASR_BASE_URL`. With neither configured, yo/ha/ig voice notes get the friendly "type your message instead" 503, while English and Pidgin ride the Groq Whisper chain normally.
 
 **N-ATLaS license obligations** (bind with the deployment): display attribution — *"N-ATLaS is an initiative of the Federal Ministry of Communications, Innovation and Digital Economy, powered by Awarri Technologies"* — and stay within the **1000 active end-users / 30 days** cap (school pilots are far below; track enrolment before scaling). Attribution belongs in the product footer and `GET /api/v1/ai/config`.
 
@@ -613,7 +613,15 @@ AI_VERNACULAR_REPLY_MODE=openai-native
 NATLAS_LLM_BASE_URL=http://127.0.0.1:11434
 NATLAS_LLM_MODEL=n-atlas
 
-# Vernacular ASR sidecar — phase 2 (§5). Empty = yo/ha/ig voice gets a friendly 503
+# Vernacular ASR — hosted NCAIR1 whisper fine-tunes, one HF Inference Endpoint
+# per language (T4, scale-to-zero, ~3 min cold boot). The endpoints are
+# 'authenticated', so NATLAS_ASR_API_KEY is an HF token — env-only, never here.
+NATLAS_ASR_URL_YO=
+NATLAS_ASR_URL_HA=
+NATLAS_ASR_URL_IG=
+NATLAS_ASR_API_KEY=
+# Self-hosted alternative (§5) — a language's endpoint URL wins over this.
+# Empty everywhere = yo/ha/ig voice gets a friendly 503.
 NATLAS_ASR_BASE_URL=
 NATLAS_ASR_TIMEOUT_MS=60000
 

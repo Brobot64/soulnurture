@@ -53,10 +53,14 @@ export interface AiConfig {
   };
   transcription: {
     model: string;
-    /** Local N-ATLaS ASR sidecar (services/n-atlas-asr) serving the
-     * vernacular languages. baseUrl null = not deployed; voice notes in
-     * those languages degrade to the friendly "type it instead" message. */
+    /** Vernacular ASR back-ends (see providers/natlas/natlas-asr.provider.ts).
+     * Per language a hosted HF Inference Endpoint wins over the self-hosted
+     * sidecar; when neither is configured, voice notes in that language
+     * degrade to the friendly "type it instead" message. */
     natlas: {
+      /** HF Inference Endpoint root URLs, keyed by language code. */
+      endpoints: Partial<Record<AsrVernacularLanguage, string>>;
+      /** The self-hosted sidecar (services/n-atlas-asr); null = not deployed. */
       baseUrl: string | null;
       /** Cold starts load a whisper-small checkpoint; generous on purpose. */
       timeoutMs: number;
@@ -276,6 +280,11 @@ export function buildAiConfig(config: ConfigService): AiConfig {
         config.get<string>('GROQ_TRANSCRIPTION_MODEL') ??
         'whisper-large-v3-turbo',
       natlas: {
+        endpoints: {
+          yo: config.get<string>('NATLAS_ASR_URL_YO')?.trim() || undefined,
+          ha: config.get<string>('NATLAS_ASR_URL_HA')?.trim() || undefined,
+          ig: config.get<string>('NATLAS_ASR_URL_IG')?.trim() || undefined,
+        },
         baseUrl: config.get<string>('NATLAS_ASR_BASE_URL')?.trim() || null,
         timeoutMs: Number(config.get<string>('NATLAS_ASR_TIMEOUT_MS') ?? 60_000),
         languages: [...ASR_VERNACULAR_LANGUAGES],

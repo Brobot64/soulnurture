@@ -197,6 +197,22 @@ class EnvironmentVariables {
 
   @IsOptional()
   @IsString()
+  NATLAS_ASR_URL_YO?: string;
+
+  @IsOptional()
+  @IsString()
+  NATLAS_ASR_URL_HA?: string;
+
+  @IsOptional()
+  @IsString()
+  NATLAS_ASR_URL_IG?: string;
+
+  @IsOptional()
+  @IsString()
+  NATLAS_ASR_API_KEY?: string;
+
+  @IsOptional()
+  @IsString()
   S3_ENDPOINT?: string;
 
   @IsOptional()
