@@ -32,6 +32,21 @@ fixture-ig.wav   Igbo   — expected: text contains "ị", "ọ", "ụ" or "ṅ"
 curl -s -F "file=@fixture-yo.wav" -F "lang=yo" http://127.0.0.1:8100/transcribe
 ```
 
+- **Hosted endpoint smoke test (manual):** the HF Inference Endpoints take the
+  raw audio bytes at their root — no multipart, no `lang` (one endpoint per
+  language):
+
+```bash
+curl -s -X POST --data-binary @fixture-yo.wav -H 'Content-Type: audio/wav' \
+  -H "Authorization: Bearer $HF_TOKEN" "$NATLAS_ASR_URL_YO"
+# -> {"text":"..."}
+```
+
+  They decode with libsndfile, so `wav`/`flac`/`mp3` only — the browser records
+  16 kHz mono WAV for this reason. A scaled-to-zero endpoint answers **503 in
+  ~1 s** and takes ~3 min to wake; the provider retries inside
+  `NATLAS_ASR_TIMEOUT_MS` and then tells the student it is starting up.
+
 - **Step 9 E2E (env-gated):** when the pilot harness runs with
   `NATLAS_ASR_E2E=1`, each fixture is posted through
   `POST /api/v1/ai/transcribe` and asserted to (a) return non-empty text,
