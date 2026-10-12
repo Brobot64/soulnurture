@@ -273,6 +273,32 @@ export class AiService {
     // below still evaluates the RAW userContent — safety is never truncated.
     const sanitized = this.guardrail.sanitizeInput(input.userContent);
 
+    // Translate, then draft. In the English-draft mode a non-English message is
+    // translated by N-ATLaS first, and OpenAI drafts the reply from that English
+    // — not from the raw text. The raw text still goes to the intent engine
+    // below, so keyword safety never depends on the translation.
+    const translationNotes: string[] = [];
+    let draftSource = sanitized.content;
+    if (renderActive) {
+      try {
+        const { understanding } = await this.understandingProvider.understand({
+          text: input.userContent,
+          language: replyLanguage,
+        });
+        draftSource = this.guardrail.sanitizeInput(
+          understanding.englishTranslation,
+        ).content;
+        translationNotes.push(
+          `Drafted from the English translation (via ${understanding.via}).`,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        translationNotes.push(
+          `Translation unavailable; drafted from the original message (${message}).`,
+        );
+      }
+    }
+
     const systemPrompt = [
       SYSTEM_PROMPT,
       `Prompt version: ${REFLECTION_PROMPT_VERSION}`,
@@ -301,7 +327,7 @@ export class AiService {
             ? `[${LANGUAGE_DISPLAY_NAMES[m.language as SupportedLanguage] ?? m.language}] ${m.content}`
             : m.content,
       })),
-      { role: 'user' as const, content: sanitized.content },
+      { role: 'user' as const, content: draftSource },
     ];
 
     let raw: unknown;
@@ -328,7 +354,11 @@ export class AiService {
       aiResult: result,
     });
 
-    const notes: string[] = [...sanitized.notes, ...filtered.notes];
+    const notes: string[] = [
+      ...sanitized.notes,
+      ...translationNotes,
+      ...filtered.notes,
+    ];
     if (verdict) {
       notes.push(
         ...(await applyIntentVerdict(verdict, {
