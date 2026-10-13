@@ -470,6 +470,33 @@ SOMEWHAT | A_LOT`.
 **Request** `GET /api/v1/check-ins/<checkInId>` — assert `200`,
 `data.id === checkInId` (single-record read).
 
+### 5.1a Post-check-in mood feedback
+
+After a check-in the client asks "how do you feel now?" and posts the answer on
+the same feeling/intensity scale. One feedback row per check-in; it is stored
+apart from the check-in itself (and never on the student profile) so the
+platform admin can export the check-in's effect on mood (§14.11).
+
+**Request**
+
+```http
+POST /api/v1/check-ins/<checkInId>/feedback
+```
+
+```json
+{
+  "feeling": "CALM",
+  "intensity": "SOMEWHAT"
+}
+```
+
+**Expected** `201`. Assert `data.checkInId === <checkInId>`. Re-submitting for
+the same check-in → `409`; someone else's check-in → `403` (`404` first when
+the id does not exist).
+
+**Request** `GET /api/v1/check-ins/<checkInId>/feedback` — assert `200` and
+`data.feedback === null` until the student answers, then the feedback row.
+
 ### 5.2 Open a conversation rooted in the check-in
 
 **Request**
@@ -1801,6 +1828,29 @@ suppressed cells rendered `suppressed (<5)`, unavailable metrics as
 `viaVoice: true` (transcript in `content`; §13.5 does this for human chat, the
 AI journey client sends it from the pilot build onward).
 
+### 14.11 Check-in mood-effect export (`MOOD_FEEDBACK_001`)
+
+`GET /api/v1/admin/check-in-feedback/report` (`PLATFORM_ADMIN`) — a raw
+`text/csv` attachment (`soul-nurture-check-in-mood-<from>_<to>
+[-<shortCode>].csv`) bypassing the JSON envelope. Same `days`/`from`+`to`/
+`schoolId` window contract as §14.10 (default 30 days, ≤ 366 days, deactivated
+students excluded).
+
+One row per submitted post-check-in feedback:
+`feedbackId, submittedAt, school, studentName, studentEmail, checkInId,
+checkInAt, feelingBefore, intensityBefore, feelingAfter, intensityAfter,
+moodEffect`.
+
+**moodEffect** — `IMPROVED | SAME | WORSENED` from a signed intensity scale:
+positive feelings (`CALM | HOPEFUL | GREAT | HAPPY | PEACEFUL`) score
+`+intensity`, the remaining (negative) labels `-intensity`
+(`A_LITTLE=1 | SOMEWHAT=2 | A_LOT=3`); the after-minus-before delta decides —
+so `STRESSED/A_LOT → CALM/SOMEWHAT` is `IMPROVED`, and easing within the
+negative band (`OVERWHELMED/A_LOT → ANXIOUS/A_LITTLE`) is too.
+
+**Negatives**: same window `400`s and `schoolId` `404` as §14.10; non-owner
+roles → `403`.
+
 ---
 
 ## Appendix A — Enum reference
@@ -1874,3 +1924,4 @@ AI journey client sends it from the pilot build onward).
 | 2026-10-09 | `VERNACULAR_REPLY_015` — per-message language following: lexicon detection replaces franc for yo/ha/ig (franc only classifies long English), and the `n-atlas-translate` reply mode renders the finished English reply into the turn's language within the same request (N-ATLaS → OpenAI render → English fallback; scripted safety copy never rendered); `aiPayload.render`, `NATLAS_RENDER_TIMEOUT_MS`; §5.3 + §9.5 + `.env.example` updated. |
 | 2026-10-09 | `LANG_ID_016` — language from the input itself: when every heuristic is silent the detector asks N-ATLaS to name the turn's language (`IDENTIFY_MIN_CHARS` 8, strict `NATLAS_IDENTIFY_TIMEOUT_MS` 4s, fail-open to the standing preference on cold/unparsable), and the detected language — `en` included — always beats the preference for that turn; §5.3 + §9.5 + `.env.example` updated. |
 | 2026-10-10 | `PILOT_ANALYTICS_001` — owner pilot analytics: aggregate-first payload (reach KPIs, DAU/WAU/MAU + return rate, 7-row feature usage, 8 self-reported wellbeing themes, resources, support, safeguarding, outcomes placeholder) with 1–4-student breakdown suppression, preset/custom window + school scope, and a CSV report export that bypasses the JSON envelope; `conversation_message.viaVoice` flag splits spoken AI turns; §14.10 + Appendix A `PilotTheme` row. |
+| 2026-10-13 | `MOOD_FEEDBACK_001` — post-check-in mood feedback: `POST/GET /api/v1/check-ins/<id>/feedback` (one answer per check-in, 409 on re-submit, owner-only 403/404), `check_in_feedback` table (unique `checkInId`, cascades with check-in + student), and the owner CSV export `GET /api/v1/admin/check-in-feedback/report` computing `IMPROVED/SAME/WORSENED` from a signed intensity scale (§5.1a, §14.11). |
