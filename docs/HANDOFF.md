@@ -51,6 +51,22 @@ Open follow-ups unchanged from §0 (native review, remote branch cleanup, ASR pa
 
 ---
 
+## 0B. Session delta — 2026-10-12 (local ASR wiring + CORS origins; no code changes)
+
+**What happened:** user reported the vernacular dead-lane 503 ("Voice notes in Hausa are not available right now") persisting. Cause: the local backend's `.env` had no `NATLAS_ASR_URL_*` / `NATLAS_ASR_API_KEY` at all (ASR_HF_001 code was running unconfigured). Fixed locally:
+
+- `.env` gained the three hosted HF endpoint URLs — yo `https://6accc82b53d27c9b5cb0f3e1`, ha `https://6accc83c53d27c9b5cb0f3e3`, ig `https://6accc84053d27c9b5cb0f3e5` (`.endpoints.huggingface.cloud`, namespace Cocolette, T4/scale-to-zero) — plus `NATLAS_ASR_API_KEY` reusing the fine-grained HF PAT already present for `NATLAS_LLM_API_KEY`. One-shot probe of the ha endpoint answered **503 = scaled-to-zero waking, auth accepted** (401 would mean a dead token).
+- Backend was found **down entirely** (nothing on :3000; proxy :5050 → ECONNREFUSED). Restarted `npm run start:dev` (background task `bcw8dxe66`; killed the old tree via `taskkill //F //T //PID 37076` — the nest-CLI parent). Health 200 direct + via proxy.
+- **CORS fix (user then hit CORS):** `ALLOWED_ORIGINS` was `"http://localhost:3000,http://localhost:5000"` — neither current local browser origin (`:3001` vite, `:5050` proxy) was allowed. Appended both; restarted; verified `access-control-allow-origin` echoes for each.
+
+**Facts worth keeping:**
+- Transcribe routing needs no code change: `ai.service.ts` sends every yo/ha/ig voice note to `NAtlasAsrProvider`, where a configured endpoint always wins over the sidecar. Empty `NATLAS_ASR_BASE_URL` stays the friendly-503 path.
+- First voice note **per language** cold-starts that endpoint (~2.5–3.5 min; the provider retries 3×10s inside the 60s budget, then says "the Hausa voice model is starting up…"). A retry a minute later transcribes. That message is by design, not the dead-lane error.
+- The running vite (PID on :3001) serves from the **sibling checkout `pnafrica\frontend`**, not `natlas\frontend`; the :5050 proxy (`verify-proxy.tmp.mjs`) upstreams `/api` → `127.0.0.1:3000` with Origin rewrite.
+- `ASR_HF_001` + `VOICE_WAV_001` remain unmerged; prod still has no ASR wiring (`/opt/natlas/.env` + merges are the user's hands).
+
+---
+
 ## 1. Who we are building (30-second orientation)
 
 **Soul Nurture AI (repo: `natlas`, project codename "Natlas")** — a school-based emotional-wellbeing backend for an NGO (PN Africa context), in week 3–4 of an 8-week MVP. Students (e.g. "Jude", 300-level Sociology at Miva University, Nigeria) walk a **4-step journey**: Check-in → Reflect (AI conversation) → Resources → Human Support. Professionals (counsellors/psychologists/support staff) triage via a dashboard: safeguarding flags **with reasons**, support requests, follow-ups, audit trail.
