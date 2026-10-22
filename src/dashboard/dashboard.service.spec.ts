@@ -1,11 +1,17 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { SupportRequestStatus } from '@prisma/client';
+import {
+  SupportFlagStatus,
+  SupportRequestStatus,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { DashboardService } from './dashboard.service.js';
+
+const SCHOOL = { student: { user: { schoolId: 'school-1' } } };
 
 describe('DashboardService', () => {
   let service: DashboardService;
   let prisma: {
+    user: { findUnique: ReturnType<typeof vi.fn> };
     supportFlag: Record<string, ReturnType<typeof vi.fn>>;
     emotionalCheckIn: Record<string, ReturnType<typeof vi.fn>>;
     supportRequest: Record<string, ReturnType<typeof vi.fn>>;
@@ -13,6 +19,7 @@ describe('DashboardService', () => {
 
   beforeEach(async () => {
     prisma = {
+      user: { findUnique: vi.fn().mockResolvedValue({ schoolId: 'school-1' }) },
       supportFlag: { findMany: vi.fn(), count: vi.fn() },
       emotionalCheckIn: { findMany: vi.fn() },
       supportRequest: { findMany: vi.fn() },
@@ -41,7 +48,19 @@ describe('DashboardService', () => {
     const result = await service.counsellor('user-1');
 
     expect(prisma.supportFlag.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ take: 20 }),
+      expect.objectContaining({
+        where: {
+          ...SCHOOL,
+          status: {
+            in: [
+              SupportFlagStatus.OPEN,
+              SupportFlagStatus.IN_REVIEW,
+              SupportFlagStatus.ACKNOWLEDGED,
+            ],
+          },
+        },
+        take: 20,
+      }),
     );
     expect(result.flags).toEqual([{ id: 'f1' }]);
     expect(result.escalatedFlagCount).toBe(1);
@@ -54,7 +73,33 @@ describe('DashboardService', () => {
     expect(result.supportRequests).toEqual([{ id: 'req-1' }]);
   });
 
-  it('filters the request queue to pending + escalated', async () => {
+  it('counts escalated flags for the school only', async () => {
+    prisma.supportFlag.findMany.mockResolvedValue([]);
+    prisma.supportFlag.count.mockResolvedValue(0);
+    prisma.emotionalCheckIn.findMany.mockResolvedValue([]);
+    prisma.supportRequest.findMany.mockResolvedValue([]);
+
+    await service.counsellor('user-1');
+
+    expect(prisma.supportFlag.count).toHaveBeenCalledWith({
+      where: { ...SCHOOL, status: SupportFlagStatus.OPEN },
+    });
+  });
+
+  it('builds the barometer from the school check-ins only', async () => {
+    prisma.supportFlag.findMany.mockResolvedValue([]);
+    prisma.supportFlag.count.mockResolvedValue(0);
+    prisma.emotionalCheckIn.findMany.mockResolvedValue([]);
+    prisma.supportRequest.findMany.mockResolvedValue([]);
+
+    await service.counsellor('user-1');
+
+    expect(prisma.emotionalCheckIn.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { ...SCHOOL } }),
+    );
+  });
+
+  it('filters the request queue to the school and to pending + escalated', async () => {
     prisma.supportFlag.findMany.mockResolvedValue([]);
     prisma.supportFlag.count.mockResolvedValue(0);
     prisma.emotionalCheckIn.findMany.mockResolvedValue([]);
@@ -65,6 +110,7 @@ describe('DashboardService', () => {
     expect(prisma.supportRequest.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: {
+          ...SCHOOL,
           status: {
             in: [SupportRequestStatus.PENDING, SupportRequestStatus.ESCALATED],
           },
@@ -84,5 +130,22 @@ describe('DashboardService', () => {
     expect(result.barometer.total).toBe(0);
     expect(result.barometer.dominant).toBeNull();
     expect(result.barometer.notes).toContain('No check-ins');
+  });
+
+  it('returns an empty portal and queries no tenant data for a school-less actor', async () => {
+    prisma.user.findUnique.mockResolvedValue({ schoolId: null });
+
+    const result = await service.counsellor('orphan-1');
+
+    expect(result).toEqual({
+      flags: [],
+      barometer: expect.objectContaining({ total: 0 }),
+      supportRequests: [],
+      escalatedFlagCount: 0,
+      upcomingDropIn: null,
+    });
+    expect(prisma.supportFlag.findMany).not.toHaveBeenCalled();
+    expect(prisma.emotionalCheckIn.findMany).not.toHaveBeenCalled();
+    expect(prisma.supportRequest.findMany).not.toHaveBeenCalled();
   });
 });

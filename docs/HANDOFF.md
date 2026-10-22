@@ -51,6 +51,23 @@ Open follow-ups unchanged from §0 (native review, remote branch cleanup, ASR pa
 
 ---
 
+## 0B. Session delta — 2026-10-22 (P0 tenancy: safeguarding reads were platform-wide)
+
+Mandate: from the Figma PNA-4 gap analysis, "start on blocker 1" — the cross-school leak in front of every Epic D (Support & Safeguarding Indicators) screen. Branch `SCHOOL_TENANCY_FLAGS_001`, cut from `main` (`a2b81a0`); **not yet pushed/merged**.
+
+**The leak, precisely.** Three staff entry points read the whole platform's safeguarding data: `SupportFlagsService.list` ignored its `_userId` and returned every school's flags + a platform-wide `openCount`; `acknowledge`/`markInReview` looked a flag up by bare `id`, so **any** signed-in COUNSELLOR/PSYCHOLOGIST/SUPPORT_STAFF could move **another school's** flag through the review statuses; `DashboardService.counsellor` mixed all-school flags, an all-school barometer (last 100 check-ins platform-wide) and an all-school request queue into one payload. Only the request queue (`support-requests.service.ts` `listQueue`) and staff conversation reads (`conversations.getOne`, #22) were ever scoped — the two surfaces added later simply didn't copy the pattern.
+
+**No schema change — decided against a `SupportFlag.schoolId` column.** Tenancy rides the student's account (`where: { student: { user: { schoolId } } }`), which (a) matches the working `listQueue` precedent, (b) cannot strand a flag in a school a student left, and (c) needs no migration/backfill on a live VPS. Both helpers are single-sourced in **`src/common/tenant/school-scope.ts`** (`inSchool`, `schoolOf(prisma, userId)`) so the next staff-facing read cannot drift again — drift is how this happened.
+
+**Fail-closed rules now pinned by tests:** a staff actor with no `schoolId` sees nothing *and issues no tenant query at all* (empty list / empty portal, asserted with `not.toHaveBeenCalled`). Foreign-tenant flag ids answer **404, never 403** — deliberate deviation from `conversations.getOne`'s 403: a tenant boundary must not confirm that another school's id is real.
+
+**Verification:** `nest build` clean; oxlint **0 errors**, 8 warnings all pre-existing in `src/ai/eval/*`, zero in the touched files; suite **1343 passed / 1 failed (1344)** — the failure is **ES-16, known red since `94a998c`** ("50/51, ES-16 known red" in that commit message; Hausa "Na gode da taimakon ku" resolves `en`, wants `ha`). It reproduces standalone and shares no import path with this change.
+
+**Adjacent leaks, deliberately NOT in this commit:** `SupportPerson` has no `schoolId`, so `GET /v1/support-requests/people` is a global directory and `support-flag-alerts.service.ts:155` picks `supportPerson.findFirst({ where: { active: true } })` **school-agnostically** when it creates the TIER_3 escalation request — an escalation can land on another school's support person. Fixing that needs a schema decision, not a filter. Also unresolved: **indicator rules vs escalation rules** (khadijat, Figma 2026-10-15) — today a flag is only ever message-driven (`intent-engine.service.ts`), so no check-in-derived indicator exists for Epic D to show.
+
+---
+
+
 ## 1. Who we are building (30-second orientation)
 
 **Soul Nurture AI (repo: `natlas`, project codename "Natlas")** — a school-based emotional-wellbeing backend for an NGO (PN Africa context), in week 3–4 of an 8-week MVP. Students (e.g. "Jude", 300-level Sociology at Miva University, Nigeria) walk a **4-step journey**: Check-in → Reflect (AI conversation) → Resources → Human Support. Professionals (counsellors/psychologists/support staff) triage via a dashboard: safeguarding flags **with reasons**, support requests, follow-ups, audit trail.
