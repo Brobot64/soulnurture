@@ -8,6 +8,9 @@ export const REALTIME_EVENTS = {
   CHAT_MESSAGE_NEW: 'chat.message.new',
   CHAT_THREAD_CLOSED: 'chat.thread.closed',
   CHAT_UNREAD_UPDATED: 'chat.unread.updated',
+  /// A conversation message was rewritten in place (async AI reply landed or
+  /// failed). Payload: { conversationId, messageId, asyncState }.
+  CONVERSATION_MESSAGE_UPDATED: 'conversation.message.updated',
   NOTIFICATION_NEW: 'notification.new',
   NOTIFICATION_UNREAD_UPDATED: 'notification.unread.updated',
 } as const;

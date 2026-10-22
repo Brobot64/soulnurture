@@ -8,6 +8,7 @@ import {
   SupportFlagStatus,
   SupportPersonType,
   SupportRequestStatus,
+  MessageRole,
   SupportTiming,
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service.js';
@@ -53,6 +54,10 @@ export class SupportRequestsService {
         ? SupportRequestStatus.ESCALATED
         : SupportRequestStatus.PENDING;
 
+    const initial = dto.conversationId
+      ? await this.snapshotInitialMessage(student.id, dto.conversationId)
+      : null;
+
     const request = await this.prisma.supportRequest.create({
       data: {
         studentId: student.id,
@@ -62,6 +67,8 @@ export class SupportRequestsService {
         note: dto.note,
         checkInId: dto.checkInId,
         conversationId: dto.conversationId,
+        initialMessage: initial?.content ?? null,
+        initialMessageAt: initial?.createdAt ?? null,
         status,
       },
       include: { supportPerson: true },
@@ -76,6 +83,24 @@ export class SupportRequestsService {
     });
 
     return request;
+  }
+
+  /**
+   * Freezes the student's latest own message in the conversation the request
+   * was raised from. The conversation must belong to the requesting student;
+   * a foreign conversation id answers 404 so nothing is copied from it.
+   */
+  private async snapshotInitialMessage(studentId: string, conversationId: string) {
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, studentId },
+      select: { id: true },
+    });
+    if (!conversation) throw new NotFoundException('Conversation not found');
+    return this.prisma.conversationMessage.findFirst({
+      where: { conversationId, role: MessageRole.USER },
+      orderBy: { createdAt: 'desc' },
+      select: { content: true, createdAt: true },
+    });
   }
 
   async listMine(userId: string) {
@@ -261,9 +286,11 @@ export class SupportRequestsService {
         select: { name: true },
       });
       const note = existing.note?.trim();
+      const said = existing.initialMessage?.trim();
       const summary =
         `${staff?.name ?? 'A counsellor'} accepted your request to talk.` +
-        (note ? ` You asked: "${note}"` : '');
+        (note ? ` You asked: "${note}"` : '') +
+        (said && said !== note ? ` You said: "${said}"` : '');
       const opened = await this.chatService.openDirectThread(userId, {
         studentProfileId: existing.studentId,
         schoolId,
@@ -293,6 +320,8 @@ export interface SupportQueueItem {
   requestedAt: Date;
   timing: SupportTiming;
   note: string | null;
+  initialMessage: string | null;
+  initialMessageAt: Date | null;
   reviewNote: string | null;
   requestStatus: SupportRequestStatus;
   queueStatus: QueueStatus;
@@ -323,6 +352,8 @@ type QueueRequestRow = {
   createdAt: Date;
   timing: SupportTiming;
   note: string | null;
+  initialMessage: string | null;
+  initialMessageAt: Date | null;
   reviewNote: string | null;
   status: SupportRequestStatus;
   conversationId: string | null;
@@ -390,6 +421,8 @@ function toQueueItem(
     requestedAt: request.createdAt,
     timing: request.timing,
     note: request.note,
+    initialMessage: request.initialMessage,
+    initialMessageAt: request.initialMessageAt,
     reviewNote: request.reviewNote,
     requestStatus: request.status,
     queueStatus,

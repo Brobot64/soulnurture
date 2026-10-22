@@ -14,6 +14,8 @@ describe('SupportRequestsService', () => {
     supportRequest: Record<string, ReturnType<typeof vi.fn>>;
     user: Record<string, ReturnType<typeof vi.fn>>;
     supportFlag: Record<string, ReturnType<typeof vi.fn>>;
+    conversation: Record<string, ReturnType<typeof vi.fn>>;
+    conversationMessage: Record<string, ReturnType<typeof vi.fn>>;
   };
   let audit: { log: ReturnType<typeof vi.fn> };
   let chat: { openDirectThread: ReturnType<typeof vi.fn> };
@@ -37,6 +39,8 @@ describe('SupportRequestsService', () => {
       },
       user: { findUnique: vi.fn() },
       supportFlag: { findMany: vi.fn() },
+      conversation: { findFirst: vi.fn() },
+      conversationMessage: { findFirst: vi.fn() },
     };
     audit = { log: vi.fn() };
     chat = { openDirectThread: vi.fn() };

@@ -474,6 +474,13 @@ model SupportRequest {
   personType      SupportPersonType
   timing          SupportTiming
   note            String?
+  /// Verbatim snapshot of the student's own message that prompted the request
+  /// (latest USER turn of `conversationId` at creation). Frozen on purpose:
+  /// later edits or deletions of the AI conversation never change what the
+  /// school professional was shown. null on requests created before this
+  /// column existed, and on requests with no conversation.
+  initialMessage     String?
+  initialMessageAt   DateTime?
   reviewNote      String?
   status          SupportRequestStatus @default(PENDING)
   checkInId       String?              @db.Uuid

@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuditModule } from '../audit/audit.module.js';
 import { ConsentModule } from '../consent/consent.module.js';
 import { PrismaModule } from '../prisma/prisma.module.js';
+import { RealtimeModule } from '../realtime/realtime.module.js';
 import { StudentsModule } from '../students/students.module.js';
 import { SupportFlagsModule } from '../support-flags/support-flags.module.js';
 import { AiController } from './ai.controller.js';
@@ -42,6 +43,7 @@ import { ReplyRendererService } from './language/reply-renderer.service.js';
     ConfigModule,
     StudentsModule,
     SupportFlagsModule,
+    RealtimeModule,
   ],
   controllers: [AiController, AiDisclosureController],
   providers: [
