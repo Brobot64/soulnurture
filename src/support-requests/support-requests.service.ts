@@ -12,6 +12,7 @@ import {
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service.js';
 import { ChatService } from '../chat/chat.service.js';
+import { inSchool, schoolOf } from '../common/tenant/school-scope.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
 import type { CreateSupportRequestDto } from './dto/create-support-request.dto.js';
@@ -220,15 +221,19 @@ export class SupportRequestsService {
   /**
    * Counsellor review (report simplified scope: status plus notes).
    * Professionals progress a request through its review statuses and attach
-   * a review note; students see the updated status in their own list.
+   * a review note; students see the updated status in their own list. The
+   * lookup is tenant-scoped: a request belonging to another school reads as
+   * absent, so no professional can progress rows they are not entitled to.
    */
   async review(
     userId: string,
     id: string,
     dto: ReviewSupportRequestDto,
   ) {
-    const existing = await this.prisma.supportRequest.findUnique({
-      where: { id },
+    const schoolId = await schoolOf(this.prisma, userId);
+    if (!schoolId) throw new NotFoundException('Support request not found');
+    const existing = await this.prisma.supportRequest.findFirst({
+      where: { id, ...inSchool(schoolId) },
     });
     if (!existing) throw new NotFoundException('Support request not found');
 
@@ -253,20 +258,18 @@ export class SupportRequestsService {
     if (dto.status === SupportRequestStatus.ACCEPTED) {
       const staff = await this.prisma.user.findUnique({
         where: { id: userId },
-        select: { schoolId: true, name: true },
+        select: { name: true },
       });
-      if (staff?.schoolId) {
-        const note = existing.note?.trim();
-        const summary =
-          `${staff.name} accepted your request to talk.` +
-          (note ? ` You asked: "${note}"` : '');
-        const opened = await this.chatService.openDirectThread(userId, {
-          studentProfileId: existing.studentId,
-          schoolId: staff.schoolId,
-          summary,
-        });
-        chatThreadId = opened.id;
-      }
+      const note = existing.note?.trim();
+      const summary =
+        `${staff?.name ?? 'A counsellor'} accepted your request to talk.` +
+        (note ? ` You asked: "${note}"` : '');
+      const opened = await this.chatService.openDirectThread(userId, {
+        studentProfileId: existing.studentId,
+        schoolId,
+        summary,
+      });
+      chatThreadId = opened.id;
     }
 
     return { ...updated, chatThreadId };

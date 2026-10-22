@@ -31,6 +31,7 @@ describe('SupportRequestsService', () => {
       supportRequest: {
         create: vi.fn(),
         findMany: vi.fn(),
+        findFirst: vi.fn(),
         findUnique: vi.fn(),
         update: vi.fn(),
       },
@@ -39,6 +40,12 @@ describe('SupportRequestsService', () => {
     };
     audit = { log: vi.fn() };
     chat = { openDirectThread: vi.fn() };
+
+    // Staff mutations resolve their tenant from the actor's account.
+    prisma.user.findUnique.mockResolvedValue({
+      schoolId: 'school-1',
+      name: 'Mrs. Adebayo',
+    });
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -143,15 +150,18 @@ describe('SupportRequestsService', () => {
   });
 
   it('professional review sets status plus review note and audits the change', async () => {
-    prisma.supportRequest.findUnique
-      .mockResolvedValueOnce({ id: 'req-1', status: 'PENDING', reviewNote: null })
-      .mockResolvedValueOnce({ id: 'req-1', status: 'PENDING', reviewNote: null });
+    prisma.supportRequest.findFirst.mockResolvedValue({
+      id: 'req-1',
+      status: 'PENDING',
+      reviewNote: null,
+    });
     prisma.supportRequest.update.mockResolvedValue({
       id: 'req-1',
       status: SupportRequestStatus.ACCEPTED,
       reviewNote: 'Seen this afternoon',
       supportPerson: { id: 'p1' },
     });
+    chat.openDirectThread.mockResolvedValue({ id: 'thread-1', created: true });
 
     const result = await service.review('staff-1', 'req-1', {
       status: SupportRequestStatus.ACCEPTED,
@@ -176,7 +186,7 @@ describe('SupportRequestsService', () => {
   });
 
   it('opens a chat with the student when the review accepts the request', async () => {
-    prisma.supportRequest.findUnique.mockResolvedValue({
+    prisma.supportRequest.findFirst.mockResolvedValue({
       id: 'req-1',
       status: 'PENDING',
       reviewNote: null,
@@ -216,7 +226,7 @@ describe('SupportRequestsService', () => {
   });
 
   it('does not open a chat for non-accept review statuses', async () => {
-    prisma.supportRequest.findUnique.mockResolvedValue({
+    prisma.supportRequest.findFirst.mockResolvedValue({
       id: 'req-1',
       status: 'PENDING',
       reviewNote: 'called yesterday',
@@ -236,7 +246,7 @@ describe('SupportRequestsService', () => {
   });
 
   it('keeps the existing review note when the PATCH omits one', async () => {
-    prisma.supportRequest.findUnique.mockResolvedValue({
+    prisma.supportRequest.findFirst.mockResolvedValue({
       id: 'req-1',
       status: 'PENDING',
       reviewNote: 'called yesterday',
@@ -262,10 +272,46 @@ describe('SupportRequestsService', () => {
   });
 
   it('throws for reviewing a missing request', async () => {
-    prisma.supportRequest.findUnique.mockResolvedValue(null);
+    prisma.supportRequest.findFirst.mockResolvedValue(null);
     await expect(
       service.review('staff-1', 'missing', { status: SupportRequestStatus.ACCEPTED }),
     ).rejects.toThrow(NotFoundException);
+  });
+
+  it("refuses to review another school's request, and never writes", async () => {
+    // The lookup carries the tenant filter, so a foreign id resolves to
+    // nothing and the row cannot be progressed by the wrong school.
+    prisma.supportRequest.findFirst.mockResolvedValue(null);
+
+    await expect(
+      service.review('staff-1', 'other-school-req', {
+        status: SupportRequestStatus.ACCEPTED,
+        reviewNote: 'not mine',
+      }),
+    ).rejects.toThrow(NotFoundException);
+
+    expect(prisma.supportRequest.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: 'other-school-req',
+        student: { user: { schoolId: 'school-1' } },
+      },
+    });
+    expect(prisma.supportRequest.update).not.toHaveBeenCalled();
+    expect(chat.openDirectThread).not.toHaveBeenCalled();
+    expect(audit.log).not.toHaveBeenCalled();
+  });
+
+  it('refuses to review any request for a staff user with no school', async () => {
+    prisma.user.findUnique.mockResolvedValue({ schoolId: null });
+
+    await expect(
+      service.review('orphan-1', 'req-1', {
+        status: SupportRequestStatus.COMPLETED,
+      }),
+    ).rejects.toThrow(NotFoundException);
+
+    expect(prisma.supportRequest.findFirst).not.toHaveBeenCalled();
+    expect(prisma.supportRequest.update).not.toHaveBeenCalled();
   });
 
   describe('listQueue (staff review queue)', () => {
