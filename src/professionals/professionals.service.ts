@@ -28,7 +28,27 @@ export class ProfessionalsService {
     await this.ensureProfile(userId);
     return this.prisma.professionalProfile.update({
       where: { userId },
-      data: dto,
+      data: {
+        title: dto.title,
+        department: dto.department,
+        available: dto.available,
+        imageUrl: dto.imageUrl,
+        ...(dto.title !== undefined || dto.imageUrl !== undefined
+          ? {
+              supportPeople: {
+                updateMany: {
+                  where: {},
+                  data: {
+                    ...(dto.title !== undefined ? { title: dto.title } : {}),
+                    ...(dto.imageUrl !== undefined
+                      ? { imageUrl: dto.imageUrl }
+                      : {}),
+                  },
+                },
+              },
+            }
+          : {}),
+      },
     });
   }
 }

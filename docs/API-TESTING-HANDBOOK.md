@@ -1803,6 +1803,97 @@ AI journey client sends it from the pilot build onward).
 
 ---
 
+## 15. AI response reports, reviewer decisions and the boundary marker
+
+Two related but separate surfaces: what a student can say about a reply they
+were given, and what the server already knows about a turn that left the AI's
+remit. Neither creates a support request, a flag, a notification or an AI job.
+
+### 15.1 Student reports one assistant reply
+
+`POST /api/v1/ai-response-reports` — `@Roles('STUDENT')`, body
+`{ messageId, expectedContent, note? }` (`note` ≤ 2000 chars, omitted/blank
+stores `null`).
+
+**Expected** `200` envelope; `data` = `{ report, alreadyReported }`. `report`
+is the immutable snapshot and carries **exactly** `id`, `messageId`,
+`conversationId`, `responseContent`, `responseLanguage`, `note`, `createdAt` —
+never a reviewer's decision.
+
+- Only an `ASSISTANT` message in the caller's own school-linked conversation
+  can be reported; `user`/`system`, foreign and missing ids → `404`.
+- `expectedContent` must equal the stored message text at submit time,
+  otherwise `409` with `code: RESPONSE_CHANGED` and no write. This is what
+  stops a report attaching to a reply the async worker has already replaced.
+- One report per message: a retry (even with different `note`, and even after
+  the worker replaced the message) returns the original snapshot with
+  `alreadyReported: true` and writes no second audit.
+- Success writes the report plus one metadata-only `audit_log` row
+  (`ai_response_report.created`, no `meta`). If the audit write fails the
+  report is rolled back with it.
+
+### 15.2 Student receipts
+
+`GET /api/v1/ai-response-reports/mine?conversationId=<uuid>` — `STUDENT` only,
+own conversation (foreign → `404`). Returns `{ items: [{ id, messageId,
+createdAt }] }` — enough to show "you reported this", nothing of the note, the
+text or any review.
+
+### 15.3 Reviewer reads (same school only)
+
+`GET /api/v1/ai-response-reports?limit&offset` and
+`GET /api/v1/ai-response-reports/:id` — `COUNSELLOR` / `PSYCHOLOGIST`.
+Reading records nothing. The reviewer projection adds `reviewOutcome`,
+`reviewedAt` and `reviewedBy: { name, role }` (reviewer identity only — no
+email, phone or school id). Tenancy follows the student's current
+`User.schoolId`, so a transfer moves the report to the new school's queue and
+out of the old one without any data change. Foreign/missing id → `404` (a
+tenant boundary must not confirm the row exists); a non-reviewer role → `403`;
+a reviewer with no school issues no tenant query and gets `404`.
+
+### 15.4 Record-only reviewer decision
+
+`PATCH /api/v1/ai-response-reports/:id/review` — `COUNSELLOR` /
+`PSYCHOLOGIST`, body `{ outcome }` where `outcome` is
+`NO_CHANGE_NEEDED | FOLLOWED_UP_WITH_STUDENT | CANNOT_ASSESS` (nothing else is
+accepted; an extra `note`, `schoolId` or `status` → `400`).
+
+**Expected** `200` envelope with the reviewer projection of the report. The
+endpoint stores the decision, the reviewer and the timestamp on the report row
+and writes one `audit_log` row (`ai_response_report.review_recorded`,
+`meta: { outcome }`, the reviewer's school). Repeating the same outcome as the
+same reviewer is idempotent — no write, no second audit; a different outcome
+replaces it (last decision wins, each decision keeps its own author and audit).
+
+Deliberately absent: no AI call, no reply rewrite, no message or `aiPayload`
+change, no support request, flag, notification or follow-up, and no visibility
+to the student — §15.1/§15.2 projections stay review-free even after a
+decision is recorded.
+
+### 15.5 `boundary` — the server's own record of why a turn left the AI's remit
+
+`aiPayload.boundary` on an assistant message is `null` when the reply stayed
+inside the AI's remit, and otherwise one of:
+
+- `{ kind: 'OUT_OF_SCOPE', intentId: null }` — the guardrail output lane
+  replaced the model's own words with scripted copy because it claimed
+  something banned (diagnosis, medication, certification, a safety promise, a
+  human identity), or stripped every sentence of the reply.
+- `{ kind: 'ACUTE_SAFEGUARD_ROUTE', intentId: '<INTENT>' }` — a `TIER_3_ACUTE`
+  safeguarding rule fired and the turn went to the school's professionals. When
+  a turn does both, the acute referral wins: it is the louder truth.
+
+The field is server-owned like `asyncState` — normalised to `null` and never
+trusted from the model. On the async lane the holding placeholder already
+carries an acute boundary, so a student sees the "not an emergency service"
+notice immediately instead of after the worker finishes. `boundary` lives in
+`aiPayload`, which `/review-context` excludes, so it is a student-facing notice
+rather than a reviewer signal. Reviewers who want to know which rules exist at
+all read them from `GET /api/v1/ai/config` (§9.5) — the banned claims and the
+per-intent actions are the same data the enforcement uses.
+
+---
+
 ## Appendix A — Enum reference
 
 | Enum | Values |
@@ -1821,6 +1912,7 @@ AI journey client sends it from the pilot build onward).
 | `MoodId` (dashboard render contract) | `GREAT`, `NORMAL`, `SAD`, `ANGRY`, `CONFUSED`, `INDIFFERENT`, `STRANGE`, `DISTRAUGHT` |
 | `PilotTheme` (pilot dashboard contract) | `academic_pressure`, `social_peer`, `family`, `loneliness`, `self_confidence`, `overwhelm`, `relationships`, `other` |
 | `FollowUpStatus` | `PENDING`, `SCHEDULED`, `COMPLETED`, `CANCELLED` |
+| `AiReportReviewOutcome` (§15.4) | `NO_CHANGE_NEEDED`, `FOLLOWED_UP_WITH_STUDENT`, `CANNOT_ASSESS` |
 | `SchoolStatus` | `ACTIVE`, `SUSPENDED` |
 | `ChatThreadStatus` | `PENDING`, `ACTIVE`, `CLOSED` |
 | `ChatMessageRole` | `STUDENT`, `PROFESSIONAL`, `SYSTEM` |
@@ -1874,3 +1966,4 @@ AI journey client sends it from the pilot build onward).
 | 2026-10-09 | `VERNACULAR_REPLY_015` — per-message language following: lexicon detection replaces franc for yo/ha/ig (franc only classifies long English), and the `n-atlas-translate` reply mode renders the finished English reply into the turn's language within the same request (N-ATLaS → OpenAI render → English fallback; scripted safety copy never rendered); `aiPayload.render`, `NATLAS_RENDER_TIMEOUT_MS`; §5.3 + §9.5 + `.env.example` updated. |
 | 2026-10-09 | `LANG_ID_016` — language from the input itself: when every heuristic is silent the detector asks N-ATLaS to name the turn's language (`IDENTIFY_MIN_CHARS` 8, strict `NATLAS_IDENTIFY_TIMEOUT_MS` 4s, fail-open to the standing preference on cold/unparsable), and the detected language — `en` included — always beats the preference for that turn; §5.3 + §9.5 + `.env.example` updated. |
 | 2026-10-10 | `PILOT_ANALYTICS_001` — owner pilot analytics: aggregate-first payload (reach KPIs, DAU/WAU/MAU + return rate, 7-row feature usage, 8 self-reported wellbeing themes, resources, support, safeguarding, outcomes placeholder) with 1–4-student breakdown suppression, preset/custom window + school scope, and a CSV report export that bypasses the JSON envelope; `conversation_message.viaVoice` flag splits spoken AI turns; §14.10 + Appendix A `PilotTheme` row. |
+| 2026-10-24 | `AI_RESPONSE_REPORT_REVIEW_001` — §15 (new chapter): the AI-response-report lane end to end (submit + 409 `RESPONSE_CHANGED` + duplicate returns the original §15.1, student receipts §15.2, reviewer reads §15.3) and the record-only reviewer decision `PATCH /api/v1/ai-response-reports/:id/review` (§15.4) — `reviewOutcome`/`reviewedById`/`reviewedAt` on `ai_response_report` (`SET NULL` on staff removal, `AiReportReviewOutcome` in Appendix A) + metadata-only audit in the same transaction, with the student/reviewer projections split so a submission or retry can never reveal that a report was reviewed, by whom, or what was concluded; tenancy resolves through the student's current school, foreign or missing rows answer 404; §15.5 documents the server-owned `aiPayload.boundary` marker (`OUT_OF_SCOPE` / `ACUTE_SAFEGUARD_ROUTE`, acute wins, present on the async placeholder, excluded from `/review-context`). Migration `20261024090000_ai_response_report_review`. |

@@ -16,6 +16,8 @@ import type {
   SummarizeConversationInput,
   VernacularJobInput,
 } from './ai.service.js';
+import { RealtimeService } from '../realtime/realtime.service.js';
+import { REALTIME_EVENTS } from '../realtime/realtime.events.js';
 
 /**
  * Queued AI regeneration worker.
@@ -44,6 +46,7 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
     private readonly aiService: AiService,
     private readonly auditService: AuditService,
     @Inject(AI_CONFIG) private readonly aiConfig: AiConfig,
+    private readonly realtime: RealtimeService,
   ) {}
 
   onModuleInit() {
@@ -228,12 +231,22 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
         SET status = 'SUCCEEDED', attempts = attempts + 1, "lastError" = NULL, "nextRetryAt" = NULL
         WHERE id = ${job.id}::uuid AND status = 'PROCESSING'`;
       this.logger.log(`AI job ${job.id} completed`);
+      await this.announceMessageUpdate(
+        input.conversationId,
+        job.conversationMessageId,
+        'COMPLETE',
+      );
     } catch (error) {
       const moved = await this.rescheduleAfterFailure(job.id, job.attempts, error);
       if (!moved) return;
 
       if (moved.terminal) {
         await this.markMessageFailed(job.conversationMessageId ?? '', input);
+        await this.announceMessageUpdate(
+          input.conversationId,
+          job.conversationMessageId,
+          'FAILED',
+        );
         this.logger.warn(
           `AI job ${job.id} failed permanently after ${moved.attempts} attempts`,
         );
@@ -369,6 +382,36 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
       RETURNING status`;
     if (moved.length === 0) return null;
     return { attempts, terminal, lastError, delay };
+  }
+
+  /**
+   * Pushes the rewritten placeholder to the student's open window so the
+   * "AI is replying" indicator stops without polling. Best-effort: a failed
+   * push must never fail or retry the AI job (the DB row is already final and
+   * the client refetches on reconnect).
+   */
+  private async announceMessageUpdate(
+    conversationId: string,
+    conversationMessageId: string | null,
+    asyncState: 'COMPLETE' | 'FAILED',
+  ) {
+    if (!conversationMessageId) return;
+    try {
+      const conversation = await this.prisma.conversation.findUnique({
+        where: { id: conversationId },
+        select: { student: { select: { userId: true } } },
+      });
+      if (!conversation) return;
+      this.realtime.emitToUser(
+        conversation.student.userId,
+        REALTIME_EVENTS.CONVERSATION_MESSAGE_UPDATED,
+        { conversationId, messageId: conversationMessageId, asyncState },
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Could not announce message ${conversationMessageId} update: ${String(error)}`,
+      );
+    }
   }
 
   private async markMessageFailed(

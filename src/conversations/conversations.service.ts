@@ -5,7 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { MessageRole, Prisma } from '@prisma/client';
+import { MessageRole, Prisma, SupportFlagSeverity } from '@prisma/client';
 import { AiService } from '../ai/ai.service.js';
 import type { AiOrchestrationInput } from '../ai/ai.service.js';
 import type { AiOrchestrationOutcome } from '../ai/ai.service.js';
@@ -26,7 +26,9 @@ import { AuditService } from '../audit/audit.service.js';
 import { ConsentRequiredException } from '../consent/consent.errors.js';
 import { ConsentService } from '../consent/consent.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
-import { StudentsService } from '../students/students.service.js';
+import { inSchool } from '../common/tenant/school-scope.js';
+import { REVIEWER_ROLES } from '../common/guards/roles.decorator.js';
+import { STAFF_ROLES } from '../users/dto/staff-bootstrap.dto.js';
 import { SupportFlagAlertsService } from '../support-flags/support-flag-alerts.service.js';
 import type { CreateConversationDto } from './dto/create-conversation.dto.js';
 import type { SendMessageDto } from './dto/send-message.dto.js';
@@ -61,7 +63,6 @@ function emptyContext(): AiContext {
 export class ConversationsService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly studentsService: StudentsService,
     private readonly aiService: AiService,
     private readonly intentEngine: IntentEngineService,
     private readonly guardrail: GuardrailService,
@@ -87,19 +88,31 @@ export class ConversationsService {
   }
 
   private async owned(userId: string, conversationId: string) {
-    const student = await this.studentsService.ensureProfile(userId);
+    const student = await this.prisma.studentProfile.findUnique({
+      where: { userId, user: { role: 'STUDENT' } },
+    });
+    if (!student) throw new NotFoundException('Conversation not found');
     const conversation = await this.prisma.conversation.findUnique({
-      where: { id: conversationId },
+      where: { id: conversationId, studentId: student.id },
       include: { messages: { orderBy: { createdAt: 'asc' } } },
     });
     if (!conversation) throw new NotFoundException('Conversation not found');
-    if (conversation.studentId !== student.id) throw new ForbiddenException();
     return { student, conversation };
   }
 
   async create(userId: string, dto: CreateConversationDto) {
-    const student = await this.studentsService.ensureProfile(userId);
+    const student = await this.prisma.studentProfile.findUnique({
+      where: { userId, user: { role: 'STUDENT' } },
+    });
+    if (!student) throw new ConsentRequiredException();
     await this.assertDisclosureAccepted(student.id);
+    if (dto.checkInId) {
+      const checkIn = await this.prisma.emotionalCheckIn.findUnique({
+        where: { id: dto.checkInId, studentId: student.id },
+        select: { id: true },
+      });
+      if (!checkIn) throw new NotFoundException('Check-in not found');
+    }
     return this.prisma.conversation.create({
       data: {
         studentId: student.id,
@@ -110,38 +123,72 @@ export class ConversationsService {
   }
 
   async listMine(userId: string) {
-    const student = await this.studentsService.ensureProfile(userId);
     const items = await this.prisma.conversation.findMany({
-      where: { studentId: student.id },
+      where: { student: { userId, user: { role: 'STUDENT' } } },
       orderBy: { updatedAt: 'desc' },
     });
     return { items };
   }
 
   async getOne(userId: string, id: string) {
-    // The review queue deep-links staff into the request's conversation, so
-    // school professionals read conversations of their own school's students.
-    // Write paths still go through owned() — this is a read-only widening.
-    const staffRoles = ['COUNSELLOR', 'PSYCHOLOGIST', 'SUPPORT_STAFF'];
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { role: true, schoolId: true },
     });
-    if (user && staffRoles.includes(user.role)) {
-      const conversation = await this.prisma.conversation.findUnique({
-        where: { id },
+    if (user && STAFF_ROLES.some((role) => role === user.role)) {
+      if (!user.schoolId) throw new NotFoundException('Conversation not found');
+      const conversation = await this.prisma.conversation.findFirst({
+        where: { id, ...inSchool(user.schoolId) },
         include: {
           messages: { orderBy: { createdAt: 'asc' } },
           student: { select: { user: { select: { schoolId: true } } } },
         },
       });
       if (!conversation) throw new NotFoundException('Conversation not found');
-      if (conversation.student.user.schoolId !== user.schoolId) {
-        throw new ForbiddenException();
-      }
       return conversation;
     }
+    if (user?.role !== 'STUDENT') throw new ForbiddenException();
     const { conversation } = await this.owned(userId, id);
+    return conversation;
+  }
+
+  async getReviewContext(userId: string, id: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true, schoolId: true },
+    });
+    if (!user || !REVIEWER_ROLES.some((role) => role === user.role)) {
+      throw new ForbiddenException();
+    }
+    if (!user.schoolId) throw new NotFoundException('Conversation not found');
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { id, ...inSchool(user.schoolId) },
+      select: {
+        id: true,
+        status: true,
+        language: true,
+        createdAt: true,
+        updatedAt: true,
+        messages: {
+          where: { role: { in: [MessageRole.USER, MessageRole.ASSISTANT] } },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          select: { id: true, role: true, content: true, language: true, createdAt: true },
+        },
+        summary: {
+          select: {
+            id: true,
+            summary: true,
+            topics: true,
+            followUpHook: true,
+            emotionalTrend: true,
+            summaryLocalized: true,
+            followUpHookLocalized: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
+    if (!conversation) throw new NotFoundException('Conversation not found');
     return conversation;
   }
 
@@ -484,6 +531,14 @@ export class ConversationsService {
     }
 
     placeholder.asyncState = 'PENDING_AI';
+    // The real reply is still queued, but an acute referral must not wait for
+    // the model: the student sees the not-an-emergency-service notice now.
+    if (verdict?.severity === SupportFlagSeverity.TIER_3_ACUTE) {
+      placeholder.boundary = {
+        kind: 'ACUTE_SAFEGUARD_ROUTE',
+        intentId: verdict.intentId,
+      };
+    }
     return {
       result: placeholder,
       context: emptyContext(),

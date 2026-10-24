@@ -223,7 +223,7 @@ async function main() {
 
   for (const p of supportPeople) {
     const existing = await prisma.supportPerson.findFirst({
-      where: { name: p.name, type: p.type },
+      where: { name: p.name, type: p.type, professionalId: null },
     });
     if (existing) {
       await prisma.supportPerson.update({

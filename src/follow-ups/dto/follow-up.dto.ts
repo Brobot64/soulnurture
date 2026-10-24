@@ -10,10 +10,17 @@ import {
   MinLength,
 } from 'class-validator';
 
+const CREATABLE_STATUSES = [FollowUpStatus.PENDING, FollowUpStatus.SCHEDULED];
+
 export class CreateFollowUpDto {
   @ApiProperty({ format: 'uuid' })
   @IsUUID()
   studentId!: string;
+
+  @ApiPropertyOptional({ enum: CREATABLE_STATUSES, default: FollowUpStatus.PENDING })
+  @IsOptional()
+  @IsIn(CREATABLE_STATUSES)
+  status?: 'PENDING' | 'SCHEDULED';
 
   @ApiPropertyOptional({ format: 'uuid' })
   @IsOptional()

@@ -17,9 +17,12 @@ import {
 import { CreateConversationDto } from './dto/create-conversation.dto.js';
 import { SendMessageDto } from './dto/send-message.dto.js';
 import { ConversationsService } from './conversations.service.js';
+import { REVIEWER_ROLES, Roles } from '../common/guards/roles.decorator.js';
+import { STAFF_ROLES } from '../users/dto/staff-bootstrap.dto.js';
 
 @ApiTags('Conversations & AI (contract)')
 @Controller('v1/conversations')
+@Roles('STUDENT')
 export class ConversationsController {
   constructor(private readonly conversationsService: ConversationsService) {}
 
@@ -46,6 +49,7 @@ export class ConversationsController {
   }
 
   @Get(':id')
+  @Roles('STUDENT', ...STAFF_ROLES)
   @ApiSessionAuth()
   @ApiStandardErrors()
   @ApiOperation({ summary: 'Get conversation' })
@@ -56,6 +60,23 @@ export class ConversationsController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.conversationsService.getOne(session.user.id, id);
+  }
+
+  @Get(':id/review-context')
+  @Roles(...REVIEWER_ROLES)
+  @ApiSessionAuth()
+  @ApiStandardErrors()
+  @ApiOperation({
+    summary: 'Read same-school AI summary and linked conversation for review',
+    description: 'Counsellors and psychologists only. Returns the AI-generated summary (null if absent) and visible conversation messages, without recording a review or changing request status.',
+  })
+  @ApiParam({ name: 'id' })
+  @ApiEnvelopeOk(Object)
+  getReviewContext(
+    @Session() session: UserSession,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.conversationsService.getReviewContext(session.user.id, id);
   }
 
   @Post(':id/close')

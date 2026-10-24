@@ -47,11 +47,7 @@ function preview(content: string): string {
 
 type CheckInContext = Pick<EmotionalCheckIn, 'feeling' | 'intensity' | 'triggers'>;
 
-/**
- * Deterministic entry copy when the AI composer is unavailable. Deliberately
- * excludes the student's own note: free text could carry crisis wording and
- * this path has no summary-guard pass behind it.
- */
+// Keep raw student notes out of fallback summaries used in notifications.
 function fallbackEntryNote(input: {
   firstName: string;
   classLabel: string | null;
@@ -146,14 +142,20 @@ export class ChatService {
         aiEntrySummary: entry.text,
         studentReadAt: new Date(),
         messages: {
-          create: {
-            role: 'SYSTEM',
-            content: entry.text,
-            meta: { composedByAi: entry.viaAi },
-          },
+          create: [
+            {
+              role: 'SYSTEM',
+              content: entry.text,
+              meta: { composedByAi: entry.viaAi },
+            },
+            ...(note
+              ? [{ role: 'STUDENT' as const, senderUserId: userId, content: note }]
+              : []),
+          ],
         },
       },
-      include: { messages: { orderBy: { createdAt: 'asc' } } },
+      // Nested inserts share a timestamp; enum order puts SYSTEM before STUDENT.
+      include: { messages: { orderBy: [{ createdAt: 'asc' }, { role: 'desc' }, { id: 'asc' }] } },
     });
 
     await this.auditService.log({
@@ -229,7 +231,7 @@ export class ChatService {
             },
           },
           messages: {
-            orderBy: { createdAt: 'desc' },
+            orderBy: [{ createdAt: 'desc' }, { role: 'asc' }, { id: 'desc' }],
             take: 1,
             select: { content: true, role: true, createdAt: true },
           },
@@ -251,7 +253,7 @@ export class ChatService {
           },
         },
         messages: {
-          orderBy: { createdAt: 'desc' },
+          orderBy: [{ createdAt: 'desc' }, { role: 'asc' }, { id: 'desc' }],
           take: 1,
           select: { content: true, role: true, createdAt: true },
         },
@@ -279,6 +281,12 @@ export class ChatService {
             classLabel: true,
             studentCode: true,
           },
+        },
+        messages: {
+          where: { role: 'STUDENT' },
+          orderBy: { createdAt: 'asc' },
+          take: 1,
+          select: { content: true, role: true, createdAt: true },
         },
       },
     });
@@ -595,7 +603,7 @@ export class ChatService {
             user: { select: { name: true } },
           },
         },
-        messages: { orderBy: { createdAt: 'asc' } },
+        messages: { orderBy: [{ createdAt: 'asc' }, { role: 'desc' }, { id: 'asc' }] },
       },
     });
     if (!thread) throw new NotFoundException('Chat thread not found');

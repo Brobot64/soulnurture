@@ -259,6 +259,50 @@ describe('AiService.generateAndApply', () => {
     expect(outcome.result.humanSupport.recommended).toBe(true);
     expect(outcome.result.action).toBe('HUMAN_SUPPORT');
     expect(outcome.result.message).toContain('you matter');
+    expect(outcome.result.boundary).toEqual({
+      kind: 'ACUTE_SAFEGUARD_ROUTE',
+      intentId: 'SUICIDAL_IDEATION',
+    });
+  });
+
+  it('leaves the boundary unset on a turn that stays inside the AI remit', async () => {
+    prisma.supportFlag.findFirst = vi.fn().mockResolvedValue(null);
+    const module = await createModule({
+      generateResponse: async () => validModelResult(),
+      transcribeAudio: async () => ({ text: 'x' }),
+    });
+    const outcome = await module.get(AiService).generateAndApply(orchestrationInput);
+    expect(outcome.result.boundary).toBeNull();
+  });
+
+  it('marks a banned-claim reply as outside the AI remit', async () => {
+    prisma.supportFlag.findFirst = vi.fn().mockResolvedValue(null);
+    const module = await createModule({
+      generateResponse: async () =>
+        validModelResult({ message: 'I diagnose you with clinical depression.' }),
+      transcribeAudio: async () => ({ text: 'x' }),
+    });
+    const outcome = await module.get(AiService).generateAndApply(orchestrationInput);
+    expect(outcome.verdict).toBeNull();
+    expect(outcome.result.boundary).toEqual({ kind: 'OUT_OF_SCOPE', intentId: null });
+  });
+
+  it('records the acute referral over the banned claim when a turn does both', async () => {
+    prisma.supportFlag.findFirst = vi.fn().mockResolvedValue(null);
+    prisma.supportFlag.create = vi.fn().mockResolvedValue({ id: 'flag-both' });
+    const module = await createModule({
+      generateResponse: async () =>
+        validModelResult({ message: 'I prescribe you something for the anxiety.' }),
+      transcribeAudio: async () => ({ text: 'x' }),
+    });
+    const outcome = await module.get(AiService).generateAndApply({
+      ...orchestrationInput,
+      userContent: 'I want to kill myself',
+    });
+    expect(outcome.result.boundary).toEqual({
+      kind: 'ACUTE_SAFEGUARD_ROUTE',
+      intentId: 'SUICIDAL_IDEATION',
+    });
   });
 
   it('passes truncated content to the provider while the intent floor sees the raw message', async () => {

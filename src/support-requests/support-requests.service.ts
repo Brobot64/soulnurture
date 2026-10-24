@@ -1,17 +1,16 @@
-import {
-  ForbiddenException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import {
   FollowUpStatus,
   SupportFlagStatus,
   SupportPersonType,
   SupportRequestStatus,
+  MessageRole,
   SupportTiming,
+  type Prisma,
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service.js';
 import { ChatService } from '../chat/chat.service.js';
+import { inSchool, schoolOf, supportPeopleInSchool } from '../common/tenant/school-scope.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
 import type { CreateSupportRequestDto } from './dto/create-support-request.dto.js';
@@ -24,6 +23,19 @@ import {
   type SupportPrompt,
 } from './queue-status.js';
 
+const STUDENT_REQUEST_SELECT = {
+  id: true,
+  personType: true,
+  timing: true,
+  note: true,
+  status: true,
+  scheduledAt: true,
+  locationLabel: true,
+  createdAt: true,
+  updatedAt: true,
+  supportPerson: { select: { id: true, name: true, type: true, title: true } },
+} satisfies Prisma.SupportRequestSelect;
+
 @Injectable()
 export class SupportRequestsService {
   constructor(
@@ -33,24 +45,45 @@ export class SupportRequestsService {
     private readonly chatService: ChatService,
   ) {}
 
-  listPeople() {
+  async listPeople(userId: string) {
+    const schoolId = await schoolOf(this.prisma, userId);
+    if (!schoolId) return [];
     return this.prisma.supportPerson.findMany({
-      where: { active: true },
+      where: supportPeopleInSchool(schoolId),
+      select: {
+        id: true,
+        name: true,
+        type: true,
+        title: true,
+        availabilityLabel: true,
+        availableToday: true,
+        imageUrl: true,
+      },
       orderBy: { name: 'asc' },
     });
   }
 
   async create(userId: string, dto: CreateSupportRequestDto) {
-    const student = await this.studentsService.ensureProfile(userId);
+    const schoolId = await schoolOf(this.prisma, userId);
+    if (!schoolId) throw new NotFoundException('Support person not found');
     const person = await this.prisma.supportPerson.findFirst({
-      where: { id: dto.supportPersonId, active: true },
+      where: {
+        id: dto.supportPersonId,
+        type: dto.personType,
+        ...supportPeopleInSchool(schoolId),
+      },
     });
     if (!person) throw new NotFoundException('Support person not found');
+    const student = await this.studentsService.ensureProfile(userId);
 
     const status =
       dto.timing === SupportTiming.URGENT_UNSAFE
         ? SupportRequestStatus.ESCALATED
         : SupportRequestStatus.PENDING;
+
+    const initial = dto.conversationId
+      ? await this.snapshotInitialMessage(student.id, dto.conversationId)
+      : null;
 
     const request = await this.prisma.supportRequest.create({
       data: {
@@ -61,9 +94,11 @@ export class SupportRequestsService {
         note: dto.note,
         checkInId: dto.checkInId,
         conversationId: dto.conversationId,
+        initialMessage: initial?.content ?? null,
+        initialMessageAt: initial?.createdAt ?? null,
         status,
       },
-      include: { supportPerson: true },
+      select: STUDENT_REQUEST_SELECT,
     });
 
     await this.auditService.log({
@@ -72,16 +107,35 @@ export class SupportRequestsService {
       entity: 'SupportRequest',
       entityId: request.id,
       meta: { timing: dto.timing, status },
+      schoolId,
     });
 
     return request;
+  }
+
+  /**
+   * Freezes the student's latest own message in the conversation the request
+   * was raised from. The conversation must belong to the requesting student;
+   * a foreign conversation id answers 404 so nothing is copied from it.
+   */
+  private async snapshotInitialMessage(studentId: string, conversationId: string) {
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, studentId },
+      select: { id: true },
+    });
+    if (!conversation) throw new NotFoundException('Conversation not found');
+    return this.prisma.conversationMessage.findFirst({
+      where: { conversationId, role: MessageRole.USER },
+      orderBy: { createdAt: 'desc' },
+      select: { content: true, createdAt: true },
+    });
   }
 
   async listMine(userId: string) {
     const student = await this.studentsService.ensureProfile(userId);
     const items = await this.prisma.supportRequest.findMany({
       where: { studentId: student.id },
-      include: { supportPerson: true },
+      select: STUDENT_REQUEST_SELECT,
       orderBy: { createdAt: 'desc' },
     });
     return { items };
@@ -89,12 +143,11 @@ export class SupportRequestsService {
 
   async getOne(userId: string, id: string) {
     const student = await this.studentsService.ensureProfile(userId);
-    const item = await this.prisma.supportRequest.findUnique({
-      where: { id },
-      include: { supportPerson: true },
+    const item = await this.prisma.supportRequest.findFirst({
+      where: { id, studentId: student.id },
+      select: STUDENT_REQUEST_SELECT,
     });
     if (!item) throw new NotFoundException('Support request not found');
-    if (item.studentId !== student.id) throw new ForbiddenException();
     return item;
   }
 
@@ -126,11 +179,18 @@ export class SupportRequestsService {
       },
       include: {
         followUps: {
-          select: { id: true, status: true, dueAt: true, completedAt: true },
+          select: {
+            id: true,
+            status: true,
+            dueAt: true,
+            completedAt: true,
+            professional: { select: { userId: true } },
+          },
         },
         supportPerson: { select: { id: true, name: true, type: true } },
         student: {
           select: {
+            id: true,
             firstName: true,
             lastName: true,
             displayName: true,
@@ -211,7 +271,7 @@ export class SupportRequestsService {
             .some((value) => value.toLowerCase().includes(search)),
       )
       .map(({ request, queueStatus, prompt }) =>
-        toQueueItem(request, queueStatus, prompt),
+        toQueueItem(request, queueStatus, prompt, userId),
       );
 
     return { items, counts };
@@ -220,15 +280,19 @@ export class SupportRequestsService {
   /**
    * Counsellor review (report simplified scope: status plus notes).
    * Professionals progress a request through its review statuses and attach
-   * a review note; students see the updated status in their own list.
+   * a review note; students see the updated status in their own list. The
+   * lookup is tenant-scoped: a request belonging to another school reads as
+   * absent, so no professional can progress rows they are not entitled to.
    */
   async review(
     userId: string,
     id: string,
     dto: ReviewSupportRequestDto,
   ) {
-    const existing = await this.prisma.supportRequest.findUnique({
-      where: { id },
+    const schoolId = await schoolOf(this.prisma, userId);
+    if (!schoolId) throw new NotFoundException('Support request not found');
+    const existing = await this.prisma.supportRequest.findFirst({
+      where: { id, ...inSchool(schoolId) },
     });
     if (!existing) throw new NotFoundException('Support request not found');
 
@@ -253,20 +317,20 @@ export class SupportRequestsService {
     if (dto.status === SupportRequestStatus.ACCEPTED) {
       const staff = await this.prisma.user.findUnique({
         where: { id: userId },
-        select: { schoolId: true, name: true },
+        select: { name: true },
       });
-      if (staff?.schoolId) {
-        const note = existing.note?.trim();
-        const summary =
-          `${staff.name} accepted your request to talk.` +
-          (note ? ` You asked: "${note}"` : '');
-        const opened = await this.chatService.openDirectThread(userId, {
-          studentProfileId: existing.studentId,
-          schoolId: staff.schoolId,
-          summary,
-        });
-        chatThreadId = opened.id;
-      }
+      const note = existing.note?.trim();
+      const said = existing.initialMessage?.trim();
+      const summary =
+        `${staff?.name ?? 'A counsellor'} accepted your request to talk.` +
+        (note ? ` You asked: "${note}"` : '') +
+        (said && said !== note ? ` You said: "${said}"` : '');
+      const opened = await this.chatService.openDirectThread(userId, {
+        studentProfileId: existing.studentId,
+        schoolId,
+        summary,
+      });
+      chatThreadId = opened.id;
     }
 
     return { ...updated, chatThreadId };
@@ -276,6 +340,7 @@ export class SupportRequestsService {
 // --- Staff queue row shape --------------------------------------------------
 
 export interface SupportQueueStudent {
+  id: string;
   firstName: string;
   lastName: string | null;
   displayName: string | null;
@@ -290,11 +355,15 @@ export interface SupportQueueItem {
   requestedAt: Date;
   timing: SupportTiming;
   note: string | null;
+  initialMessage: string | null;
+  initialMessageAt: Date | null;
   reviewNote: string | null;
   requestStatus: SupportRequestStatus;
   queueStatus: QueueStatus;
   prompt: SupportPrompt;
   followUpId: string | null;
+  followUpStatus: FollowUpStatus | null;
+  canManageFollowUp: boolean;
   followUpDueAt: Date | null;
   followUpCompletedAt: Date | null;
   conversationId: string | null;
@@ -320,6 +389,8 @@ type QueueRequestRow = {
   createdAt: Date;
   timing: SupportTiming;
   note: string | null;
+  initialMessage: string | null;
+  initialMessageAt: Date | null;
   reviewNote: string | null;
   status: SupportRequestStatus;
   conversationId: string | null;
@@ -328,6 +399,7 @@ type QueueRequestRow = {
     status: FollowUpStatus;
     dueAt: Date | null;
     completedAt: Date | null;
+    professional: { userId: string } | null;
   }[];
   supportPerson: {
     id: string;
@@ -335,6 +407,7 @@ type QueueRequestRow = {
     type: SupportPersonType;
   } | null;
   student: {
+    id: string;
     firstName: string;
     lastName: string | null;
     displayName: string | null;
@@ -359,6 +432,7 @@ function toQueueItem(
   request: QueueRequestRow,
   queueStatus: QueueStatus,
   prompt: SupportPrompt,
+  userId: string,
 ): SupportQueueItem {
   const openFollowUps = request.followUps
     .filter(
@@ -371,6 +445,7 @@ function toQueueItem(
         (a.dueAt?.getTime() ?? Number.MAX_SAFE_INTEGER) -
         (b.dueAt?.getTime() ?? Number.MAX_SAFE_INTEGER),
     );
+  const selectedFollowUp = openFollowUps[0];
   const lastCompletedAt = request.followUps
     .filter((followUp) => followUp.status === FollowUpStatus.COMPLETED)
     .reduce<Date | null>(
@@ -387,12 +462,16 @@ function toQueueItem(
     requestedAt: request.createdAt,
     timing: request.timing,
     note: request.note,
+    initialMessage: request.initialMessage,
+    initialMessageAt: request.initialMessageAt,
     reviewNote: request.reviewNote,
     requestStatus: request.status,
     queueStatus,
     prompt,
-    followUpId: openFollowUps[0]?.id ?? null,
-    followUpDueAt: openFollowUps[0]?.dueAt ?? null,
+    followUpId: selectedFollowUp?.id ?? null,
+    followUpStatus: selectedFollowUp?.status ?? null,
+    canManageFollowUp: selectedFollowUp?.professional?.userId === userId,
+    followUpDueAt: selectedFollowUp?.dueAt ?? null,
     followUpCompletedAt: lastCompletedAt,
     conversationId: request.conversationId,
     student: { ...student, email: user.email },

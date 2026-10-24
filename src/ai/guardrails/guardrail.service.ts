@@ -33,6 +33,9 @@ export interface FilteredOutput {
   notes: string[];
   /** Banned-claim ids that fired (audit/evidence trail). */
   violations: string[];
+  /** True when the model's own words were dropped entirely for scripted copy —
+   * the turn went outside what the AI is allowed to answer. */
+  outOfScope: boolean;
 }
 
 interface CompiledInjection extends InjectionPatternSpec {
@@ -108,6 +111,7 @@ export class GuardrailService {
     const violations: string[] = [];
 
     let current = reply;
+    let outOfScope = false;
     const severe = this.claims().find((claim) =>
       claim.severity === 'severe' && claim.regexes.some((regex) => regex.test(current)),
     );
@@ -117,6 +121,7 @@ export class GuardrailService {
         `Guardrail "${severe.id}" (severe): ${severe.reason} Reply replaced with scripted copy.`,
       );
       current = severe.replacement ?? this.config.output.fallbackCopy;
+      outOfScope = true;
     } else {
       const softHits = this.claims().filter(
         (claim) =>
@@ -140,6 +145,7 @@ export class GuardrailService {
           ),
         );
         current = kept.length > 0 ? kept.join(' ') : this.config.output.fallbackCopy;
+        outOfScope = kept.length === 0;
       }
     }
 
@@ -149,7 +155,7 @@ export class GuardrailService {
       notes.push(truncationNote);
     }
 
-    return { reply: current, notes, violations };
+    return { reply: current, notes, violations, outOfScope };
   }
 
   // -- rate lane ------------------------------------------------------------

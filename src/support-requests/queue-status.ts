@@ -11,8 +11,8 @@ import type { FollowUp } from '@prisma/client';
  * (request status, follow-up status, flag status); the screen shows one
  * queue status per row, derived with this precedence:
  *
- *   1. any follow-up COMPLETED              → FOLLOW_UP_COMPLETED
- *   2. any follow-up PENDING or SCHEDULED   → FOLLOW_UP_REQUIRED
+ *   1. any follow-up PENDING or SCHEDULED   → FOLLOW_UP_REQUIRED
+ *   2. any follow-up COMPLETED (none open)  → FOLLOW_UP_COMPLETED
  *   3. request PENDING or ESCALATED         → NEW
  *   4. otherwise (accepted / scheduled /
  *      in-progress / completed request)     → REVIEWED
@@ -55,16 +55,16 @@ export function deriveQueueStatus(request: {
   followUps: Pick<FollowUp, 'status'>[];
 }): QueueStatus {
   if (
+    request.followUps.some((followUp) => OPEN_FOLLOW_UPS.includes(followUp.status))
+  ) {
+    return 'FOLLOW_UP_REQUIRED';
+  }
+  if (
     request.followUps.some(
       (followUp) => followUp.status === FollowUpStatus.COMPLETED,
     )
   ) {
     return 'FOLLOW_UP_COMPLETED';
-  }
-  if (
-    request.followUps.some((followUp) => OPEN_FOLLOW_UPS.includes(followUp.status))
-  ) {
-    return 'FOLLOW_UP_REQUIRED';
   }
   if (
     request.status === SupportRequestStatus.PENDING ||

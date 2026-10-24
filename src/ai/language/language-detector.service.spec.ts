@@ -174,6 +174,30 @@ describe('LanguageDetectorService', () => {
       );
     });
 
+    it('uses model identification for Hausa thanks below the lexicon threshold', async () => {
+      natlasLlm.completeLabel.mockResolvedValue({ text: 'Language: Hausa', usage: {} });
+
+      expect(await detector.detect('Na gode da taimakon ku')).toEqual({
+        lang: 'ha',
+        confidence: 'medium',
+        method: 'model',
+      });
+      expect(natlasLlm.completeLabel).toHaveBeenCalledWith(
+        expect.any(String),
+        'Na gode da taimakon ku',
+      );
+    });
+
+    it('does not invent a language when Hausa thanks receives an Other label', async () => {
+      natlasLlm.completeLabel.mockResolvedValue({ text: 'Language: Other', usage: {} });
+
+      expect(await detector.detect('Na gode da taimakon ku')).toEqual({
+        lang: null,
+        confidence: 'low',
+        method: 'fallback',
+      });
+    });
+
     it('reads the language header, never the meaning line’s stray codes', async () => {
       natlasLlm.completeLabel.mockResolvedValue({
         text: 'Language: Hausa\nMeaning: Yo, I am happy but I cannot hide my happiness. Ha!',

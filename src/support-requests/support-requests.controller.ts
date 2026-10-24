@@ -36,8 +36,8 @@ export class SupportRequestsController {
   @ApiStandardErrors()
   @ApiOperation({ summary: 'List trusted support people' })
   @ApiEnvelopeOkArray(Object)
-  people() {
-    return this.supportRequestsService.listPeople();
+  people(@Session() session: UserSession) {
+    return this.supportRequestsService.listPeople(session.user.id);
   }
 
   @Post()

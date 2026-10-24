@@ -7,6 +7,7 @@ import {
 import { AuditService } from '../audit/audit.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { supportPeopleInSchool } from '../common/tenant/school-scope.js';
 import {
   SUPPORTED_LANGUAGES,
   type SupportedLanguage,
@@ -147,16 +148,13 @@ export class SupportFlagAlertsService {
       });
     }
 
-    // The recommendation must also land in the staff review TRAY as a
-    // support request — a notification alone is not pick-up-able. URGENT_UNSAFE
-    // maps to ESCALATED, which the queue derives as NEW, and the request is
-    // attached to the first active support person so any professional can
-    // pick it up from their school's queue.
-    const person = await this.prisma.supportPerson.findFirst({
-      where: { active: true },
-      orderBy: { name: 'asc' },
-      select: { id: true, type: true },
-    });
+    const person = schoolId
+      ? await this.prisma.supportPerson.findFirst({
+          where: supportPeopleInSchool(schoolId),
+          orderBy: { name: 'asc' },
+          select: { id: true, type: true },
+        })
+      : null;
     if (person) {
       const note =
         `AI safeguarding escalation — ${flag.triggerLabel}` +
@@ -191,9 +189,12 @@ export class SupportFlagAlertsService {
       },
     });
 
-    return recipients.length > 0
+    if (recipients.length === 0) {
+      return 'Acute flag recorded; no school professionals to alert.';
+    }
+    return person
       ? `School professionals alerted (${recipients.length}); escalation queued in English.`
-      : 'Acute flag recorded; no school professionals to alert.';
+      : `School professionals alerted (${recipients.length}); no active school contact for a tray request.`;
   }
 
   private resolveLanguage(

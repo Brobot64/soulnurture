@@ -7,6 +7,7 @@ import type { AiOrchestrationInput } from './ai.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AiWorkerService } from './ai-worker.service.js';
+import { RealtimeService } from '../realtime/realtime.service.js';
 
 const aiConfigStub = {
   async: {
@@ -78,7 +79,10 @@ describe('AiWorkerService', () => {
   let prisma: {
     $queryRaw: ReturnType<typeof vi.fn>;
     $executeRaw: ReturnType<typeof vi.fn>;
-    conversation: { update: ReturnType<typeof vi.fn> };
+    conversation: {
+      update: ReturnType<typeof vi.fn>;
+      findUnique: ReturnType<typeof vi.fn>;
+    };
     conversationMessage: {
       update: ReturnType<typeof vi.fn>;
       findUnique: ReturnType<typeof vi.fn>;
@@ -91,12 +95,18 @@ describe('AiWorkerService', () => {
     understandMessage: ReturnType<typeof vi.fn>;
   };
   let auditService: { log: ReturnType<typeof vi.fn> };
+  let realtime: { emitToUser: ReturnType<typeof vi.fn> };
 
   beforeEach(async () => {
     prisma = {
       $queryRaw: vi.fn(),
       $executeRaw: vi.fn().mockResolvedValue(0),
-      conversation: { update: vi.fn().mockResolvedValue({}) },
+      conversation: {
+        update: vi.fn().mockResolvedValue({}),
+        findUnique: vi
+          .fn()
+          .mockResolvedValue({ student: { userId: 'student-user-1' } }),
+      },
       conversationMessage: {
         update: vi.fn().mockResolvedValue({}),
         findUnique: vi.fn().mockResolvedValue({ aiPayload: {} }),
@@ -117,6 +127,7 @@ describe('AiWorkerService', () => {
       }),
     };
     auditService = { log: vi.fn().mockResolvedValue({ id: 'audit-1' }) };
+    realtime = { emitToUser: vi.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -125,6 +136,7 @@ describe('AiWorkerService', () => {
         { provide: AiService, useValue: aiService },
         { provide: AuditService, useValue: auditService },
         { provide: AI_CONFIG, useValue: aiConfigStub },
+        { provide: RealtimeService, useValue: realtime },
       ],
     }).compile();
     worker = module.get(AiWorkerService);
@@ -154,6 +166,11 @@ describe('AiWorkerService', () => {
     expect((successUpdate as string[] | undefined)?.join('')).toContain("'SUCCEEDED'");
     expect(auditService.log).not.toHaveBeenCalledWith(
       expect.objectContaining({ action: 'ai_generation.exhausted' }),
+    );
+    expect(realtime.emitToUser).toHaveBeenCalledWith(
+      'student-user-1',
+      'conversation.message.updated',
+      { conversationId: 'conv-1', messageId: 'assistant-1', asyncState: 'COMPLETE' },
     );
   });
 

@@ -92,6 +92,7 @@ enum ResourceCategory {
 enum SupportPersonType {
   COUNSELLOR
   PSYCHOLOGIST
+  SUPPORT_STAFF
   TRUSTED_TEACHER
   PARENT_GUARDIAN
 }
@@ -153,6 +154,14 @@ enum FollowUpStatus {
   CANCELLED
 }
 
+/// A reviewer's read of a reported AI response. Record-only: none of these
+/// changes the AI's reply, the student's conversation, or the reported text.
+enum AiReportReviewOutcome {
+  NO_CHANGE_NEEDED
+  FOLLOWED_UP_WITH_STUDENT
+  CANNOT_ASSESS
+}
+
 /// A tenant school. Soft delete = status SUSPENDED: sign-in is blocked and all
 /// school users are cut off (see tenant.guard.ts + the school-status-guard
 /// Better Auth plugin in auth.config.ts).
@@ -200,6 +209,7 @@ model User {
   school              School?         @relation(fields: [schoolId], references: [id], onDelete: SetNull)
   notifications       Notification[]
   sentChatMessages    ChatMessage[]
+  reviewedAiReports   AiResponseReport[]  @relation("AiReportReview")
 
   @@index([schoolId])
   @@map("user")
@@ -266,6 +276,7 @@ model StudentProfile {
 
   user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   checkIns          EmotionalCheckIn[]
+  checkInFeedbacks  CheckInFeedback[]
   conversations     Conversation[]
   supportRequests   SupportRequest[]
   supportFlags      SupportFlag[]
@@ -342,9 +353,29 @@ model EmotionalCheckIn {
   student         StudentProfile   @relation(fields: [studentId], references: [id], onDelete: Cascade)
   conversations   Conversation[]
   supportRequests SupportRequest[]
+  feedback        CheckInFeedback?
 
   @@index([studentId, createdAt])
   @@map("emotional_check_in")
+}
+
+/// Post-check-in mood feedback: asked after every check-in ("how do you feel
+/// now?"), stored separately from the check-in itself so the platform admin
+/// report can measure the check-in's effect on a student's mood. One row per
+/// check-in (unique checkInId).
+model CheckInFeedback {
+  id         String           @id @default(uuid()) @db.Uuid
+  checkInId  String           @unique @db.Uuid
+  studentId  String           @db.Uuid
+  feeling    FeelingLabel
+  intensity  FeelingIntensity
+  createdAt  DateTime         @default(now())
+
+  checkIn EmotionalCheckIn @relation(fields: [checkInId], references: [id], onDelete: Cascade)
+  student StudentProfile   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([studentId, createdAt])
+  @@map("check_in_feedback")
 }
 
 model Conversation {
@@ -394,9 +425,29 @@ model ConversationMessage {
   createdAt           DateTime @default(now())
   conversation        Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   aiGenerationJob     AiGenerationJob?
+  report              AiResponseReport?
 
   @@index([conversationId, createdAt])
   @@map("conversation_message")
+}
+
+model AiResponseReport {
+  id               String   @id @default(uuid()) @db.Uuid
+  messageId        String   @unique @db.Uuid
+  responseContent  String
+  responseLanguage String?
+  note             String?  @db.VarChar(2000)
+  /// Reviewer decision recorded in the school's review queue. Nullable = not
+  /// reviewed yet; the last decision by any same-school reviewer wins.
+  reviewOutcome    AiReportReviewOutcome?
+  reviewedById     String?  @db.Uuid
+  reviewedAt       DateTime?
+  createdAt        DateTime @default(now())
+  message          ConversationMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  reviewedBy       User?              @relation("AiReportReview", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([createdAt, id])
+  @@map("ai_response_report")
 }
 
 model WellbeingResource {
@@ -464,7 +515,7 @@ model SupportPerson {
   supportRequests   SupportRequest[]
 
   @@map("support_person")
-  @@unique([name, type])
+  @@index([professionalId, type])
 }
 
 model SupportRequest {
@@ -474,6 +525,13 @@ model SupportRequest {
   personType      SupportPersonType
   timing          SupportTiming
   note            String?
+  /// Verbatim snapshot of the student's own message that prompted the request
+  /// (latest USER turn of `conversationId` at creation). Frozen on purpose:
+  /// later edits or deletions of the AI conversation never change what the
+  /// school professional was shown. null on requests created before this
+  /// column existed, and on requests with no conversation.
+  initialMessage     String?
+  initialMessageAt   DateTime?
   reviewNote      String?
   status          SupportRequestStatus @default(PENDING)
   checkInId       String?              @db.Uuid

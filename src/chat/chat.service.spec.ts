@@ -139,10 +139,10 @@ describe('ChatService', () => {
       expect(prisma.chatThread.create).not.toHaveBeenCalled();
     });
 
-    it('creates the thread from the latest check-in: SYSTEM entry, read for the student, pool emit, per-professional notifications, audit', async () => {
+    it('creates separate SYSTEM summary and STUDENT note, marks read, emits to the pool, notifies professionals and audits', async () => {
       givenActiveStudent();
 
-      await service.createThread('u-student', { note: 'maths is stressing me' });
+      await service.createThread('u-student', { note: '  maths is stressing me  ' });
 
       expect(prisma.emotionalCheckIn.findFirst).toHaveBeenCalledWith({
         where: { studentId: 's1' },
@@ -157,28 +157,38 @@ describe('ChatService', () => {
         note: 'maths is stressing me',
       });
       const createArgs = prisma.chatThread.create.mock.calls[0][0];
-      expect(createArgs.data).toMatchObject({
+      expect(createArgs.data).toEqual({
         schoolId: 'school-1',
         studentId: 's1',
         entryCheckInId: 'c1',
         aiEntrySummary: 'AI entry note.',
+        studentReadAt: expect.any(Date),
         messages: {
-          create: {
-            role: 'SYSTEM',
-            content: 'AI entry note.',
-            meta: { composedByAi: true },
-          },
+          create: [
+            {
+              role: 'SYSTEM',
+              content: 'AI entry note.',
+              meta: { composedByAi: true },
+            },
+            {
+              role: 'STUDENT',
+              senderUserId: 'u-student',
+              content: 'maths is stressing me',
+            },
+          ],
         },
       });
-      expect(createArgs.data.studentReadAt).toBeInstanceOf(Date);
-      expect(auditService.log).toHaveBeenCalledWith(
-        expect.objectContaining({
-          actorId: 'u-student',
-          action: 'chat.thread_created',
-          entity: 'ChatThread',
-          meta: { studentId: 's1', checkInId: 'c1', composedByAi: true },
-        }),
-      );
+      expect(createArgs.include).toEqual({
+        messages: { orderBy: [{ createdAt: 'asc' }, { role: 'desc' }, { id: 'asc' }] },
+      });
+      expect(auditService.log).toHaveBeenCalledWith({
+        actorId: 'u-student',
+        action: 'chat.thread_created',
+        entity: 'ChatThread',
+        entityId: 't1',
+        meta: { studentId: 's1', checkInId: 'c1', composedByAi: true },
+        schoolId: 'school-1',
+      });
       expect(realtime.emitToSchoolProfessionals).toHaveBeenCalledWith(
         'school-1',
         REALTIME_EVENTS.CHAT_REQUEST_CREATED,
@@ -189,14 +199,36 @@ describe('ChatService', () => {
         },
       );
       expect(notifications.push).toHaveBeenCalledTimes(2);
-      expect(notifications.push).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userId: 'u-pro-1',
+      for (const userId of ['u-pro-1', 'u-pro-2']) {
+        expect(notifications.push).toHaveBeenCalledWith({
+          userId,
           type: 'CHAT_REQUEST',
           title: 'Sam asked to talk',
+          body: 'AI entry note.',
           data: { threadId: 't1' },
-        }),
+        });
+      }
+    });
+
+    it.each([
+      { label: 'omitted', dto: {} },
+      { label: 'empty', dto: { note: '' } },
+      { label: 'whitespace-only', dto: { note: ' \n\t\u00a0 ' } },
+    ])('creates only the SYSTEM summary for an $label note', async ({ dto }) => {
+      givenActiveStudent();
+
+      await service.createThread('u-student', dto);
+
+      expect(aiService.composeHandoffEntry).toHaveBeenCalledWith(
+        expect.objectContaining({ note: null }),
       );
+      expect(prisma.chatThread.create.mock.calls[0][0].data.messages.create).toEqual([
+        {
+          role: 'SYSTEM',
+          content: 'AI entry note.',
+          meta: { composedByAi: true },
+        },
+      ]);
     });
 
     it('404s when the attached check-inId belongs to another student', async () => {
@@ -214,14 +246,16 @@ describe('ChatService', () => {
       expect(prisma.chatThread.create).not.toHaveBeenCalled();
     });
 
-    it('falls back to deterministic copy (without the note) when the AI composer fails', async () => {
+    it('keeps the student note separate from deterministic fallback copy when AI fails', async () => {
       givenActiveStudent();
       aiService.composeHandoffEntry.mockRejectedValue(new Error('provider down'));
 
       await service.createThread('u-student', { note: 'sensitive words here' });
 
       const createArgs = prisma.chatThread.create.mock.calls[0][0];
-      const entry = createArgs.data.messages.create;
+      const [entry, note] = createArgs.data.messages.create;
+      expect(createArgs.data.messages.create).toHaveLength(2);
+      expect(entry.role).toBe('SYSTEM');
       expect(entry.meta).toEqual({ composedByAi: false });
       expect(entry.content).toContain('Sam (JSS 2) asked to talk with someone.');
       expect(entry.content).toContain(
@@ -230,7 +264,66 @@ describe('ChatService', () => {
       expect(entry.content).toContain('They mentioned EXAMS.');
       expect(entry.content).not.toContain('sensitive words here');
       expect(createArgs.data.aiEntrySummary).toBe(entry.content);
+      expect(note).toEqual({
+        role: 'STUDENT',
+        senderUserId: 'u-student',
+        content: 'sensitive words here',
+      });
+      expect(auditService.log).toHaveBeenCalledWith({
+        actorId: 'u-student',
+        action: 'chat.thread_created',
+        entity: 'ChatThread',
+        entityId: 't1',
+        meta: { studentId: 's1', checkInId: 'c1', composedByAi: false },
+        schoolId: 'school-1',
+      });
+      expect(notifications.push).toHaveBeenCalledTimes(2);
+      for (const userId of ['u-pro-1', 'u-pro-2']) {
+        expect(notifications.push).toHaveBeenCalledWith({
+          userId,
+          type: 'CHAT_REQUEST',
+          title: 'Sam asked to talk',
+          body: entry.content,
+          data: { threadId: 't1' },
+        });
+      }
     });
+
+    it.each([true, false])(
+      'preserves unicode, vernacular and inner whitespace verbatim (AI available: %s)',
+      async (aiAvailable) => {
+        givenActiveStudent();
+        if (!aiAvailable) {
+          aiService.composeHandoffEntry.mockRejectedValue(new Error('provider down'));
+        }
+        const note = 'Ẹ jọ̀ọ́,  ẹ gbọ́ mi.\nI no dey okay o.\n\tMo fẹ́ sọ̀rọ̀ — abeg.';
+
+        await service.createThread('u-student', { note: ` \n\t${note}\n  ` });
+
+        expect(aiService.composeHandoffEntry).toHaveBeenCalledWith(
+          expect.objectContaining({ note }),
+        );
+        const { messages, aiEntrySummary } = prisma.chatThread.create.mock.calls[0][0].data;
+        expect(messages.create).toEqual([
+          {
+            role: 'SYSTEM',
+            content: aiEntrySummary,
+            meta: { composedByAi: aiAvailable },
+          },
+          { role: 'STUDENT', senderUserId: 'u-student', content: note },
+        ]);
+        expect(aiEntrySummary).not.toContain(note);
+        const serializedNote = JSON.stringify(note).slice(1, -1);
+        for (const calls of [
+          auditService.log.mock.calls,
+          notifications.push.mock.calls,
+          realtime.emitToSchoolProfessionals.mock.calls,
+          realtime.emitToUser.mock.calls,
+        ]) {
+          expect(JSON.stringify(calls)).not.toContain(serializedNote);
+        }
+      },
+    );
   });
 
   describe('listThreads', () => {
@@ -262,6 +355,29 @@ describe('ChatService', () => {
       expect(result).toEqual({ items: [{ id: 't9' }] });
     });
 
+    it.each(['STUDENT', 'COUNSELLOR'])(
+      'keeps same-timestamp opening previews deterministic for %s',
+      async (role) => {
+        prisma.user.findUnique.mockResolvedValue({ role });
+        prisma.professionalProfile.findUnique.mockResolvedValue({ id: 'p1' });
+        prisma.chatThread.findMany.mockResolvedValue([]);
+
+        await service.listThreads(role === 'STUDENT' ? 'u-student' : 'u-pro');
+
+        expect(prisma.chatThread.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            include: expect.objectContaining({
+              messages: {
+                orderBy: [{ createdAt: 'desc' }, { role: 'asc' }, { id: 'desc' }],
+                take: 1,
+                select: { content: true, role: true, createdAt: true },
+              },
+            }),
+          }),
+        );
+      },
+    );
+
     it('staff without a professional profile see an empty list', async () => {
       prisma.user.findUnique.mockResolvedValue({ role: 'COUNSELLOR' });
       prisma.professionalProfile.findUnique.mockResolvedValue(null);
@@ -280,26 +396,81 @@ describe('ChatService', () => {
   });
 
   describe('inbox', () => {
-    it('lists the school PENDING pool oldest-first with student identity', async () => {
-      prisma.user.findUnique.mockResolvedValue({ schoolId: 'school-1' });
-      prisma.chatThread.findMany.mockResolvedValue([{ id: 't1' }]);
+    it.each(['school-1', 'school-2'])(
+      'lists only the PENDING pool for %s with student identity and the earliest STUDENT message',
+      async (schoolId) => {
+        prisma.user.findUnique.mockResolvedValue({ schoolId });
+        const items = [
+          {
+            id: 't1',
+            schoolId,
+            aiEntrySummary: 'AI entry note.',
+            messages: [
+              {
+                content: 'I no dey okay o.\nAbeg  help me.',
+                role: 'STUDENT',
+                createdAt: new Date('2026-10-09T09:00:00Z'),
+              },
+            ],
+          },
+        ];
+        prisma.chatThread.findMany.mockResolvedValue(items);
 
-      await service.inbox('u-pro');
+        const result = await service.inbox('u-pro');
 
-      expect(prisma.chatThread.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { schoolId: 'school-1', status: 'PENDING' },
+        expect(prisma.user.findUnique).toHaveBeenCalledWith({
+          where: { id: 'u-pro' },
+          select: { schoolId: true },
+        });
+        expect(prisma.chatThread.findMany).toHaveBeenCalledTimes(1);
+        expect(prisma.chatThread.findMany).toHaveBeenCalledWith({
+          where: { schoolId, status: 'PENDING' },
           orderBy: { createdAt: 'asc' },
-        }),
-      );
+          include: {
+            student: {
+              select: {
+                firstName: true,
+                lastName: true,
+                classLabel: true,
+                studentCode: true,
+              },
+            },
+            messages: {
+              where: { role: 'STUDENT' },
+              orderBy: { createdAt: 'asc' },
+              take: 1,
+              select: { content: true, role: true, createdAt: true },
+            },
+          },
+        });
+        expect(result).toEqual({ items });
+      },
+    );
+
+    it('does not substitute summaries for legacy or no-note rows without STUDENT messages', async () => {
+      prisma.user.findUnique.mockResolvedValue({ schoolId: 'school-1' });
+      prisma.chatThread.findMany.mockResolvedValue([
+        { id: 't-legacy', aiEntrySummary: 'Legacy summary.', messages: [] },
+        { id: 't-no-note', aiEntrySummary: 'AI entry note.', messages: [] },
+      ]);
+
+      await expect(service.inbox('u-pro')).resolves.toEqual({
+        items: [
+          { id: 't-legacy', aiEntrySummary: 'Legacy summary.', messages: [] },
+          { id: 't-no-note', aiEntrySummary: 'AI entry note.', messages: [] },
+        ],
+      });
     });
 
-    it('returns empty for staff without a school', async () => {
-      prisma.user.findUnique.mockResolvedValue({ schoolId: null });
+    it.each([{ schoolId: null }, null])(
+      'returns empty without querying threads when the user has no school: %j',
+      async (user) => {
+        prisma.user.findUnique.mockResolvedValue(user);
 
-      await expect(service.inbox('u-pro')).resolves.toEqual({ items: [] });
-      expect(prisma.chatThread.findMany).not.toHaveBeenCalled();
-    });
+        await expect(service.inbox('u-pro')).resolves.toEqual({ items: [] });
+        expect(prisma.chatThread.findMany).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('claim', () => {
@@ -607,12 +778,33 @@ describe('ChatService', () => {
       prisma.chatThread.findUnique.mockResolvedValue(full);
 
       await expect(service.getThread('u-student', 't1')).resolves.toBe(full);
+      expect(prisma.chatThread.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          include: expect.objectContaining({
+            messages: { orderBy: [{ createdAt: 'asc' }, { role: 'desc' }, { id: 'asc' }] },
+          }),
+        }),
+      );
     });
 
     it('404s non-participants', async () => {
       prisma.chatThread.findUnique.mockResolvedValue(thread());
 
       const rejection = await rejectionOf(service.getThread('u-ghost', 't1'));
+
+      expect(rejection?.getStatus()).toBe(404);
+    });
+
+    it('keeps a PENDING thread detail participant-only despite exposing its note in the school inbox', async () => {
+      const pending = thread({
+        status: 'PENDING',
+        professional: null,
+        messages: [{ role: 'STUDENT', content: 'I need to talk.' }],
+      });
+      prisma.chatThread.findUnique.mockResolvedValue(pending);
+
+      await expect(service.getThread('u-student', 't1')).resolves.toBe(pending);
+      const rejection = await rejectionOf(service.getThread('u-pro', 't1'));
 
       expect(rejection?.getStatus()).toBe(404);
     });
