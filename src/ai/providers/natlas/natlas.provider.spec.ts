@@ -16,7 +16,6 @@ const aiConfig = {
     natlasBaseUrl: 'http://vps:11434',
     natlasModel: 'n-atlas',
     understandingMaxOutputTokens: 120,
-    understandingTimeoutMs: 15_000,
     natlasTranslateTimeoutMs: 10_000,
   },
 } as unknown as AiConfig;

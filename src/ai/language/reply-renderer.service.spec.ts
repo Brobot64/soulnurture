@@ -14,7 +14,6 @@ const aiConfig = {
     natlasModel: 'NCAIR1/N-ATLaS',
     natlasRenderTimeoutMs: 12_000,
     renderMaxOutputTokens: 400,
-    understandingTimeoutMs: 15_000,
   },
 } as unknown as AiConfig;
 

@@ -15,7 +15,6 @@ const aiConfig = {
     understandingMaxOutputTokens: 120,
     renderMaxOutputTokens: 400,
     identifyMaxOutputTokens: 64,
-    understandingTimeoutMs: 15_000,
   },
 } as unknown as AiConfig;
 

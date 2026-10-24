@@ -57,7 +57,6 @@ const aiConfigStub = {
     natlasBaseUrl: null,
     natlasModel: 'n-atlas',
     understandingMaxOutputTokens: 120,
-    understandingTimeoutMs: 15_000,
   },
 } as AiConfig;
 

@@ -162,7 +162,6 @@ const aiConfigStub = {
     identifyMaxOutputTokens: 64,
     understandingMaxOutputTokens: 120,
     renderMaxOutputTokens: 400,
-    understandingTimeoutMs: 15_000,
   },
 } as unknown as AiConfig;
 

@@ -136,8 +136,6 @@ export interface AiConfig {
     /** Output budget for the language-ID reply (language header line plus a
      * short translation; the header prints first, so truncation is safe). */
     identifyMaxOutputTokens: number;
-    /** Per-attempt timeout for the OpenAI translation fallback (ms). */
-    understandingTimeoutMs: number;
   };
   context: {
     /** Max recent messages replayed to the model. */
@@ -338,7 +336,6 @@ export function buildAiConfig(config: ConfigService): AiConfig {
       understandingMaxOutputTokens: 120,
       renderMaxOutputTokens: 400,
       identifyMaxOutputTokens: 64,
-      understandingTimeoutMs: 15_000,
     },
     context: {
       messageLimit: Number(config.get<string>('AI_CONTEXT_MESSAGE_LIMIT') ?? 12),

@@ -12,7 +12,7 @@ const ENGLISH =
 
 const aiConfig = {
   openai: { model: 'gpt-test' },
-  language: { renderMaxOutputTokens: 400, understandingTimeoutMs: 15_000 },
+  language: { renderMaxOutputTokens: 400 },
 } as unknown as AiConfig;
 
 

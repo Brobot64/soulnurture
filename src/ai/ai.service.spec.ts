@@ -61,7 +61,6 @@ const aiConfigStub = {
     natlasRenderTimeoutMs: 12_000,
     understandingMaxOutputTokens: 120,
     renderMaxOutputTokens: 400,
-    understandingTimeoutMs: 15_000,
   },
 } as unknown as AiConfig;
 
