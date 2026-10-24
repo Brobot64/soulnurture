@@ -107,4 +107,53 @@ describe('AiContextService', () => {
       followUpHooks: [{ followUpHook: 'Check in gently.', createdAt }],
     });
   });
+
+  it('pivots stored turns to their English sources for the model window', async () => {
+    memory.recall.mockResolvedValue({ recents: [], hooks: [], similar: [] });
+    prisma.conversationMessage.findMany.mockResolvedValue([
+      {
+        role: 'ASSISTANT',
+        content: 'Mo wà níbí pẹ̀lú rẹ.',
+        language: 'yo',
+        aiPayload: { render: { englishSource: 'I am here with you.' } },
+      },
+      {
+        role: 'USER',
+        content: 'Mo ti rẹ̀ rẹ̀ lónìí',
+        language: 'yo',
+        aiPayload: {
+          understanding: { englishTranslation: 'I am tired today.' },
+        },
+      },
+      { role: 'USER', content: 'hello', language: 'en', aiPayload: null },
+    ]);
+
+    const ctx = await service.build({ studentId: 's1', conversationId: 'c1' });
+
+    expect(ctx.recentConversation).toEqual([
+      { role: 'USER', content: 'hello', language: 'en' },
+      { role: 'USER', content: 'I am tired today.', language: 'yo' },
+      { role: 'ASSISTANT', content: 'I am here with you.', language: 'yo' },
+    ]);
+  });
+
+  it('keeps raw content for turns without a pivot payload', async () => {
+    memory.recall.mockResolvedValue({ recents: [], hooks: [], similar: [] });
+    prisma.conversationMessage.findMany.mockResolvedValue([
+      {
+        role: 'ASSISTANT',
+        content: 'Morning! How are you?',
+        language: 'en',
+        aiPayload: { applicationNotes: [] },
+      },
+      { role: 'USER', content: 'Good morning', language: null, aiPayload: {} },
+    ]);
+
+    const ctx = await service.build({ studentId: 's1', conversationId: 'c1' });
+
+    expect(ctx.recentConversation).toEqual([
+      { role: 'USER', content: 'Good morning', language: null },
+      { role: 'ASSISTANT', content: 'Morning! How are you?', language: 'en' },
+    ]);
+  });
 });

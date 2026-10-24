@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { MessageRole } from '@prisma/client';
 import { AI_CONFIG } from '../config/ai.config.js';
 import type { AiConfig } from '../config/ai.config.js';
+import { pivotTurnText } from '../language/history-pivot.js';
 import { MemoryRepository } from '../memory/memory.repository.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
 
@@ -12,7 +13,8 @@ export interface AiContext {
     intensity: string | null;
     description: string | null;
   } | null;
-  /** Chronological history, excluding the current turn. `language` is the
+  /** Chronological history, excluding the current turn. `content` is pivoted
+   * to English (history_en) when the turn was vernacular. `language` is the
    * language that turn was in (null for older messages). */
   recentConversation: {
     role: 'USER' | 'ASSISTANT';
@@ -105,10 +107,17 @@ export class AiContextService {
     });
 
     // Newest-first from the query: keep the NEWEST messages that fit the
-    // character budget, then return them in chronological order.
+    // character budget, then return them in chronological order. The pivot
+    // happens before budgeting so the model spends its window on meaning,
+    // not on text it cannot read.
     const chronological = rows
       .filter((m) => !isQueuedPlaceholder(m.aiPayload))
-      .reverse();
+      .reverse()
+      .map((m) => ({
+        role: m.role as 'USER' | 'ASSISTANT',
+        content: pivotTurnText(m),
+        language: m.language ?? null,
+      }));
     const kept: typeof chronological = [];
     let used = 0;
     for (let i = chronological.length - 1; i >= 0; i--) {
@@ -117,11 +126,6 @@ export class AiContextService {
       kept.unshift(m);
       used += m.content.length;
     }
-    const trimmed = kept.map((m) => ({
-      role: m.role as 'USER' | 'ASSISTANT',
-      content: m.content,
-      language: m.language ?? null,
-    }));
 
     const resources = await this.prisma.wellbeingResource.findMany({
       where: { active: true, approved: true },
@@ -151,7 +155,7 @@ export class AiContextService {
             description: checkIn.description,
           }
         : null,
-      recentConversation: trimmed,
+      recentConversation: kept,
       relevantReflection: null,
       relevantResources: resources.map((r) => ({
         id: r.id,

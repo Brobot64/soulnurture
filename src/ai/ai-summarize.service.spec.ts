@@ -299,4 +299,39 @@ describe('AiService.summarizeConversation', () => {
     expect(sent.systemPrompt).toContain('Student: My life is finished');
     expect(sent.systemPrompt).not.toContain('ndu m agwula');
   });
+
+  it('summarizes vernacular ASSISTANT renders from their English source', async () => {
+    prisma.conversationMessage.findMany.mockResolvedValue([
+      {
+        role: 'USER',
+        content: 'Mo ti rẹ̀ rẹ̀ lónìí',
+        aiPayload: {
+          understanding: { englishTranslation: 'I am tired today.' },
+        },
+      },
+      {
+        role: 'ASSISTANT',
+        content: 'Mo wà níbí pẹ̀lú rẹ.',
+        aiPayload: {
+          render: { language: 'yo', via: 'n-atlas-local', englishSource: 'I am here with you.' },
+        },
+      },
+      {
+        role: 'ASSISTANT',
+        content: 'No render behind this line.',
+        aiPayload: { applicationNotes: [] },
+      },
+    ]);
+    const service = await createService();
+
+    await service.summarizeConversation({
+      studentId: 's1',
+      conversationId: 'conv-1',
+    });
+
+    const sent = generateResponse.mock.calls[0][0] as { systemPrompt: string };
+    expect(sent.systemPrompt).toContain('Soul Nurture: I am here with you.');
+    expect(sent.systemPrompt).toContain('Soul Nurture: No render behind this line.');
+    expect(sent.systemPrompt).not.toContain('Mo wà níbí');
+  });
 });
