@@ -689,6 +689,12 @@ the backend origin, and `set-cookie` is relaxed (`Secure` and `Domain=` dropped,
 `SameSite=None` → `SameSite=Lax`). Open `http://localhost:5050` — never
 `file://`, which ships no cookies at all.
 
+`ALLOWED_ORIGINS` in `.env` must list the **browser's** origin, not the
+backend's: `http://localhost:5050` for this harness (and `http://localhost:3001`
+if the local vite app is what you are driving). A missing entry fails at the
+CORS layer with an opaque fetch error that looks like a dead backend — the
+server is fine; the origin was never allowed. Restart after editing `.env`.
+
 The page signs in as the local journey account (`jude.okonkwo@miva.edu.ng`,
 created by `test/e2e-journey.mjs`), accepts the current disclosure, opens a
 conversation, then drives turns. Each turn card records the detected language,
