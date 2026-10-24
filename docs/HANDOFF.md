@@ -67,6 +67,30 @@ Mandate: from the Figma PNA-4 gap analysis, "start on blocker 1" — the cross-s
 
 ---
 
+## 0C. Session delta — 2026-10-24 (Phase 3 closed: record-only AI-report review + the boundary marker)
+
+Mandate: "complete phase 3 and start phase 5". Branches `BACKEND_CONTACTS_MESSAGES_001` (here) and `FRONTEND_CONTRACTS_001` (frontend repo). **Nothing committed, pushed, merged or deployed yet** — this whole arc is still working-tree only in both repos.
+
+**What shipped in this slice (AI response reports):**
+- **Record-only reviewer decision** on a reported AI reply — `PATCH /api/v1/ai-response-reports/:id/review` with body `{outcome: NO_CHANGE_NEEDED | FOLLOWED_UP_WITH_STUDENT | CANNOT_ASSESS}` (owner's explicit choice: *store the decision, change nothing else*). It writes `reviewOutcome`/`reviewedById`/`reviewedAt` on `ai_response_report` plus one metadata-only `ai_response_report.review_recorded` audit row **in the same `$transaction`**, so a failed audit rolls the decision back. It does **not** mutate the AI reply, the conversation, memory, or the reported text; creates no support request; notifies nobody. Same reviewer + same outcome is idempotent (no second audit); a different outcome or a different reviewer replaces it — last decision wins, and it is re-attributed.
+- **Migration `20261024090000_ai_response_report_review`** adds the `AiReportReviewOutcome` enum + the three columns with `ON DELETE SET NULL` on `reviewedById` (matching `AuditLog`): deleting a staff account must not destroy a clinical decision or its timestamp. Hand-written DDL verified byte-for-byte in shape against `prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script` — no live DB was needed, and none was created.
+- **The leak this closed (caught while updating the harness, not by a test):** putting the review fields into the single `reportSelect` leaked a reviewer's decision — and the reviewer's *name* — into the student's submit/retry response. Fixed by splitting the projections: `submissionSelect` (base fields only) for every student path, `reportSelect` (base + decision + `reviewedBy{name,role}`) for reviewer reads. Student invisibility is now enforced by which select is used, never by filtering a response.
+- **Tenancy** rides the student's current school via `common/tenant/school-scope` (`message.conversation.inSchool`) exactly as §0B established; every reviewer read *and* the PATCH resolve through the actor's own school, so a foreign or withdrawn report answers **404** (never 403) and a school-less staff account fails closed before any report query. Denied actions write nothing.
+- **`aiPayload.boundary`** (G2/G3, Figma): server-owned `OUT_OF_SCOPE` | `ACUTE_SAFEGUARD_ROUTE` on the turn payload, derived in `ai.service.ts` — never trusted from the model, acute **wins** over out-of-scope, already stamped on the async holding placeholder, and **excluded** from `/review-context`. The frontend renders it from `entry.aiPayload?.boundary` via `components/BoundaryNotice.tsx`; the AI's words are unchanged, the student just sees where the AI stopped.
+- **G7 "Where the AI stops"** (`_dash/school/ai-boundaries.index.tsx`, reviewer rail): every sentence on it is read live from `GET /api/v1/ai/config`, so the page can never claim more than the guardrails actually enforce — severe banned claim → "whole reply replaced" (with the scripted copy), soft → "offending sentences removed", each intent lists exactly `intent.actions` verbatim, plus rate/message/reply caps, the injection probe count and the language lane. Reading the config writes nothing.
+- **Docs:** new **§15** in `docs/API-TESTING-HANDBOOK.md` (submit/receipts/reviewer reads/PATCH semantics with an explicit "Deliberately absent" list/§15.5 boundary marker), `AiReportReviewOutcome` row in Appendix A, dated Appendix C row.
+
+**Verification:** backend `npm test` **67 files / 1662 tests passed** (was 1631), `nest build` clean, `npm run lint` 8 warnings / 0 errors (all pre-existing in `src/ai/eval/*`). Frontend `tsc --noEmit` clean, `npm run build` succeeded (only the pre-existing lucide-react `"use client"` warnings); `routeTree.gen.ts` regenerated for the new routes.
+
+**Still open — read before touching the release:**
+1. **Phase 4 is unverified.** The N-ATLaS HF endpoint (now AWS L4, scale-to-zero) has not returned a successful live inference this arc. A cold boot costs ~8–16 min of L4 time.
+2. **Nothing is browser-verified**: `ReviewDecision`, the reports queue chips, the G7 page and `BoundaryNotice` have only typecheck/build evidence.
+3. **`test/e2e-phase-one.mjs` is untracked and has NOT been re-run** with its new review block. Its disposable-Postgres bootstrap harness was deliberately deleted ("Removed Phase1 scratch infrastructure — do not try to reuse"), so re-running it means rebuilding that infra first. PGlite is **not** usable for migration parity — `20261006193000_phase_c_memory` needs the `vector` extension (`P3018`).
+4. **Prod prerequisites for the deploy** (five unreleased migrations: `20261013085000_check_in_feedback`, `20261023110000_support_staff_contact_type`, `20261023110100_school_support_contacts`, `20261023120000_ai_response_reports`, `20261024090000_ai_response_report_review`): `PLATFORM_ADMIN_*` is still absent from `/opt/natlas/.env` (superadmin seeding is the owner's hands — SSH from the agent side is classifier-blocked), and the `AI_VERNACULAR_REPLY_MODE` flip status is unconfirmed.
+5. `test/*.mjs` probes accumulated as untracked files (`conversation-inspector`, `local-fallback-probe`, `pilot-live-probe`, `pivot-vs-direct`, `socket-probe`, `vernacular-probe`, `whoami-probe`, `yoruba-live-probe`) — decide per file whether it belongs in the commit or is scratch.
+
+---
+
 
 ## 1. Who we are building (30-second orientation)
 
