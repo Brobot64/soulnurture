@@ -655,13 +655,52 @@ every sentence, fallback copy is stored instead.
 > days) + top-2 vector-similar summaries when embeddings exist — carried into
 > the model context as `carriedContext`.
 
-> Vernacular USER messages are summarized from their stored English
-> `understanding.englishTranslation` (written by the §5.3 worker lane) when
-> present, never from the untranslated raw text.
+> history_en (`src/ai/language/history-pivot.ts`): every stored turn the system
+> re-reads reaches it in English. USER turns pivot from the VERNACULAR
+> `understanding.englishTranslation` (§5.3 worker lane), ASSISTANT turns from the
+> render's `englishSource` (the model's own pre-render wording, so the pivot is
+> exact rather than re-translated), and either falls back to the raw text when no
+> pivot exists — English turns, renders that never happened, rows predating the
+> language lanes. Both consumers of history use it: the session-summary
+> transcript here and the model's context window
+> (`AiContext.recentConversation`, `src/ai/context/ai-context.service.ts`),
+> which budgets on the pivoted text.
 
 > Idle close: any `ACTIVE` conversation with at least one message, untouched
 > for `AI_SESSION_IDLE_MINUTES` (default 120 min), is closed automatically by
 > the worker with a SUMMARY job — no endpoint call needed.
+
+### 5.6 Manual browser harness (`test/language-harness/`)
+
+The scripted probes in this chapter prove the contract; this proves what a
+student actually sees. Two files, zero dependencies:
+
+```
+npm run start:dev                          # backend on :3000, local database
+node test/language-harness/server.mjs      # http://localhost:5050
+```
+
+`server.mjs` serves the page at `/` and proxies `/api/*` to the backend
+(`UPSTREAM_HOST`/`UPSTREAM_PORT`, defaults `127.0.0.1:3000`) with the two fixups
+local better-auth needs on an http origin: the request `Origin` is rewritten to
+the backend origin, and `set-cookie` is relaxed (`Secure` and `Domain=` dropped,
+`SameSite=None` → `SameSite=Lax`). Open `http://localhost:5050` — never
+`file://`, which ships no cookies at all.
+
+The page signs in as the local journey account (`jude.okonkwo@miva.edu.ng`,
+created by `test/e2e-journey.mjs`), accepts the current disclosure, opens a
+conversation, then drives turns. Each turn card records the detected language,
+the reply language, the `render` block (`via` plus its `englishSource`), the
+server-owned `aiPayload.boundary` marker (§15.5), any `supportFlag` candidate,
+and the async `understanding` once the VERNACULAR lane lands it — polled for 60
+seconds, because the reply ships first and the translation follows. Voice turns
+capture real microphone audio into `POST /api/v1/ai/transcribe` (§9.6). For a
+scripted drive, `window.harness` exposes `{ api, signIn, newConversation,
+sendTurn, transcribe }`.
+
+Messages leave exactly as the app sends them — with **no `language` field**
+(§5.3): detection from the typed text is the sole input, which is the point of
+the whole harness.
 
 ---
 

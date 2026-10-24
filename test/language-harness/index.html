@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Natlas language harness — VERNACULAR_SAFETY_017</title>
+<title>Natlas language harness — vernacular lanes</title>
 <style>
   :root {
     --bg: #0f1419; --panel: #1a2129; --border: #2b3542; --text: #dde5ee;
@@ -74,7 +74,7 @@
 <body>
 <header>
   <h1>Natlas language harness</h1>
-  <span class="sub">text + voice → detection → reply language · VERNACULAR_SAFETY_017</span>
+  <span class="sub">text + voice → detection → reply language → boundary</span>
   <span id="conn" class="badge">backend: checking…</span>
 </header>
 
@@ -121,7 +121,7 @@
       <div class="row">
         <button id="send" class="primary">Send turn</button>
       </div>
-      <div class="hint">Student rate limit: 6 turns / rolling minute — space rapid tests.</div>
+      <div class="hint">No per-minute throttle on this AI lane (the throttled one is the human staff↔student chat lane, <code>src/chat</code>) — but every turn costs a real generation, so keep it purposeful.</div>
     </div>
 
     <div class="card">
@@ -146,7 +146,7 @@
   </section>
 
   <section id="log">
-    <div class="empty" id="logEmpty">Turns will appear here: detection, reply language, render payload — and the async understanding once the VERNACULAR lane lands it.</div>
+    <div class="empty" id="logEmpty">Turns will appear here: detection, reply language, render payload, the boundary the AI stopped at — and the async understanding once the VERNACULAR lane lands it.</div>
   </section>
 </main>
 
@@ -241,14 +241,14 @@ function turnCard(studentText, res) {
   const payload = assistant?.aiPayload ?? {};
   const notes = payload.applicationNotes ?? [];
   const flag = payload.supportFlag ?? null;
+  const boundary = payload.boundary ?? null;
 
   const replyLang = render?.language ?? (offer?.detected ?? null);
   const langPill = replyLang
     ? pill(`reply language: ${replyLang}`, 'lang')
     : pill('reply language: en (no render)', '');
-  const verifyPill = render
-    ? (render.verified ? pill(`verified (${render.attempts} attempt${render.attempts === 1 ? '' : 's'})`, 'lang')
-                       : pill(`UNVERIFIED best-effort (${render.attempts})`, 'bad'))
+  const boundaryPill = boundary
+    ? pill(`boundary: ${boundary.kind}`, 'bad')
     : '';
   const viaPill = render ? pill(`via ${render.via}`) : '';
   const flagPill = flag?.candidate
@@ -260,13 +260,14 @@ function turnCard(studentText, res) {
   el.innerHTML = `
     <div class="head">
       <span class="n">#${turnCount} · ${res.status} · ${res.ms}ms</span>
-      ${langPill}${viaPill}${verifyPill}${flagPill}
+      ${langPill}${viaPill}${boundaryPill}${flagPill}
     </div>
     <div class="you">You: ${escapeHtml(studentText)}</div>
     <div style="height:6px"></div>
     <div class="ai">AI: ${escapeHtml(assistant?.content ?? '(no reply)')}</div>
     <div class="kv">languageOffer: ${JSON.stringify(offer)}</div>
     <div class="kv">render: ${JSON.stringify(render)}</div>
+    <div class="kv">boundary: ${JSON.stringify(boundary)}</div>
     ${notes.length ? `<div class="kv">notes:\n  - ${notes.map(escapeHtml).join('\n  - ')}</div>` : ''}
     <div class="kv" data-role="understanding"><span class="spin"></span> understanding (VERNACULAR lane): waiting…</div>
     <details><summary>raw response</summary><pre>${escapeHtml(JSON.stringify(res.body, null, 2))}</pre></details>
