@@ -1,4 +1,6 @@
+import type { Prisma } from '@prisma/client';
 import type { PrismaService } from '../../prisma/prisma.service.js';
+import { STAFF_ROLES } from '../../users/dto/staff-bootstrap.dto.js';
 
 /**
  * Tenant predicate for the student-owned tables (support flags, check-ins,
@@ -8,6 +10,15 @@ import type { PrismaService } from '../../prisma/prisma.service.js';
  */
 export function inSchool(schoolId: string) {
   return { student: { user: { schoolId } } };
+}
+
+export function supportPeopleInSchool(schoolId: string): Prisma.SupportPersonWhereInput {
+  return {
+    active: true,
+    professional: {
+      user: { schoolId, deactivatedAt: null, role: { in: [...STAFF_ROLES] } },
+    },
+  };
 }
 
 /**

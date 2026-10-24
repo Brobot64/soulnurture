@@ -8,5 +8,7 @@ export type AppRole =
   | 'SCHOOL_ADMIN'
   | 'PLATFORM_ADMIN';
 
+export const REVIEWER_ROLES = ['COUNSELLOR', 'PSYCHOLOGIST'] as const satisfies readonly AppRole[];
+
 export const ROLES_KEY = 'app_roles';
 export const Roles = (...roles: AppRole[]) => SetMetadata(ROLES_KEY, roles);

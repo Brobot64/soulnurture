@@ -254,6 +254,13 @@ export class SchoolUsersService {
         title: input.title?.trim() ?? null,
         department: input.department?.trim() ?? null,
         available: true,
+        supportPeople: {
+          create: {
+            name: input.name.trim(),
+            type: input.role,
+            title: input.title?.trim() ?? null,
+          },
+        },
       },
     });
 
@@ -330,6 +337,20 @@ export class SchoolUsersService {
         data: {
           ...(input.name !== undefined ? { name: input.name.trim() } : {}),
           ...(input.phone !== undefined ? { phone: input.phone.trim() } : {}),
+          ...(target.professionalProfile && input.name !== undefined
+            ? {
+                professionalProfile: {
+                  update: {
+                    supportPeople: {
+                      updateMany: {
+                        where: {},
+                        data: { name: input.name.trim() },
+                      },
+                    },
+                  },
+                },
+              }
+            : {}),
         },
       });
     }
@@ -356,7 +377,17 @@ export class SchoolUsersService {
       await this.prisma.professionalProfile.update({
         where: { userId },
         data: {
-          ...(input.title !== undefined ? { title: input.title.trim() } : {}),
+          ...(input.title !== undefined
+            ? {
+                title: input.title.trim(),
+                supportPeople: {
+                  updateMany: {
+                    where: {},
+                    data: { title: input.title.trim() },
+                  },
+                },
+              }
+            : {}),
           ...(input.department !== undefined
             ? { department: input.department.trim() }
             : {}),

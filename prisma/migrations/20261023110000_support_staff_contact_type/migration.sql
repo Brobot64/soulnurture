@@ -1,0 +1,1 @@
+ALTER TYPE "SupportPersonType" ADD VALUE 'SUPPORT_STAFF';

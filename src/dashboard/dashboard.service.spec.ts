@@ -22,7 +22,7 @@ describe('DashboardService', () => {
       user: { findUnique: vi.fn().mockResolvedValue({ schoolId: 'school-1' }) },
       supportFlag: { findMany: vi.fn(), count: vi.fn() },
       emotionalCheckIn: { findMany: vi.fn() },
-      supportRequest: { findMany: vi.fn() },
+      supportRequest: { findMany: vi.fn(), count: vi.fn().mockResolvedValue(0) },
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -141,11 +141,37 @@ describe('DashboardService', () => {
       flags: [],
       barometer: expect.objectContaining({ total: 0 }),
       supportRequests: [],
+      pendingRequestCount: 0,
       escalatedFlagCount: 0,
       upcomingDropIn: null,
     });
     expect(prisma.supportFlag.findMany).not.toHaveBeenCalled();
+    expect(prisma.supportFlag.count).not.toHaveBeenCalled();
     expect(prisma.emotionalCheckIn.findMany).not.toHaveBeenCalled();
     expect(prisma.supportRequest.findMany).not.toHaveBeenCalled();
+    expect(prisma.supportRequest.count).not.toHaveBeenCalled();
+  });
+
+  it('counts all pending and escalated school requests beyond the preview limit', async () => {
+    prisma.supportFlag.findMany.mockResolvedValue([]);
+    prisma.supportFlag.count.mockResolvedValue(0);
+    prisma.emotionalCheckIn.findMany.mockResolvedValue([]);
+    prisma.supportRequest.findMany.mockResolvedValue(
+      Array.from({ length: 20 }, (_, id) => ({ id: `req-${id}` })),
+    );
+    prisma.supportRequest.count.mockResolvedValue(47);
+
+    const result = await service.counsellor('user-1');
+
+    expect(result.supportRequests).toHaveLength(20);
+    expect(result.pendingRequestCount).toBe(47);
+    expect(prisma.supportRequest.count).toHaveBeenCalledWith({
+      where: {
+        ...SCHOOL,
+        status: {
+          in: [SupportRequestStatus.PENDING, SupportRequestStatus.ESCALATED],
+        },
+      },
+    });
   });
 });

@@ -1,8 +1,4 @@
-import {
-  ForbiddenException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import {
   FollowUpStatus,
   SupportFlagStatus,
@@ -10,10 +6,11 @@ import {
   SupportRequestStatus,
   MessageRole,
   SupportTiming,
+  type Prisma,
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service.js';
 import { ChatService } from '../chat/chat.service.js';
-import { inSchool, schoolOf } from '../common/tenant/school-scope.js';
+import { inSchool, schoolOf, supportPeopleInSchool } from '../common/tenant/school-scope.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
 import type { CreateSupportRequestDto } from './dto/create-support-request.dto.js';
@@ -26,6 +23,19 @@ import {
   type SupportPrompt,
 } from './queue-status.js';
 
+const STUDENT_REQUEST_SELECT = {
+  id: true,
+  personType: true,
+  timing: true,
+  note: true,
+  status: true,
+  scheduledAt: true,
+  locationLabel: true,
+  createdAt: true,
+  updatedAt: true,
+  supportPerson: { select: { id: true, name: true, type: true, title: true } },
+} satisfies Prisma.SupportRequestSelect;
+
 @Injectable()
 export class SupportRequestsService {
   constructor(
@@ -35,19 +45,36 @@ export class SupportRequestsService {
     private readonly chatService: ChatService,
   ) {}
 
-  listPeople() {
+  async listPeople(userId: string) {
+    const schoolId = await schoolOf(this.prisma, userId);
+    if (!schoolId) return [];
     return this.prisma.supportPerson.findMany({
-      where: { active: true },
+      where: supportPeopleInSchool(schoolId),
+      select: {
+        id: true,
+        name: true,
+        type: true,
+        title: true,
+        availabilityLabel: true,
+        availableToday: true,
+        imageUrl: true,
+      },
       orderBy: { name: 'asc' },
     });
   }
 
   async create(userId: string, dto: CreateSupportRequestDto) {
-    const student = await this.studentsService.ensureProfile(userId);
+    const schoolId = await schoolOf(this.prisma, userId);
+    if (!schoolId) throw new NotFoundException('Support person not found');
     const person = await this.prisma.supportPerson.findFirst({
-      where: { id: dto.supportPersonId, active: true },
+      where: {
+        id: dto.supportPersonId,
+        type: dto.personType,
+        ...supportPeopleInSchool(schoolId),
+      },
     });
     if (!person) throw new NotFoundException('Support person not found');
+    const student = await this.studentsService.ensureProfile(userId);
 
     const status =
       dto.timing === SupportTiming.URGENT_UNSAFE
@@ -71,7 +98,7 @@ export class SupportRequestsService {
         initialMessageAt: initial?.createdAt ?? null,
         status,
       },
-      include: { supportPerson: true },
+      select: STUDENT_REQUEST_SELECT,
     });
 
     await this.auditService.log({
@@ -80,6 +107,7 @@ export class SupportRequestsService {
       entity: 'SupportRequest',
       entityId: request.id,
       meta: { timing: dto.timing, status },
+      schoolId,
     });
 
     return request;
@@ -107,7 +135,7 @@ export class SupportRequestsService {
     const student = await this.studentsService.ensureProfile(userId);
     const items = await this.prisma.supportRequest.findMany({
       where: { studentId: student.id },
-      include: { supportPerson: true },
+      select: STUDENT_REQUEST_SELECT,
       orderBy: { createdAt: 'desc' },
     });
     return { items };
@@ -115,12 +143,11 @@ export class SupportRequestsService {
 
   async getOne(userId: string, id: string) {
     const student = await this.studentsService.ensureProfile(userId);
-    const item = await this.prisma.supportRequest.findUnique({
-      where: { id },
-      include: { supportPerson: true },
+    const item = await this.prisma.supportRequest.findFirst({
+      where: { id, studentId: student.id },
+      select: STUDENT_REQUEST_SELECT,
     });
     if (!item) throw new NotFoundException('Support request not found');
-    if (item.studentId !== student.id) throw new ForbiddenException();
     return item;
   }
 
@@ -152,11 +179,18 @@ export class SupportRequestsService {
       },
       include: {
         followUps: {
-          select: { id: true, status: true, dueAt: true, completedAt: true },
+          select: {
+            id: true,
+            status: true,
+            dueAt: true,
+            completedAt: true,
+            professional: { select: { userId: true } },
+          },
         },
         supportPerson: { select: { id: true, name: true, type: true } },
         student: {
           select: {
+            id: true,
             firstName: true,
             lastName: true,
             displayName: true,
@@ -237,7 +271,7 @@ export class SupportRequestsService {
             .some((value) => value.toLowerCase().includes(search)),
       )
       .map(({ request, queueStatus, prompt }) =>
-        toQueueItem(request, queueStatus, prompt),
+        toQueueItem(request, queueStatus, prompt, userId),
       );
 
     return { items, counts };
@@ -306,6 +340,7 @@ export class SupportRequestsService {
 // --- Staff queue row shape --------------------------------------------------
 
 export interface SupportQueueStudent {
+  id: string;
   firstName: string;
   lastName: string | null;
   displayName: string | null;
@@ -327,6 +362,8 @@ export interface SupportQueueItem {
   queueStatus: QueueStatus;
   prompt: SupportPrompt;
   followUpId: string | null;
+  followUpStatus: FollowUpStatus | null;
+  canManageFollowUp: boolean;
   followUpDueAt: Date | null;
   followUpCompletedAt: Date | null;
   conversationId: string | null;
@@ -362,6 +399,7 @@ type QueueRequestRow = {
     status: FollowUpStatus;
     dueAt: Date | null;
     completedAt: Date | null;
+    professional: { userId: string } | null;
   }[];
   supportPerson: {
     id: string;
@@ -369,6 +407,7 @@ type QueueRequestRow = {
     type: SupportPersonType;
   } | null;
   student: {
+    id: string;
     firstName: string;
     lastName: string | null;
     displayName: string | null;
@@ -393,6 +432,7 @@ function toQueueItem(
   request: QueueRequestRow,
   queueStatus: QueueStatus,
   prompt: SupportPrompt,
+  userId: string,
 ): SupportQueueItem {
   const openFollowUps = request.followUps
     .filter(
@@ -405,6 +445,7 @@ function toQueueItem(
         (a.dueAt?.getTime() ?? Number.MAX_SAFE_INTEGER) -
         (b.dueAt?.getTime() ?? Number.MAX_SAFE_INTEGER),
     );
+  const selectedFollowUp = openFollowUps[0];
   const lastCompletedAt = request.followUps
     .filter((followUp) => followUp.status === FollowUpStatus.COMPLETED)
     .reduce<Date | null>(
@@ -427,8 +468,10 @@ function toQueueItem(
     requestStatus: request.status,
     queueStatus,
     prompt,
-    followUpId: openFollowUps[0]?.id ?? null,
-    followUpDueAt: openFollowUps[0]?.dueAt ?? null,
+    followUpId: selectedFollowUp?.id ?? null,
+    followUpStatus: selectedFollowUp?.status ?? null,
+    canManageFollowUp: selectedFollowUp?.professional?.userId === userId,
+    followUpDueAt: selectedFollowUp?.dueAt ?? null,
     followUpCompletedAt: lastCompletedAt,
     conversationId: request.conversationId,
     student: { ...student, email: user.email },

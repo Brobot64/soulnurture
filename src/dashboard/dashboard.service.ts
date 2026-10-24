@@ -25,6 +25,7 @@ export class DashboardService {
         flags: [],
         barometer: this.buildBarometer([]),
         supportRequests: [],
+        pendingRequestCount: 0,
         escalatedFlagCount: 0,
         upcomingDropIn: null,
       };
@@ -49,22 +50,27 @@ export class DashboardService {
     });
     const barometer = this.buildBarometer(recentCheckIns.map((c) => c.feeling));
 
-    const requests = await this.prisma.supportRequest.findMany({
-      where: {
-        ...scope,
-        status: {
-          in: [SupportRequestStatus.PENDING, SupportRequestStatus.ESCALATED],
-        },
+    const requestScope = {
+      ...scope,
+      status: {
+        in: [SupportRequestStatus.PENDING, SupportRequestStatus.ESCALATED],
       },
+    };
+    const requests = await this.prisma.supportRequest.findMany({
+      where: requestScope,
       include: { supportPerson: true },
       orderBy: { createdAt: 'desc' },
       take: 20,
+    });
+    const pendingRequestCount = await this.prisma.supportRequest.count({
+      where: requestScope,
     });
 
     return {
       flags,
       barometer,
       supportRequests: requests,
+      pendingRequestCount,
       escalatedFlagCount,
       upcomingDropIn: null,
     };

@@ -1,5 +1,19 @@
 export const AI_PROVIDER = Symbol('AI_PROVIDER');
 
+/**
+ * Server-owned statement of why a turn left the AI's remit. Two kinds, both
+ * produced by rules the server already enforces — never by the model:
+ *  - OUT_OF_SCOPE: the reply was replaced by scripted copy because it claimed
+ *    something the AI is banned from claiming (diagnosis, medication,
+ *    certification, a safety promise, a human identity).
+ *  - ACUTE_SAFEGUARD_ROUTE: an acute (TIER_3) safeguarding rule fired and the
+ *    turn went to the school's professionals. The student must be able to see
+ *    that this is a referral, not emergency dispatch.
+ */
+export type AiBoundary =
+  | { kind: 'OUT_OF_SCOPE'; intentId: null }
+  | { kind: 'ACUTE_SAFEGUARD_ROUTE'; intentId: string | null };
+
 export interface AiGenerationInput {
   systemPrompt: string;
   messages: { role: 'user' | 'assistant' | 'system'; content: string }[];
@@ -32,6 +46,10 @@ export interface AiGenerationResult {
    * activities API. Not part of the model's structured-output contract. */
   activity?: { recommended: boolean; slug: string | null; title: string | null } | null;
   asyncState?: 'COMPLETE' | 'PENDING_AI' | 'FAILED';
+  /** Server-owned: why this turn left the AI's remit, or null when it stayed
+   * inside it. Persisted in aiPayload so the student sees the same notice on
+   * every later read of the conversation. */
+  boundary?: AiBoundary | null;
   /** Server-owned: the reply was rendered into a vernacular language by the
    * render lane (n-atlas-translate mode); englishSource keeps the original
    * English text for audit. Null/absent = the reply shipped as generated. */

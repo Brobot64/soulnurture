@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, SupportFlagSeverity } from '@prisma/client';
 import { AiContextService } from './context/ai-context.service.js';
 import { GuardrailService } from './guardrails/guardrail.service.js';
 import {
@@ -378,6 +378,15 @@ export class AiService {
       );
     }
 
+    // Server-owned record of why this turn left the AI's remit. An acute
+    // safeguarding referral is the louder truth of the two, so it wins when a
+    // turn both overstepped the banned-claim floor and hit the acute keywords.
+    if (verdict?.severity === SupportFlagSeverity.TIER_3_ACUTE) {
+      result.boundary = { kind: 'ACUTE_SAFEGUARD_ROUTE', intentId: verdict.intentId };
+    } else if (filtered.outOfScope) {
+      result.boundary = { kind: 'OUT_OF_SCOPE', intentId: null };
+    }
+
     // Final whitelist: the model may never reference an unapproved resource.
     if (result.resource.recommended && result.resource.resourceId) {
       const allowed = new Set(ctx.relevantResources.map((r) => r.id));
@@ -390,6 +399,7 @@ export class AiService {
 
     // Server extras are owned by us, never trusted from the model.
     result.asyncState = 'COMPLETE';
+    result.boundary ??= null;
 
     // Render lane (n-atlas-translate): the finished English reply is rendered
     // into the turn's language within this same request (enhancement on the

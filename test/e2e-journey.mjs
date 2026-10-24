@@ -279,9 +279,14 @@ async function main() {
   const ericProfileId = ericProf.rows[0]?.id;
   check('Eric professional profile id found', !!ericProfileId);
   await db(
-    `INSERT INTO support_person (id, "professionalId", name, type, title, "availabilityLabel", "availableToday", active, "createdAt", "updatedAt")
-     VALUES ($2, $1, 'Dr. Eric Moore', 'PSYCHOLOGIST', 'Visiting Clinical Psychologist', 'Available Today', true, true, now(), now())
-     ON CONFLICT (name, type) DO UPDATE SET "professionalId" = EXCLUDED."professionalId", active = true, "availableToday" = true`,
+    `WITH updated AS (
+       UPDATE support_person SET active = true, "availableToday" = true
+       WHERE "professionalId" = $1 AND type = 'PSYCHOLOGIST'
+       RETURNING id
+     )
+     INSERT INTO support_person (id, "professionalId", name, type, title, "availabilityLabel", "availableToday", active, "createdAt", "updatedAt")
+     SELECT $2, $1, 'Dr. Eric Moore', 'PSYCHOLOGIST', 'Visiting Clinical Psychologist', 'Available Today', true, true, now(), now()
+     WHERE NOT EXISTS (SELECT 1 FROM updated)`,
     [ericProfileId, randomUUID()],
   );
   check('Dr. Eric Moore listed as support person', true);

@@ -69,6 +69,7 @@ describe('GuardrailService — output lane', () => {
       'Based on what you describe, you have clinical depression.',
     );
     expect(out.violations).toEqual(['diagnosis-claim']);
+    expect(out.outOfScope).toBe(true);
     expect(out.reply).toContain('counsellor');
     expect(out.reply).not.toContain('clinical depression');
     expect(out.notes.join(' ')).toContain('diagnosis-claim');
@@ -88,6 +89,7 @@ describe('GuardrailService — output lane', () => {
       'Let us talk about your revision timetable for next week.',
     );
     expect(clean.violations).toEqual([]);
+    expect(clean.outOfScope).toBe(false);
     expect(clean.reply).toContain('revision timetable');
     expect(clean.notes).toEqual([]);
   });
@@ -98,6 +100,7 @@ describe('GuardrailService — output lane', () => {
       'You will definitely feel better by Monday, I promise you will pass. Let us look at your study plan.',
     );
     expect(out.violations).toEqual(['safety-promise']);
+    expect(out.outOfScope).toBe(false);
     expect(out.reply).not.toContain('definitely feel better');
     expect(out.reply).toContain('study plan');
   });
@@ -108,6 +111,7 @@ describe('GuardrailService — output lane', () => {
       'As your therapist, I am a licensed therapist.',
     );
     expect(out.violations).toEqual(['human-impersonation']);
+    expect(out.outOfScope).toBe(true);
     expect(out.reply).toBe(GUARDRAILS_DEFAULTS.fallbackCopy);
   });
 

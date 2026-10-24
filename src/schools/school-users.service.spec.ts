@@ -255,7 +255,9 @@ describe('SchoolUsersService', () => {
   });
 
   describe('onboardProfessional', () => {
-    it('creates the professional profile with availability on', async () => {
+    it.each(['COUNSELLOR', 'PSYCHOLOGIST', 'SUPPORT_STAFF'] as const)(
+      'creates a linked directory contact for an onboarded %s',
+      async (role) => {
       prisma.user.findUnique.mockResolvedValue({
         role: 'SCHOOL_ADMIN',
         schoolId: 'school-1',
@@ -271,7 +273,7 @@ describe('SchoolUsersService', () => {
         id: 'staff-1',
         name: 'Kofi Boateng',
         email: 'kofi@example.com',
-        role: 'COUNSELLOR',
+        role,
       });
       prisma.professionalProfile.create.mockResolvedValue({ id: 'profile-1' });
       authService.resendVerificationEmail.mockResolvedValue({});
@@ -279,7 +281,7 @@ describe('SchoolUsersService', () => {
       await service.onboardProfessional('admin-1', 'school-1', {
         email: 'kofi@example.com',
         name: 'Kofi Boateng',
-        role: 'COUNSELLOR',
+        role,
         title: 'Head Counsellor',
       });
 
@@ -289,12 +291,15 @@ describe('SchoolUsersService', () => {
           title: 'Head Counsellor',
           department: null,
           available: true,
+          supportPeople: {
+            create: { name: 'Kofi Boateng', type: role, title: 'Head Counsellor' },
+          },
         },
       });
       expect(auditService.log).toHaveBeenCalledWith(
         expect.objectContaining({
           action: 'school.professional_enrolled',
-          meta: { schoolId: 'school-1', role: 'COUNSELLOR' },
+          meta: { schoolId: 'school-1', role },
         }),
       );
     });
@@ -390,6 +395,172 @@ describe('SchoolUsersService', () => {
         code: 'SCHOOL_DEFAULT_PASSWORD_REQUIRED',
       });
       expect(prisma.user.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('updateUser', () => {
+    beforeEach(() => {
+      prisma.user.findUnique.mockResolvedValue({
+        role: 'SCHOOL_ADMIN',
+        schoolId: 'school-1',
+      });
+      prisma.user.findFirst.mockResolvedValue({
+        id: 'staff-1',
+        role: 'COUNSELLOR',
+        studentProfile: null,
+        professionalProfile: { id: 'profile-1' },
+      });
+    });
+
+    it.each([' Kofi Boateng ', ''])(
+      'syncs provided name %j only through the target professional relation',
+      async (name) => {
+        const result = await service.updateUser('admin-1', 'school-1', 'staff-1', {
+          name,
+        });
+
+        expect(result).toEqual({ updated: true });
+        expect(prisma.user.update).toHaveBeenCalledTimes(1);
+        expect(prisma.user.update).toHaveBeenCalledWith({
+          where: { id: 'staff-1' },
+          data: {
+            name: name.trim(),
+            professionalProfile: {
+              update: {
+                supportPeople: {
+                  updateMany: { where: {}, data: { name: name.trim() } },
+                },
+              },
+            },
+          },
+        });
+        expect(prisma.professionalProfile.update).not.toHaveBeenCalled();
+        expect(prisma.professionalProfile.create).not.toHaveBeenCalled();
+        expect(prisma.studentProfile.update).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([' Head Counsellor ', ''])(
+      'syncs provided title %j only through the target profile relation',
+      async (title) => {
+        await service.updateUser('admin-1', 'school-1', 'staff-1', { title });
+
+        expect(prisma.professionalProfile.update).toHaveBeenCalledTimes(1);
+        expect(prisma.professionalProfile.update).toHaveBeenCalledWith({
+          where: { userId: 'staff-1' },
+          data: {
+            title: title.trim(),
+            supportPeople: {
+              updateMany: { where: {}, data: { title: title.trim() } },
+            },
+          },
+        });
+        expect(prisma.user.update).not.toHaveBeenCalled();
+        expect(prisma.professionalProfile.create).not.toHaveBeenCalled();
+        expect(prisma.studentProfile.update).not.toHaveBeenCalled();
+      },
+    );
+
+    it('omits nested contact writes for phone and department changes', async () => {
+      await service.updateUser('admin-1', 'school-1', 'staff-1', {
+        name: undefined,
+        title: undefined,
+        phone: ' +233123456789 ',
+        department: ' Wellbeing ',
+      });
+
+      expect(prisma.user.update).toHaveBeenCalledTimes(1);
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'staff-1' },
+        data: { phone: '+233123456789' },
+      });
+      expect(prisma.professionalProfile.update).toHaveBeenCalledTimes(1);
+      expect(prisma.professionalProfile.update).toHaveBeenCalledWith({
+        where: { userId: 'staff-1' },
+        data: { department: 'Wellbeing' },
+      });
+    });
+
+    it('updates students without writing professional profiles or contacts', async () => {
+      prisma.user.findFirst.mockResolvedValue({
+        id: 'student-1',
+        role: 'STUDENT',
+        studentProfile: { id: 'student-profile-1' },
+        professionalProfile: null,
+      });
+
+      await service.updateUser('admin-1', 'school-1', 'student-1', {
+        name: ' Ama ',
+        phone: ' +233123456789 ',
+        classLabel: ' Form 2 ',
+        preferredLanguage: ' en ',
+        title: 'Ignored',
+        department: 'Ignored',
+      });
+
+      expect(prisma.user.update).toHaveBeenCalledTimes(1);
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'student-1' },
+        data: { name: 'Ama', phone: '+233123456789' },
+      });
+      expect(prisma.studentProfile.update).toHaveBeenCalledWith({
+        where: { userId: 'student-1' },
+        data: { classLabel: 'Form 2', preferredLanguage: 'en' },
+      });
+      expect(prisma.professionalProfile.update).not.toHaveBeenCalled();
+      expect(prisma.professionalProfile.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects access to another school before any writes', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        role: 'SCHOOL_ADMIN',
+        schoolId: 'school-2',
+      });
+
+      const rejection = await rejectionOf(
+        service.updateUser('admin-2', 'school-1', 'staff-1', {
+          name: 'Changed Name',
+          title: 'Changed Title',
+        }),
+      );
+
+      expect(rejection.getStatus()).toBe(403);
+      expect(rejection.getResponse()).toMatchObject({
+        code: 'SCHOOL_ACCESS_DENIED',
+      });
+      expect(prisma.user.findFirst).not.toHaveBeenCalled();
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(prisma.professionalProfile.update).not.toHaveBeenCalled();
+      expect(prisma.professionalProfile.create).not.toHaveBeenCalled();
+      expect(prisma.studentProfile.update).not.toHaveBeenCalled();
+      expect(auditService.log).not.toHaveBeenCalled();
+    });
+
+    it('rejects a foreign user before any writes', async () => {
+      prisma.user.findFirst.mockResolvedValue(null);
+
+      const rejection = await rejectionOf(
+        service.updateUser('admin-1', 'school-1', 'foreign-user', {
+          name: 'Changed Name',
+          title: 'Changed Title',
+        }),
+      );
+
+      expect(rejection.getStatus()).toBe(404);
+      expect(prisma.user.findFirst).toHaveBeenCalledWith({
+        where: { id: 'foreign-user', schoolId: 'school-1' },
+        select: {
+          id: true,
+          role: true,
+          studentProfile: { select: { id: true } },
+          professionalProfile: { select: { id: true } },
+        },
+      });
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(prisma.professionalProfile.update).not.toHaveBeenCalled();
+      expect(prisma.professionalProfile.create).not.toHaveBeenCalled();
+      expect(prisma.studentProfile.update).not.toHaveBeenCalled();
+      expect(auditService.log).not.toHaveBeenCalled();
     });
   });
 

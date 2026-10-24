@@ -20,7 +20,6 @@ import { ConsentRequiredException } from '../consent/consent.errors.js';
 import { ConsentService } from '../consent/consent.service.js';
 import { NatlasLlmProvider } from '../ai/providers/natlas/natlas-llm.provider.js';
 import { PrismaService } from '../prisma/prisma.service.js';
-import { StudentsService } from '../students/students.service.js';
 import { SupportFlagAlertsService } from '../support-flags/support-flag-alerts.service.js';
 import { ConversationsService } from './conversations.service.js';
 
@@ -66,15 +65,17 @@ describe('ConversationsService', () => {
   let service: ConversationsService;
   let prisma: {
     user: Record<string, ReturnType<typeof vi.fn>>;
+    studentProfile: Record<string, ReturnType<typeof vi.fn>>;
+    emotionalCheckIn: Record<string, ReturnType<typeof vi.fn>>;
     conversation: Record<string, ReturnType<typeof vi.fn>>;
     conversationMessage: Record<string, ReturnType<typeof vi.fn>>;
     aiGenerationJob: Record<string, ReturnType<typeof vi.fn>>;
     supportFlag: Record<string, ReturnType<typeof vi.fn>>;
+    sessionSummary: Record<string, ReturnType<typeof vi.fn>>;
   };
   let ai: { generateAndApply: ReturnType<typeof vi.fn> };
   let guardrail: { assertMessageAllowed: ReturnType<typeof vi.fn> };
   let auditService: { log: ReturnType<typeof vi.fn> };
-  let studentsService: { ensureProfile: ReturnType<typeof vi.fn> };
   let consentService: {
     hasAcceptedForStudent: ReturnType<typeof vi.fn>;
   };
@@ -122,8 +123,11 @@ describe('ConversationsService', () => {
   beforeEach(async () => {
     prisma = {
       user: { findUnique: vi.fn().mockResolvedValue({ role: 'STUDENT', schoolId: null }) },
+      studentProfile: { findUnique: vi.fn().mockResolvedValue(student), create: vi.fn() },
+      emotionalCheckIn: { findUnique: vi.fn() },
       conversation: {
         findUnique: vi.fn(),
+        findFirst: vi.fn(),
         findMany: vi.fn(),
         create: vi.fn(),
         update: vi.fn(),
@@ -139,9 +143,6 @@ describe('ConversationsService', () => {
     ai = { generateAndApply: vi.fn() };
     guardrail = { assertMessageAllowed: vi.fn() };
     auditService = { log: vi.fn().mockResolvedValue({ id: 'audit-1' }) };
-    studentsService = {
-      ensureProfile: vi.fn().mockResolvedValue(student),
-    };
     consentService = {
       hasAcceptedForStudent: vi.fn().mockResolvedValue(true),
     };
@@ -150,7 +151,6 @@ describe('ConversationsService', () => {
       providers: [
         ConversationsService,
         { provide: PrismaService, useValue: prisma },
-        { provide: StudentsService, useValue: studentsService },
         { provide: AiService, useValue: ai },
         IntentEngineService,
         {
@@ -195,27 +195,50 @@ describe('ConversationsService', () => {
     expect(prisma.aiGenerationJob.create).not.toHaveBeenCalled();
   });
 
-  it('rejects access to another students conversation', async () => {
-    const otherStudent = { ...student, id: 'student-2' };
-    prisma.conversation.findUnique.mockResolvedValue({
-      id: 'conv-1',
-      studentId: otherStudent.id,
-      messages: [],
+  function expectNoConversationWrites() {
+    expect(prisma.studentProfile.create).not.toHaveBeenCalled();
+    expect(prisma.conversation.create).not.toHaveBeenCalled();
+    expect(prisma.conversation.update).not.toHaveBeenCalled();
+    expect(prisma.conversationMessage.create).not.toHaveBeenCalled();
+    expect(prisma.aiGenerationJob.create).not.toHaveBeenCalled();
+    expect(prisma.supportFlag.create).not.toHaveBeenCalled();
+    expect(auditService.log).not.toHaveBeenCalled();
+    expect(guardrail.assertMessageAllowed).not.toHaveBeenCalled();
+    expect(ai.generateAndApply).not.toHaveBeenCalled();
+  }
+
+  describe.each(['getOne', 'sendMessage', 'close'] as const)('%s ownership', (operation) => {
+    const access = (id: string) => operation === 'sendMessage'
+      ? service.sendMessage('user-1', id, { content: 'hi' })
+      : service[operation]('user-1', id);
+
+    it.each(['same-school-foreign', 'foreign-school', 'missing'])('hides a %s conversation without writes', async (id) => {
+      prisma.conversation.findUnique.mockResolvedValue(null);
+
+      await expect(access(id)).rejects.toThrow(NotFoundException);
+
+      expect(prisma.studentProfile.findUnique).toHaveBeenCalledWith({
+        where: { userId: 'user-1', user: { role: 'STUDENT' } },
+      });
+      expect(prisma.conversation.findUnique).toHaveBeenCalledWith({
+        where: { id, studentId: student.id },
+        include: { messages: { orderBy: { createdAt: 'asc' } } },
+      });
+      expectNoConversationWrites();
     });
 
-    await expect(
-      service.sendMessage('user-1', 'conv-1', { content: 'hi' }),
-    ).rejects.toThrow(ForbiddenException);
+    it('does not create a missing student profile or query conversations', async () => {
+      prisma.studentProfile.findUnique.mockResolvedValue(null);
+
+      await expect(access('conv-1')).rejects.toThrow(NotFoundException);
+
+      expect(prisma.conversation.findUnique).not.toHaveBeenCalled();
+      expect(prisma.conversation.findFirst).not.toHaveBeenCalled();
+      expectNoConversationWrites();
+    });
   });
 
-  it('throws NotFoundException when conversation does not exist', async () => {
-    prisma.conversation.findUnique.mockResolvedValue(null);
-    await expect(
-      service.sendMessage('user-1', 'missing', { content: 'hi' }),
-    ).rejects.toThrow(NotFoundException);
-  });
-
-  describe('getOne staff read (review-queue deep link)', () => {
+  describe('getOne staff read', () => {
     const staffConversation = {
       id: 'conv-1',
       studentId: 'student-1',
@@ -227,44 +250,194 @@ describe('ConversationsService', () => {
       student: { user: { schoolId: 'school-1' } },
     };
 
-    it('lets same-school staff read the conversation without touching the student profile', async () => {
-      prisma.user.findUnique.mockResolvedValue({
-        role: 'COUNSELLOR',
-        schoolId: 'school-1',
+    it.each(['COUNSELLOR', 'PSYCHOLOGIST', 'SUPPORT_STAFF'])('lets same-school %s read without student-profile access', async (role) => {
+      prisma.user.findUnique.mockResolvedValue({ role, schoolId: 'school-1' });
+      prisma.conversation.findFirst.mockResolvedValue(staffConversation);
+
+      expect(await service.getOne('staff-1', 'conv-1')).toEqual(staffConversation);
+
+      expect(prisma.conversation.findFirst).toHaveBeenCalledWith({
+        where: { id: 'conv-1', student: { user: { schoolId: 'school-1' } } },
+        include: {
+          messages: { orderBy: { createdAt: 'asc' } },
+          student: { select: { user: { select: { schoolId: true } } } },
+        },
       });
-      prisma.conversation.findUnique.mockResolvedValue(staffConversation);
-
-      const result = await service.getOne('staff-1', 'conv-1');
-
-      expect(result.messages).toHaveLength(2);
-      expect(studentsService.ensureProfile).not.toHaveBeenCalled();
+      expect(prisma.conversation.findUnique).not.toHaveBeenCalled();
+      expect(prisma.studentProfile.findUnique).not.toHaveBeenCalled();
+      expectNoConversationWrites();
     });
 
-    it('forbids staff from another school', async () => {
-      prisma.user.findUnique.mockResolvedValue({
-        role: 'PSYCHOLOGIST',
-        schoolId: 'school-2',
-      });
-      prisma.conversation.findUnique.mockResolvedValue(staffConversation);
+    it.each(['foreign-school', 'school-less-student', 'missing'])('hides %s conversations behind the actor school predicate', async (id) => {
+      prisma.user.findUnique.mockResolvedValue({ role: 'PSYCHOLOGIST', schoolId: 'school-2' });
+      prisma.conversation.findFirst.mockResolvedValue(null);
 
-      await expect(service.getOne('staff-1', 'conv-1')).rejects.toThrow(
-        ForbiddenException,
-      );
+      await expect(service.getOne('staff-1', id)).rejects.toThrow(NotFoundException);
+
+      expect(prisma.conversation.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id, student: { user: { schoolId: 'school-2' } } },
+      }));
+      expect(prisma.conversation.findUnique).not.toHaveBeenCalled();
+      expect(prisma.studentProfile.findUnique).not.toHaveBeenCalled();
+      expectNoConversationWrites();
     });
 
-    it('still serves the owning student through the owned() path', async () => {
-      prisma.user.findUnique.mockResolvedValue({ role: 'STUDENT', schoolId: 'school-1' });
+    it.each(['COUNSELLOR', 'PSYCHOLOGIST', 'SUPPORT_STAFF'])('denies school-less %s before querying even a school-less student', async (role) => {
+      prisma.user.findUnique.mockResolvedValue({ role, schoolId: null });
       prisma.conversation.findUnique.mockResolvedValue({
-        id: 'conv-1',
-        studentId: student.id,
-        status: 'ACTIVE',
-        messages: [],
+        ...staffConversation, student: { user: { schoolId: null } },
       });
 
-      const result = await service.getOne('user-1', 'conv-1');
+      await expect(service.getOne('staff-1', 'conv-1')).rejects.toThrow(NotFoundException);
 
-      expect(result.id).toBe('conv-1');
-      expect(studentsService.ensureProfile).toHaveBeenCalledWith('user-1');
+      expect(prisma.conversation.findUnique).not.toHaveBeenCalled();
+      expect(prisma.conversation.findFirst).not.toHaveBeenCalled();
+      expect(prisma.studentProfile.findUnique).not.toHaveBeenCalled();
+      expectNoConversationWrites();
+    });
+
+    it.each(['SCHOOL_ADMIN', 'PLATFORM_ADMIN', null])('does not treat %s as a student or a professional', async (role) => {
+      prisma.user.findUnique.mockResolvedValue(role ? { role, schoolId: 'school-1' } : null);
+
+      await expect(service.getOne('actor-1', 'conv-1')).rejects.toThrow(ForbiddenException);
+
+      expect(prisma.conversation.findUnique).not.toHaveBeenCalled();
+      expect(prisma.conversation.findFirst).not.toHaveBeenCalled();
+      expect(prisma.studentProfile.findUnique).not.toHaveBeenCalled();
+      expectNoConversationWrites();
+    });
+
+    it('serves the owning student without changing the response shape', async () => {
+      const conversation = { id: 'conv-1', studentId: student.id, status: 'ACTIVE', messages: [] };
+      prisma.conversation.findUnique.mockResolvedValue(conversation);
+
+      expect(await service.getOne('user-1', 'conv-1')).toEqual(conversation);
+      expect(prisma.conversation.findFirst).not.toHaveBeenCalled();
+      expectNoConversationWrites();
+    });
+  });
+
+  describe('getReviewContext', () => {
+    const context = {
+      id: 'conv-1', status: 'CLOSED', language: 'en',
+      createdAt: new Date(), updatedAt: new Date(),
+      messages: [{ id: 'm1', role: 'USER', content: 'A reflection', language: 'en', createdAt: new Date() }],
+    };
+
+    describe.each(['COUNSELLOR', 'PSYCHOLOGIST'])('%s reviewer', (role) => {
+      it.each([null, { id: 'summary-1', summary: 'AI-generated draft', topics: ['school'] }])('returns the linked context with summary %j', async (summary) => {
+        prisma.user.findUnique.mockResolvedValue({ role, schoolId: 'school-1' });
+        prisma.conversation.findFirst.mockResolvedValue({ ...context, summary });
+
+        expect(await service.getReviewContext('reviewer-1', 'conv-1')).toEqual({ ...context, summary });
+
+        expect(prisma.conversation.findFirst).toHaveBeenCalledExactlyOnceWith({
+          where: { id: 'conv-1', student: { user: { schoolId: 'school-1' } } },
+          select: {
+            id: true, status: true, language: true, createdAt: true, updatedAt: true,
+            messages: {
+              where: { role: { in: ['USER', 'ASSISTANT'] } },
+              orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+              select: { id: true, role: true, content: true, language: true, createdAt: true },
+            },
+            summary: {
+              select: {
+                id: true, summary: true, topics: true, followUpHook: true,
+                emotionalTrend: true, summaryLocalized: true, followUpHookLocalized: true, createdAt: true,
+              },
+            },
+          },
+        });
+        expect(prisma.studentProfile.findUnique).not.toHaveBeenCalled();
+        expect(prisma.conversation.findUnique).not.toHaveBeenCalled();
+        expectNoConversationWrites();
+      });
+
+      it('rejects a school-less reviewer before querying student data', async () => {
+        prisma.user.findUnique.mockResolvedValue({ role, schoolId: null });
+
+        await expect(service.getReviewContext('reviewer-1', 'conv-1')).rejects.toThrow(NotFoundException);
+
+        expect(prisma.conversation.findFirst).not.toHaveBeenCalled();
+        expect(prisma.studentProfile.findUnique).not.toHaveBeenCalled();
+        expectNoConversationWrites();
+      });
+    });
+
+    it.each(['STUDENT', 'SUPPORT_STAFF', 'SCHOOL_ADMIN', 'PLATFORM_ADMIN', null])('denies %s without using general conversation access', async (role) => {
+      prisma.user.findUnique.mockResolvedValue(role ? { role, schoolId: 'school-1' } : null);
+
+      await expect(service.getReviewContext('actor-1', 'conv-1')).rejects.toThrow(ForbiddenException);
+
+      expect(prisma.conversation.findFirst).not.toHaveBeenCalled();
+      expect(prisma.conversation.findUnique).not.toHaveBeenCalled();
+      expect(prisma.studentProfile.findUnique).not.toHaveBeenCalled();
+      expectNoConversationWrites();
+    });
+
+    it.each(['foreign-school', 'school-less-student', 'missing'])('returns 404 for %s using the school predicate', async (id) => {
+      prisma.user.findUnique.mockResolvedValue({ role: 'COUNSELLOR', schoolId: 'school-1' });
+      prisma.conversation.findFirst.mockResolvedValue(null);
+
+      await expect(service.getReviewContext('reviewer-1', id)).rejects.toThrow(NotFoundException);
+
+      expect(prisma.conversation.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id, student: { user: { schoolId: 'school-1' } } },
+      }));
+      expect(prisma.conversation.findUnique).not.toHaveBeenCalled();
+      expectNoConversationWrites();
+    });
+  });
+
+  describe('create and list', () => {
+    it('lists only owned conversations without creating a student profile', async () => {
+      prisma.conversation.findMany.mockResolvedValue([]);
+
+      expect(await service.listMine('user-1')).toEqual({ items: [] });
+
+      expect(prisma.conversation.findMany).toHaveBeenCalledWith({
+        where: { student: { userId: 'user-1', user: { role: 'STUDENT' } } },
+        orderBy: { updatedAt: 'desc' },
+      });
+      expect(prisma.studentProfile.findUnique).not.toHaveBeenCalled();
+      expectNoConversationWrites();
+    });
+
+    it('requires disclosure acceptance rather than creating a missing profile', async () => {
+      prisma.studentProfile.findUnique.mockResolvedValue(null);
+
+      await expect(service.create('user-1', { source: 'chat' })).rejects.toThrow(ConsentRequiredException);
+
+      expect(prisma.studentProfile.findUnique).toHaveBeenCalledWith({
+        where: { userId: 'user-1', user: { role: 'STUDENT' } },
+      });
+      expect(consentService.hasAcceptedForStudent).not.toHaveBeenCalled();
+      expectNoConversationWrites();
+    });
+
+    it.each(['same-school-foreign', 'foreign-school', 'missing'])('rejects a %s check-in link before writes', async (checkInId) => {
+      prisma.emotionalCheckIn.findUnique.mockResolvedValue(null);
+
+      await expect(service.create('user-1', { checkInId })).rejects.toThrow(NotFoundException);
+
+      expect(prisma.emotionalCheckIn.findUnique).toHaveBeenCalledWith({
+        where: { id: checkInId, studentId: student.id }, select: { id: true },
+      });
+      expectNoConversationWrites();
+    });
+
+    it.each([undefined, 'check-in-1'])('creates with an optional owned check-in (%s) after consent', async (checkInId) => {
+      prisma.emotionalCheckIn.findUnique.mockResolvedValue({ id: checkInId });
+      prisma.conversation.create.mockResolvedValue({ id: 'conv-1' });
+
+      expect(await service.create('user-1', { source: 'chat', checkInId })).toEqual({ id: 'conv-1' });
+
+      expect(prisma.conversation.create).toHaveBeenCalledExactlyOnceWith({
+        data: { studentId: student.id, source: 'chat', checkInId },
+      });
+      expect(consentService.hasAcceptedForStudent).toHaveBeenCalledWith(student.id, AI_DISCLOSURE_CONSENT_VERSION);
+      expect(prisma.emotionalCheckIn.findUnique).toHaveBeenCalledTimes(checkInId ? 1 : 0);
+      expect(prisma.studentProfile.create).not.toHaveBeenCalled();
     });
   });
 
@@ -524,18 +697,19 @@ describe('ConversationsService', () => {
       });
     };
 
-    it('blocks conversation creation when the disclosure is not accepted', async () => {
+    it('blocks conversation creation and linked check-in lookup when the disclosure is not accepted', async () => {
       consentService.hasAcceptedForStudent.mockResolvedValue(false);
 
       await expect(
-        service.create('user-1', { source: 'chat' }),
+        service.create('user-1', { source: 'chat', checkInId: 'check-in-1' }),
       ).rejects.toThrow(ConsentRequiredException);
 
       expect(consentService.hasAcceptedForStudent).toHaveBeenCalledWith(
         student.id,
         AI_DISCLOSURE_CONSENT_VERSION,
       );
-      expect(prisma.conversation.create).not.toHaveBeenCalled();
+      expect(prisma.emotionalCheckIn.findUnique).not.toHaveBeenCalled();
+      expectNoConversationWrites();
     });
 
     it('blocks a message before the rate gate and before any write', async () => {
@@ -875,7 +1049,7 @@ describe('ConversationsService', () => {
     });
 
     it('queues understanding without an offer when the preference is not English', async () => {
-      studentsService.ensureProfile.mockResolvedValue({
+      prisma.studentProfile.findUnique.mockResolvedValue({
         ...student,
         preferredLanguage: 'yo',
       });

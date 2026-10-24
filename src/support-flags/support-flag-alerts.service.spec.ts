@@ -141,6 +141,20 @@ describe('SupportFlagAlertsService', () => {
       language: 'ha',
     });
 
+    expect(prisma.supportPerson.findFirst).toHaveBeenCalledWith({
+      where: {
+        active: true,
+        professional: {
+          user: {
+            schoolId: 'school-1',
+            deactivatedAt: null,
+            role: { in: ['COUNSELLOR', 'PSYCHOLOGIST', 'SUPPORT_STAFF'] },
+          },
+        },
+      },
+      orderBy: { name: 'asc' },
+      select: { id: true, type: true },
+    });
     expect(prisma.supportRequest.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         studentId: 'student-1',
@@ -164,13 +178,14 @@ describe('SupportFlagAlertsService', () => {
     prisma.user.findMany.mockResolvedValue([{ id: 'u1' }]);
     prisma.supportPerson.findFirst.mockResolvedValue(null);
 
-    await service.recommendImmediateFollowUp({
+    const note = await service.recommendImmediateFollowUp({
       flag: flag(),
       studentMessage: 'help me',
       language: 'en',
     });
 
     expect(prisma.supportRequest.create).not.toHaveBeenCalled();
+    expect(note).toBe('School professionals alerted (1); no active school contact for a tray request.');
   });
 
   it('falls back to the standing preference when no language is given', async () => {
@@ -235,6 +250,8 @@ describe('SupportFlagAlertsService', () => {
       }),
     );
     expect(note).toContain('no school professionals');
+    expect(prisma.supportPerson.findFirst).not.toHaveBeenCalled();
+    expect(prisma.supportRequest.create).not.toHaveBeenCalled();
   });
 
   it('alerts nobody but still audits when the school has no active professionals', async () => {
