@@ -16,14 +16,16 @@ model (OpenAI, with Groq as fallback) for the **conversational reply**:
 
 | # | Use | N-ATLaS role | Where | Fallback |
 |---|---|---|---|---|
-| 1 | **Language identification** | Reads the language of a student message when the offline heuristics are silent | `src/ai/language/language-detector.service.ts` | OpenAI, then "no signal" |
-| 2 | **Reply rendering** | Renders the English reply into Pidgin, Yoruba, Hausa or Igbo | `src/ai/language/reply-renderer.service.ts` | OpenAI, then a scripted in-language line |
-| 3 | **Understanding (translation)** | Translates a vernacular message to English for the second safety sweep | `src/ai/providers/natlas/natlas.provider.ts` | OpenAI |
-| 4 | **Speech recognition (voice notes)** | Yoruba, Hausa and Igbo ASR via the NCAIR1 sidecar | `services/n-atlas-asr/`, `src/ai/providers/natlas/natlas-asr.provider.ts` | Groq Whisper |
+| 1 | **Language identification** | Reads the language of a student message when the offline heuristics are silent | `src/ai/language/language-detector.service.ts` | OpenAI (same prompt), then "no signal" |
+| 2 | **Reply rendering** | Renders the English reply into Pidgin, Yoruba, Hausa or Igbo | `src/ai/language/reply-renderer.service.ts` | scripted in-language line — **OpenAI never renders** |
+| 3 | **Understanding (translation)** | Translates a vernacular message to English, both to draft the reply from and for the second safety sweep | `src/ai/providers/natlas/natlas.provider.ts` | none — **OpenAI never translates**; the reply drafts from the student's own words and the job retries later |
+| 4 | **Speech recognition (voice notes)** | Yoruba, Hausa and Igbo ASR (hosted endpoints, or the local sidecar) | `src/ai/providers/natlas/natlas-asr.provider.ts`, `services/n-atlas-asr/` | none for vernacular — a friendly 503 asks the student to type |
 
 N-ATLaS is **not** used to generate the English reply and does not decide
 safeguarding on its own. Safety flags come from rules and keywords that run
-whether or not N-ATLaS is available.
+whether or not N-ATLaS is available. Since `NATLAS_TRANSLATE_ONLY_001` the split
+is deliberate and total: **N-ATLaS is the only translator and the only renderer;
+OpenAI does the reasoning.**
 
 ---
 
@@ -36,14 +38,23 @@ on a Hugging Face Inference Endpoint.
 |---|---|---|
 | Base URL | `NATLAS_LLM_BASE_URL` | Endpoint root; the client appends `/v1/chat/completions` |
 | API key | `NATLAS_LLM_API_KEY` | Sent as a Bearer token; never logged or exposed through the config endpoint |
-| Model name | `NATLAS_LLM_MODEL` | `NCAIR1/N-ATLaS` |
-| Generation budget for translation | `NATLAS_LLM_TIMEOUT_MS` | 45 s |
+| Model name | `NATLAS_LLM_MODEL` | `NCAIR1/N-ATLaS`. Must equal what the server reports — on a local Ollama that means the exact `ollama list` tag; a mismatch 404s every request and the lane falls through **silently**, which reads as "N-ATLaS is not working" with no error anywhere |
+| Translation budget | `NATLAS_TRANSLATE_TIMEOUT_MS` | **10 s** — the translation lane, both its synchronous and its worker half |
 | Render budget | `NATLAS_RENDER_TIMEOUT_MS` | 12 s |
 | Identify budget | `NATLAS_IDENTIFY_TIMEOUT_MS` | 4 s |
-| ASR sidecar | `NATLAS_ASR_BASE_URL`, `NATLAS_ASR_TIMEOUT_MS` | Local FastAPI sidecar, 60 s |
+| Provider default budget | `NATLAS_LLM_TIMEOUT_MS` | 45 s — the deadline `completeJson` uses when a caller passes none. No lane relies on it today, so changing it has no visible effect; use the per-lane knobs |
+| ASR endpoints | `NATLAS_ASR_URL_YO` / `_HA` / `_IG`, `NATLAS_ASR_API_KEY` | Per-language hosted Hugging Face endpoints (the production shape) |
+| ASR sidecar | `NATLAS_ASR_BASE_URL`, `NATLAS_ASR_TIMEOUT_MS` | Self-hosted FastAPI sidecar, used when a per-language URL is unset; 60 s |
 
-If `NATLAS_LLM_BASE_URL` is empty, the N-ATLaS language lanes are switched off
-and the OpenAI lanes take over. The system still runs.
+If `NATLAS_LLM_BASE_URL` is empty, the N-ATLaS lanes switch off: identification
+goes straight to OpenAI, translation is unavailable (the reply drafts from the
+student's own words), a vernacular render falls to the scripted in-language line,
+and the student is still answered. The system still runs.
+
+The production endpoint **scales to zero after 15 idle minutes**, and a cold boot
+costs roughly 8–16 minutes of billed GPU time before the first request answers. A
+lane timeout does not wait for that wake — it fails open — so a check that must
+show `via: 'n-atlas-local'` needs the endpoint re-warmed about 15 minutes first.
 
 Sampling temperatures are low and set per use: identification 0, translation
 (understanding) 0.1, and rendering 0.2. Identification is deterministic for a
@@ -87,8 +98,11 @@ the student's situation intact (context lines are sent with the reply).
 any safety or distress wording; it must not soften or euphemise; it must return
 only the reply.
 
-**Acceptance.** A render is used only if it passes every check below. A
-render that fails a check is treated as a failed lane, and the next lane is tried.
+**Acceptance.** A render is used only if it passes every check below. A render
+that fails a check is a failed lane: `render()` returns `null`, OpenAI is **not**
+asked to render, and the student gets the pre-approved scripted line in their own
+language (`SCRIPTED_GENERIC_REPLY`, §4). Rendering is an enhancement, never a
+blocker — the lane never throws.
 
 | Check | Why |
 |---|---|
@@ -107,22 +121,55 @@ A leading label such as `Nigerian Pidgin reply:` is removed before the checks.
 
 ### 3.3 Understanding (translation)
 
-**Purpose.** A vernacular student message is translated to English, and the
-English is checked by the same intent rules as English text. This is a second
-safety sweep for messages the first pass could not read.
+**Purpose.** A vernacular student message is translated to English, and that
+English is what the reasoning model works with. Two moments of one turn use the
+same call:
 
-**Contract.** A JSON reply with the English translation, tone and key facts,
-validated against a schema. Runs as an async `VERNACULAR` job after the reply is saved.
+- **Synchronously**, before generation: when the reply language is vernacular,
+  `AiService.generateAndApply` translates first and drafts the reply from the
+  English (`src/ai/ai.service.ts:262`), sanitized again. The raw text still goes
+  to the keyword intent floor, so safety never depends on the translation.
+- **Asynchronously**, after the reply is saved: the `VERNACULAR` job
+  (`src/ai/ai-worker.service.ts:201`) re-runs the translation, stores it on the
+  message as `aiPayload.understanding` (carrying `via`, the acceptance signal that
+  the lane genuinely served the turn), and runs the intent engine over the
+  **English** as a second safety sweep — a crisis phrase invisible to the keyword
+  floor in its original language then surfaces as an `AI_CANDIDATE` flag with a
+  `safety_flag.lang_refine` audit. Every non-English turn gets the sweep,
+  including a message whose detection was silent but whose conversation is running
+  in a vernacular.
+
+**Contract.** A JSON reply with the English translation, tone and key facts
+(`englishTranslation`, `tone`, `keyFacts`), validated against a schema
+(`src/ai/language/understanding.schema.ts`); `response_format: json_object`,
+120 output tokens, temperature 0.1. The prompt's safety-critical instruction is to
+translate risk meaning **literally** — never soften or euphemise it.
+
+**No second member.** OpenAI never translates. If N-ATLaS cannot answer, the
+synchronous half notes "Translation unavailable; drafted from the original
+message" and the async half retries on the worker ladder (5 s / 30 s / 2 min),
+ending in an `ai_generation.exhausted` audit rather than a silent drop.
 
 ### 3.4 Speech recognition (voice notes)
 
 **Purpose.** Voice notes in Yoruba, Hausa and Igbo are transcribed by the NCAIR1
-whisper-small fine-tunes, hosted in the sidecar `services/n-atlas-asr`.
+whisper-small fine-tunes — `NCAIR1/Yoruba-ASR`, `NCAIR1/Hausa-ASR`,
+`NCAIR1/Igbo-ASR`.
 
-**Routing.** Yoruba, Hausa and Igbo go to the sidecar. English and Pidgin go to
-Groq Whisper, because Pidgin is lexified on English and Whisper detects it.
+**Routing.** Yoruba, Hausa and Igbo go to N-ATLaS ASR: `src/ai/providers/natlas/
+natlas-asr.provider.ts` resolves each language from its hosted endpoint
+(`NATLAS_ASR_URL_YO`/`_HA`/`_IG`) and falls back to the self-hosted sidecar
+(`services/n-atlas-asr`) behind `NATLAS_ASR_BASE_URL`. English and Pidgin go to
+Groq Whisper, because Pidgin is lexified on English and Whisper detects it. The
+transcript then re-enters the text lanes, so detection, translation and render all
+apply to spoken turns.
 
-**Sidecar contract.**
+**No vernacular fallback.** Audio has no second member: an unconfigured, down or
+slow vernacular endpoint answers one friendly 503 ("Voice notes in Yoruba are not
+available right now — please type your message instead."), never a raw error and
+never silence.
+
+**Sidecar contract** (when `NATLAS_ASR_BASE_URL` is the route in use):
 
 ```
 GET  /health       -> { status, loaded, idle_unload_seconds, models }
@@ -130,9 +177,22 @@ POST /transcribe   multipart: file=<audio>, lang=yo|ha|ig
                    -> { text, duration }   | 400 unknown language | 503 failure
 ```
 
-The models are `NCAIR1/Yoruba-ASR`, `NCAIR1/Hausa-ASR` and `NCAIR1/Igbo-ASR`.
-They load on first use and are unloaded after an idle period. One generation
-runs per language at a time.
+The models load on first use and are unloaded after an idle period. One
+generation runs per language at a time.
+
+### 3.5 What the model re-reads (history_en)
+
+Every stored turn that reaches the system again reaches it in English
+(`src/ai/language/history-pivot.ts`): USER turns pivot from
+`aiPayload.understanding.englishTranslation`, ASSISTANT turns from
+`aiPayload.render.englishSource` — the model's own pre-render wording, so the
+pivot is exact rather than re-translated — and either falls back to the raw text
+when no pivot exists (English turns, renders that never happened, rows predating
+the lanes). Both consumers of history use it: the model's context window
+(`src/ai/context/ai-context.service.ts`, which budgets on the pivoted text) and the
+session-summary transcript. A vernacular conversation therefore costs the reasoning
+model the same characters an English one does, and no summary is written from
+untranslated text.
 
 ---
 
@@ -143,18 +203,26 @@ student without a reply.
 
 ```
 Identify:  heuristics → keyword → N-ATLaS → OpenAI → no signal (keep the conversation's language)
-Render:    N-ATLaS (validated) → OpenAI (validated) → scripted in-language line
-Understand:N-ATLaS → OpenAI → job retried later
-Voice:     N-ATLaS sidecar → Groq Whisper → student is asked to type
+Render:    N-ATLaS (validated) → scripted in-language line
+Understand:N-ATLaS only → synchronous: draft from the student's own words / async: worker retry → exhausted audit
+Voice:     N-ATLaS ASR (hosted endpoint → sidecar) → friendly 503 asking the student to type
 ```
+
+Only identification has a second member — it is detection, not translation, so
+OpenAI may answer the same prompt. Translation, rendering and vernacular ASR are
+N-ATLaS or the documented fallback, by the `NATLAS_TRANSLATE_ONLY_001` decision:
+a frontier model must not be silently substituting Nigerian-language judgement.
 
 Safeguarding is independent of N-ATLaS:
 - keyword flags run on the raw student message;
 - acute flags create the staff alert in English;
-- acute safety copy is the pre-approved in-language line, never a live translation.
+- acute safety copy is the pre-approved in-language line (`SCRIPTED_SAFETY` per
+  intent in `src/ai/language/scripted-copy.ts`), never a live translation;
+- the second safety sweep runs on the English translation, so a phrase the keyword
+  floor cannot read in the original language still surfaces as a flag.
 
 When N-ATLaS is unreachable, the system logs a warning and continues on the
-next lane. Each lane's failure is visible in the reply's `notes`.
+documented fallback. Each lane's failure is visible in the reply's `notes`.
 
 ---
 
@@ -164,7 +232,7 @@ next lane. Each lane's failure is visible in the reply's `notes`.
 |---|---|---|---|
 | Identify | 0 | 64 tokens | 4 s |
 | Render | 0.2 | 400 tokens | 12 s |
-| Understanding | 0.1 | 120 tokens | 45 s |
+| Understanding | 0.1 | 120 tokens (`json_object`) | 10 s |
 
 Prompt sources: `identify.prompt.ts`, `render.prompt.ts`, `understanding.prompt.ts`.
 Each prompt has a version constant so changes are traceable.
@@ -187,6 +255,13 @@ are not a clinical evaluation.
 
 Identify fits inside its 4 s budget with a narrow margin. If the endpoint
 cools down, the budget can be exceeded, and the OpenAI lane takes over.
+
+**Endpoint migration, 2026-10-24.** The chat endpoint moved to an AWS L4
+($0.80/hr, same URL, 15-minute scale-to-zero). A cold wake answered after ~14
+minutes, then `POST /v1/chat/completions` returned HTTP 200 from `vllm-0.23.0`
+with a Yoruba rendering of "you matter, and it is okay to say this privately"
+(67 prompt / 39 completion tokens). Warm latency is what the budgets above were
+measured against; a wake is not a slow request, it is a lane that fails open.
 
 ### 6.2 Identification accuracy
 
@@ -291,7 +366,16 @@ npx vitest run src/ai/language
 ```
 
 Covers identification parsing, the OpenAI identify fallback, render acceptance,
-label stripping, looping detection and the scripted fallback.
+label stripping, looping detection, the scripted fallback, the history pivot and
+every lane timeout in the env contract.
+
+### 7.5 Manual browser pass
+
+`test/language-harness/` — a zero-dependency page plus its same-origin `:5050`
+proxy, run against a local backend. It shows, per turn: the detected language, the
+reply language, the `render` block, the `boundary` marker and the async
+`understanding` once the VERNACULAR lane lands it. Setup and expectations:
+[API testing handbook §5.6](API-TESTING-HANDBOOK.md#56-manual-browser-harness-testlanguageharness).
 
 ---
 
@@ -301,7 +385,17 @@ label stripping, looping detection and the scripted fallback.
 - **Render quality** is checked for language and structure, not for meaning or tone. Renders can be imperfect even when accepted.
 - **Latency** of identify is close to its budget. A cold endpoint falls through to OpenAI.
 - **Model updates** change the outputs. The eval should be re-run after any endpoint or model change.
-- **Clinical review** of the local-language crisis lines and vocabulary is pending. These are used in code only after that review.
+- **Clinical review** of the local-language crisis lines and vocabulary is
+  **outstanding, and the code already uses them**: every line in
+  `src/ai/language/scripted-copy.ts` is marked `PENDING_CLINICAL_REVIEW`, and
+  `GET /api/v1/ai/config` publishes the keyword packs' status as
+  `vernacularReviewStatus`. A vernacular crisis turn therefore ships wording that
+  no native speaker or clinical reviewer has signed off yet — the pilot's clinical
+  sign-off is the gate, not the code.
+- **A failed render is a generic reply, not the tailored one**: when N-ATLaS
+  cannot produce an accepted render the student gets the scripted in-language line
+  instead of the reply written for them, so render availability is a quality
+  question, not only an aesthetic one.
 
 ---
 
@@ -314,3 +408,35 @@ label stripping, looping detection and the scripted fallback.
 | Live eval | Passing in most runs; final measurement after the last change pending |
 | Real-world validation with students | Not yet done |
 | Native-speaker and clinical review | Pending |
+
+---
+
+## 10. License, attribution and integration history
+
+Per the N-ATLaS license obligations (restated in [DEPLOYMENT.md §1](DEPLOYMENT.md)):
+
+- **Attribution is displayed verbatim in the product footer** (frontend
+  `src/components/AppFooter.tsx`): *"N-ATLaS is an initiative of the Federal
+  Ministry of Communications, Innovation and Digital Economy, powered by Awarri
+  Technologies."* Do not remove or reword it.
+- §1 of the runbook additionally requires the same string on
+  `GET /api/v1/ai/config`. That endpoint today publishes the language block, the
+  reply mode and `vernacularReviewStatus`, but **no attribution field** — the web
+  footer is currently the only place it appears, so any other client of the API
+  has no attribution to show. Closing that is a one-field change.
+- The **1000 active end-users / 30 days** cap is an operational constraint. The
+  pilot cohort is far below it; enrolment is checked before any scaling step
+  (pilot analytics, `src/analytics/`).
+- The gated NCAIR1 repositories are accessed with an account that has accepted the
+  model terms.
+
+| Change | Date | What changed |
+|---|---|---|
+| `NATLAS_SIDECAR_001` | 2026-10-08 | Local Ollama (CPU Q4_K_M) served the async understanding lane on the VPS at ~2 tokens/s; the hardcoded 15 s understanding budget proved unwinnable — the lesson that became the per-lane timeout ladder. |
+| `NATLAS_LLM_014` | 2026-10-09 | The VPS Ollama gave way to a **hosted HF Inference Endpoint** (vLLM, GPU, scale-to-zero): OpenAI chat shape, env-only `NATLAS_LLM_API_KEY`, model default `NCAIR1/N-ATLaS`, every failure path collapsed into `NatlasUnavailableError`. |
+| `VERNACULAR_REPLY_015` | 2026-10-09 | Per-message language following: yo/ha/ig lexicon detection replaces franc for the local languages, and `n-atlas-translate` became the default reply mode. |
+| `LANG_ID_016` | 2026-10-09 | The detector's last resort became N-ATLaS itself — translation-anchor prompt v2 under a strict 4 s fail-open cap — and the client-supplied `language` left the contract end to end. |
+| `NATLAS_TRANSLATE_ONLY_001` | 2026-10-12 | **N-ATLaS became the only translator and renderer.** The OpenAI translation and render lanes were removed; OpenAI does the reasoning only. `NATLAS_TRANSLATE_TIMEOUT_MS` (10 s) replaced the shared 45 s budget for the translation call, and a failed render now falls to a scripted in-language line rather than an OpenAI render. |
+| `ASR_HF_001` | 2026-10-12 | Vernacular ASR gained per-language hosted HF endpoints (`NATLAS_ASR_URL_YO/HA/IG`, T4, scale-to-zero), with the self-hosted sidecar kept behind `NATLAS_ASR_BASE_URL`. |
+| AWS L4 migration | 2026-10-22 | The chat endpoint moved to an AWS L4 under the same URL, 15-minute scale-to-zero; verified serving 2026-10-24 (§6.1). |
+| `NATLAS_RESCUE_001` | 2026-10-24 | The stale-branch rescue: the history pivot (§3.5) now feeds the model context as well as the summary, the manual browser harness (§7.5) landed, and the dead `language.understandingTimeoutMs` field was deleted — it was read by nothing, and `NATLAS_TRANSLATE_TIMEOUT_MS` is the knob that actually governs the translation lane. This document was re-verified against the code and corrected: the OpenAI render/translation fallbacks and the 45 s understanding budget it previously described had already been removed. |

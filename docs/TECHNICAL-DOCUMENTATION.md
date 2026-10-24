@@ -228,17 +228,21 @@ queued for the worker.
 |---|---|---|
 | Generation (English reply, summaries) | OpenAI | Groq |
 | Language identify | N-ATLaS | OpenAI |
-| Render into the turn language | N-ATLaS | OpenAI, then scripted line |
-| Understanding (translation for the second safety sweep) | N-ATLaS | OpenAI |
+| Render into the turn language | N-ATLaS | scripted line in the turn language |
+| Understanding (translation for the second safety sweep) | N-ATLaS | — |
 | Voice transcription, Yoruba / Hausa / Igbo | N-ATLaS ASR sidecar | Groq Whisper |
 | Voice transcription, English / Pidgin | Groq Whisper | — |
 
 Details of the N-ATLaS integration are in [N-ATLAS Documentation](N-ATLAS-DOCUMENTATION.md).
+N-ATLaS is the only translator and the only renderer; OpenAI reasons and, as the
+last resort of the language-ID stage, identifies. A render that is unavailable or
+rejected ships the scripted line, so no turn is ever blocked on it.
 
 ### 7.2 Budgets
 
-Timeouts are set per call: N-ATLaS identify 4 s, N-ATLaS render 12 s,
-N-ATLaS understanding (translation) 45 s. Generation's first synchronous attempt
+Timeouts are set per call: N-ATLaS identify 4 s (`NATLAS_IDENTIFY_TIMEOUT_MS`),
+N-ATLaS render 12 s (`NATLAS_RENDER_TIMEOUT_MS`), N-ATLaS understanding
+(translation) 10 s (`NATLAS_TRANSLATE_TIMEOUT_MS`). Generation's first synchronous attempt
 has a 20 s budget before the reply is queued.
 
 ### 7.3 Holding lane and worker

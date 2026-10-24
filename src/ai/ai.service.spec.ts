@@ -551,7 +551,7 @@ describe('AiService.generateAndApply', () => {
     });
 
     it('a language detected in this message beats the standing preference', async () => {
-      replyRenderer.render.mockResolvedValue({ rendered: 'Rendered.', via: 'openai' });
+      replyRenderer.render.mockResolvedValue({ rendered: 'Rendered.', via: 'n-atlas-local' });
       const { service } = await serviceWithSpy(translateConfig, {
         ...ctx,
         student: { ...ctx.student, preferredLanguage: 'ha' },

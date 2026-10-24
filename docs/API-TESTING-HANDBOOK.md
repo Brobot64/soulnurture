@@ -571,12 +571,13 @@ floor all run on the English lane) and a vernacular turn's finished reply is
 rendered by local N-ATLaS **within the same request**, whatever the standing
 preference (per-message following; a voice note follows the same rule once
 its transcript is sent). The forced `dto.language` and then the preference
-fill in only when the message text itself yields no signal. Render fallback
-chain: N-ATLaS → OpenAI render → the English reply (total render failure
-never blocks the turn); scripted safety copy is never rendered — that wording
-is approved verbatim. Finally a `VERNACULAR` job (see §6.6) is queued to
-translate the message and run a second safeguarding sweep on the English
-translation.
+fill in only when the message text itself yields no signal. Render fallback:
+N-ATLaS, then the scripted line in the turn language (`render.via:
+"scripted"`) — N-ATLaS is the only renderer, OpenAI never renders, and a total
+render failure never blocks the turn; scripted safety copy is never rendered —
+that wording is approved verbatim. Finally a `VERNACULAR` job (see §6.7) is
+queued to translate the message and run a second safeguarding sweep on the
+English translation.
 
 **Vernacular probe** (optional — run after §5.4 so the 6-message assertion
 above stays valid). Send (omit `language`):
@@ -590,14 +591,15 @@ Assert:
 - `data.languageOffer === { "detected": "yo", "current": "en" }`
 - `data.activeIntent === null` (benign text; the keyword floor still ran on
   the raw text synchronously)
-- the assistant reply comes back **in Yoruba** (rendered in-request; with
-  neither `NATLAS_LLM_BASE_URL` nor `OPENAI_API_KEY` configured it stays
-  English — the turn is never blocked); the assistant turn's `aiPayload`
-  gains `render: { language: "yo", via: "n-atlas-local" | "openai",
-  englishSource }`
+- the assistant reply comes back **in Yoruba** (rendered in-request; without a
+  reachable `NATLAS_LLM_BASE_URL` the turn is still never blocked — it ships
+  the scripted Yoruba line and `via` is `"scripted"`); the assistant turn's
+  `aiPayload` gains `render: { language: "yo", via: "n-atlas-local" |
+  "scripted", englishSource }` — `englishSource` is the English draft the reply
+  came from, and is what the model re-reads for that turn (§5.5)
 
-Then within ~1 worker poll cycle (translation requires `OPENAI_API_KEY` or
-`NATLAS_LLM_BASE_URL`; see §9.5):
+Then within ~1 worker poll cycle (translation runs on `NATLAS_LLM_BASE_URL`
+only; see §9.5):
 
 ```sql
 SELECT kind, status, attempts FROM ai_generation_job
@@ -754,9 +756,11 @@ of reply regeneration (no message rewrite); success flips the job to
 **6.7** VERNACULAR jobs ride it too: each detected non-English USER message
 (§5.3) enqueues one with `kind = "VERNACULAR"` and
 `conversationMessageId` = that user message. The worker loads the raw message
-content, translates it (local N-ATLaS first when `NATLAS_LLM_BASE_URL` is
-set, OpenAI fallback, both lanes metered), stores the understanding onto the
-message's `aiPayload`, and — when the synchronous pass did not already flag —
+content, translates it (local N-ATLaS is the only translator —
+`NATLAS_LLM_BASE_URL` unset, unreachable or a late payload fails the attempt,
+which retries on the job ladder and then goes terminal), stores the
+understanding onto the message's `aiPayload`, and — when the synchronous pass
+did not already flag —
 re-runs the intent engine on the **English translation** as a second safety
 sweep. A hit persists an `AI_CANDIDATE` support flag and audits
 `safety_flag.lang_refine` (entity `ConversationMessage`). Terminal failure
@@ -1047,9 +1051,12 @@ Follow-up statuses: `PENDING | SCHEDULED | COMPLETED | CANCELLED`.
   by default — N-ATLaS
   endpoint/model — `NATLAS_LLM_BASE_URL`/`NATLAS_LLM_MODEL` — and the
   understanding + render + language-ID output/timeout caps:
-  `NATLAS_LLM_TIMEOUT_MS`, `NATLAS_RENDER_TIMEOUT_MS`,
+  `NATLAS_TRANSLATE_TIMEOUT_MS` (the deadline the translation call actually
+  runs under) + `understandingMaxOutputTokens`, `NATLAS_RENDER_TIMEOUT_MS`,
   `NATLAS_IDENTIFY_TIMEOUT_MS`, `renderMaxOutputTokens`,
-  `identifyMaxOutputTokens`), `intents`, `canonicalCategories`,
+  `identifyMaxOutputTokens` and the provider default `NATLAS_LLM_TIMEOUT_MS`
+  (45 s — used only when a caller passes no deadline, which no lane does
+  today), `intents`, `canonicalCategories`,
   `canonicalSeverities`, `canonicalTopics`,
   `guardrails` (`input` caps + injection probes, `output` caps + banned claims,
   `rate` per-student limits — see §5.3)
@@ -2006,3 +2013,4 @@ per-intent actions are the same data the enforcement uses.
 | 2026-10-09 | `LANG_ID_016` — language from the input itself: when every heuristic is silent the detector asks N-ATLaS to name the turn's language (`IDENTIFY_MIN_CHARS` 8, strict `NATLAS_IDENTIFY_TIMEOUT_MS` 4s, fail-open to the standing preference on cold/unparsable), and the detected language — `en` included — always beats the preference for that turn; §5.3 + §9.5 + `.env.example` updated. |
 | 2026-10-10 | `PILOT_ANALYTICS_001` — owner pilot analytics: aggregate-first payload (reach KPIs, DAU/WAU/MAU + return rate, 7-row feature usage, 8 self-reported wellbeing themes, resources, support, safeguarding, outcomes placeholder) with 1–4-student breakdown suppression, preset/custom window + school scope, and a CSV report export that bypasses the JSON envelope; `conversation_message.viaVoice` flag splits spoken AI turns; §14.10 + Appendix A `PilotTheme` row. |
 | 2026-10-24 | `AI_RESPONSE_REPORT_REVIEW_001` — §15 (new chapter): the AI-response-report lane end to end (submit + 409 `RESPONSE_CHANGED` + duplicate returns the original §15.1, student receipts §15.2, reviewer reads §15.3) and the record-only reviewer decision `PATCH /api/v1/ai-response-reports/:id/review` (§15.4) — `reviewOutcome`/`reviewedById`/`reviewedAt` on `ai_response_report` (`SET NULL` on staff removal, `AiReportReviewOutcome` in Appendix A) + metadata-only audit in the same transaction, with the student/reviewer projections split so a submission or retry can never reveal that a report was reviewed, by whom, or what was concluded; tenancy resolves through the student's current school, foreign or missing rows answer 404; §15.5 documents the server-owned `aiPayload.boundary` marker (`OUT_OF_SCOPE` / `ACUTE_SAFEGUARD_ROUTE`, acute wins, present on the async placeholder, excluded from `/review-context`). Migration `20261024090000_ai_response_report_review`. |
+| 2026-10-24 | `NATLAS_RESCUE_001` — the rescue pass over the stale vernacular branches, verified against current code rather than merged blind. (1) `history_en` now feeds both model consumers: `src/ai/language/history-pivot.ts` returns a turn's English source — the USER `aiPayload.understanding.englishTranslation`, the ASSISTANT `aiPayload.render.englishSource` — and falls back to the raw text when a turn has no pivot, so the context window (§5.5) measures and ships English for every turn while the stored rows stay in the student's language. (2) The dead `language.understandingTimeoutMs` config field is deleted; `NATLAS_TRANSLATE_TIMEOUT_MS` (10 s) is the knob that governs the translation call, so a `NATLAS_UNDERSTANDING_TIMEOUT_MS` in `.env` does nothing. (3) `test/language-harness/` (§5.6) — a zero-dependency same-origin proxy on `:5050` for browser-verifying a turn end to end, showing detection, reply language, `render`, `boundary` and the async `understanding` (§15.5 makes the boundary marker readable here). (4) §5.3 and [Technical Documentation §7](TECHNICAL-DOCUMENTATION.md#7-providers-fallbacks-and-the-worker) corrected: N-ATLaS is the only translator and the only renderer — a failed render ships the scripted in-language line (`render.via: "scripted"`), OpenAI never renders and never translates, and the 45 s figure attached to the translation call was stale. [N-ATLaS Documentation](N-ATLAS-DOCUMENTATION.md) is the single contract document for this lane. |
