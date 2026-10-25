@@ -405,7 +405,11 @@ fi
 cat <<EOF
 
 200 on both lines means the page and the API are one origin, which is the whole
-iOS fix. The only remaining acceptance is a device check that no desktop browser
+iOS fix. The WSS lines are the realtime socket: 101 on $APP_HOST is the proof that
+nginx carries the upgrade AND ALLOWED_ORIGINS lists this origin (the gateway answers 400
+to an origin it does not know, so a 400 on $API_HOST is expected — no browser page is
+served from the api. host, so it was never added to the list).
+The only remaining acceptance is a device check that no desktop browser
 can fake: open https://$APP_HOST on an iPhone, sign in, reload the page, and stay
 signed in. Until that passes, keep the Vercel URL and the api. vhost live, and
 leave BETTER_AUTH_CROSS_SITE_COOKIES=true (a SameSite=None cookie is still fine
