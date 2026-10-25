@@ -27,7 +27,7 @@ SSH runs on **port 2222** throughout (§1): `ssh -p 2222 deploy@YOUR_VPS_IP`.
 | Component | Runtime | Port (bind) | Memory cap | Persistence |
 |---|---|---|---|---|
 | NestJS API | systemd (`natlas.service`), native Node 24 | 127.0.0.1:3000 | ~512 MB | — (stateless) |
-| Frontend (TanStack Start SSR) | systemd (`natlas-frontend.service`), native Node 24 | 127.0.0.1:3100 | ~256 MB | — (stateless) |
+| Frontend (TanStack Start SSR) | systemd (`natlas-frontend.service`), native Node 24 | 127.0.0.1:3200 | ~256 MB | — (stateless) |
 | N-ATLaS LLM | Ollama (native, systemd) | 127.0.0.1:11434 | ~6 GB (model resident) | `/opt/ollama/models` |
 | PostgreSQL 17 | Docker Compose | 127.0.0.1:5432 | 1.5 GB | named volume `pgdata` |
 | RustFS (S3) | Docker Compose | 127.0.0.1:9000 / 9001 | 512 MB | named volume `rustfs-data` |
@@ -711,7 +711,7 @@ Nothing in the app is broken — the browser refused to carry the credential.
 reached on, and the cookie becomes first-party: no SameSite exception, no CORS
 preflight, no ITP case. nginx does the joining — `app.YOUR_VPS_IP.sslip.io` routes
 `/api*` to the NestJS API on 127.0.0.1:3000 and everything else to the SSR server on
-127.0.0.1:3100, so the browser only ever talks to one origin. The frontend's
+127.0.0.1:3200, so the browser only ever talks to one origin. The frontend's
 `VITE_API_BASE_URL` is deliberately **empty**, which makes every call relative
 (`src/lib/api.ts` → `fetch('/api/…')`, `src/lib/socket.ts` → falls back to
 `window.location.origin`).
@@ -788,8 +788,9 @@ Manual equivalent, once the file is in place:
 ```bash
 sudo install -m 0644 /opt/natlas/deploy/natlas-frontend.service /etc/systemd/system/natlas-frontend.service
 sudo systemctl daemon-reload && sudo systemctl enable natlas-frontend
-# it answers 503 until a build exists — expected on the very first enable
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3100/
+# 3200, deliberately: Loki already publishes 127.0.0.1:3100 on this box, so that port
+# can never be the frontend's. Before a build exists there is nothing to answer on 3200.
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3200/
 ```
 
 ### 2. `/usr/local/bin/natlas-frontend-deploy` (root-owned, 755)
@@ -817,8 +818,14 @@ a plain build does not:
   baked-in absolute origin re-creates the iOS third-party-cookie bug silently.
 
 The health gate is not just a port check: it requires the SSR response to contain
-`<html`, so a server that boots and holds 3100 open while erroring every request still
-fails the gate and rolls back.
+`<html`, so a server that boots and holds the port open while erroring every request
+still fails the gate and rolls back. On the first live run that is exactly what saved
+the box: the lane had picked 127.0.0.1:3100, which Loki in the monitoring stack already
+publishes, so the gate found a listening socket answering for somebody else's service
+and refused to mark the release deployed — instead of nginx quietly routing a student's
+page request into a log database. `vps-frontend-same-origin.sh` now takes
+`FRONTEND_PORT` (3200), refuses to install a lane whose unit, release script and vhost
+disagree about it, and refuses to start if something that is not `node` already holds it.
 
 ```bash
 ssh -p 2222 deploy@YOUR_VPS_IP /usr/local/bin/natlas-frontend-deploy   # as deploy — it refuses root
@@ -975,10 +982,11 @@ server {
 # --- Web app, same-origin (§6A) — the two server blocks for
 #     app.YOUR_VPS_IP.sslip.io are NOT duplicated here: they live in
 #     deploy/nginx-app-vhost.conf, which deploy/vps-frontend-same-origin.sh renders
-#     (@@APP_HOST@@/@@API_HOST@@) and appends to this file with a timestamped backup
-#     and `nginx -t` restore-on-failure. Edit that file, not the installed copy.
+#     (@@APP_HOST@@/@@API_HOST@@/@@SSR_PORT@@) and appends to this file with a timestamped
+#     backup and `nginx -t` restore-on-failure. Edit that file, not the installed copy; a
+#     re-run re-stamps the block if the installed one drifted from the checkout.
 #     Shape: /api/socket.io (upgrade headers + 3600s timeouts) → /api → / to the SSR
-#     server on 127.0.0.1:3100, with no caching headers on purpose — the page renders
+#     server on 127.0.0.1:3200, with no caching headers on purpose — the page renders
 #     per request and the session is in the cookie, so an intermediary cache with a
 #     shared key would serve one student's signed-in shell to another. It reuses the
 #     api. cert lineage, and needs nothing from CORS because the browser only ever

@@ -32,6 +32,10 @@ FRONTEND_REMOTE="$FRONTEND_SSH"   # decided for real in step 2
 NGINX_SITE=/etc/nginx/sites-available/natlas
 ENV_FILE=/opt/natlas/.env
 LINEAGE_DIR=/etc/letsencrypt/live
+# The SSR port. NOT 3100: Loki in the monitoring stack publishes 127.0.0.1:3100 on
+# this box (DEPLOYMENT §2's table said so the whole time and the lane never read it),
+# so the frontend would have proxied students' page requests into a log database.
+FRONTEND_PORT=3200
 TS=$(date +%Y%m%d%H%M%S)
 
 ASSUME_YES=0
@@ -81,7 +85,7 @@ APP_HOST="app.$IP.sslip.io"
 # "already lists it" check silently stops firing and a re-run appends duplicates.
 ORIGIN="https://$APP_HOST"
 echo "API host   : $API_HOST (already live)"
-echo "New app host: https://$APP_HOST  ->  / = 127.0.0.1:3100 (SSR), /api = 127.0.0.1:3000"
+echo "New app host: https://$APP_HOST  ->  / = 127.0.0.1:$FRONTEND_PORT (SSR), /api = 127.0.0.1:3000"
 id natlas >/dev/null 2>&1 || { echo "user 'natlas' does not exist — the backend unit runs as it (§6); fix that first" >&2; exit 1; }
 
 # ------------------------------------------ 2. how does the box read the repo?
@@ -154,6 +158,34 @@ echo "frontend at $(git -C "$APP_DIR" rev-parse --short HEAD) ($(git -C "$APP_DI
 
 # ------------------------------------------------------- 4. release lane + service
 step "Installing natlas-frontend-deploy and natlas-frontend.service"
+# Three files must agree on the SSR port — the unit's PORT=, the release script's
+# health-gate URL and the vhost's proxy_pass. They install from one checkout, so a
+# mismatch is a repo bug, and finding it here is cheap compared to finding it as a
+# service that crash-loops behind a health gate reading somebody else's HTTP.
+port_ok=1
+grep -qx "Environment=PORT=$FRONTEND_PORT" "$SRC_DIR/natlas-frontend.service" || port_ok=0
+grep -qx "SSR_URL=http://127.0.0.1:$FRONTEND_PORT" "$SRC_DIR/natlas-frontend-deploy.sh" || port_ok=0
+grep -q "proxy_pass http://127.0.0.1:@@SSR_PORT@@" "$SRC_DIR/nginx-app-vhost.conf" || port_ok=0
+[ "$port_ok" = 1 ] || { echo "the checkout disagrees about the SSR port (this script says $FRONTEND_PORT) — fix the files, do not install a split-brain lane" >&2; exit 1; }
+
+# Prove the port is free before anything is enabled on it. The first run of this lane
+# picked 3100, which the monitoring stack's Loki already publishes on 127.0.0.1; the
+# frontend could not bind and nginx was about to proxy students' page requests into a
+# log database. 'node' is allowed to hold it — that is this service, already running.
+# No pipe here on purpose: `ss | grep -q` lets grep close the pipe, pipefail turns the
+# resulting SIGPIPE into a non-zero status, and a port that IS taken would read as free.
+PORT_HELD=$(sudo ss -ltnpH "sport = :$FRONTEND_PORT" 2>/dev/null || true)
+if [ -n "${PORT_HELD//[[:space:]]/}" ]; then
+  case "$PORT_HELD" in
+    *node*) echo "port $FRONTEND_PORT is already served by node (natlas-frontend running) — reusing it" ;;
+    *)
+      echo "port $FRONTEND_PORT is taken by something that is not this service:"
+      printf '%s\n' "$PORT_HELD"
+      echo "Set FRONTEND_PORT in this script to a free port and re-run (3100 belongs to Loki)." >&2
+      exit 1 ;;
+  esac
+fi
+
 sudo install -m 0755 -o root -g root "$SRC_DIR/natlas-frontend-deploy.sh" /usr/local/bin/natlas-frontend-deploy
 sudo install -m 0644 -o root -g root "$SRC_DIR/natlas-frontend.service" /etc/systemd/system/natlas-frontend.service
 sudo systemctl daemon-reload
@@ -189,21 +221,51 @@ fi
 
 # ------------------------------------------------------------------ 6. the vhost
 step "nginx: adding the $APP_HOST server blocks"
+RENDERED=$(mktemp)
+sed -e "s/@@APP_HOST@@/$APP_HOST/g" -e "s/@@API_HOST@@/$API_HOST/g" \
+    -e "s/@@SSR_PORT@@/$FRONTEND_PORT/g" "$SRC_DIR/nginx-app-vhost.conf" > "$RENDERED"
+# First line of the block this script appends — used to find it again in the site file.
+VHOST_MARKER=$(head -1 "$SRC_DIR/nginx-app-vhost.conf")
+
 if grep -q "server_name $APP_HOST;" "$NGINX_SITE"; then
-  echo "vhost already present"
+  # "already present" is not the same as "current": a block stamped before the port
+  # changed still routes / to whatever owns the old port. Compare against what would
+  # be installed now, and re-stamp the tail if it drifted.
+  AT=$(grep -nF "$VHOST_MARKER" "$NGINX_SITE" | head -1 | cut -d: -f1)
+  if [ -n "$AT" ] && sudo sed -n "${AT},\$p" "$NGINX_SITE" | diff -q - "$RENDERED" > /dev/null; then
+    echo "vhost already present and current (port $FRONTEND_PORT)"
+    NEED_VHOST=0
+  else
+    echo "vhost is present but stale (differs from the checkout) — re-stamping it"
+    NEED_VHOST=1
+    STALE_AT=$AT
+  fi
 else
+  echo "vhost missing — appending it"
+  NEED_VHOST=1
+  STALE_AT=
+fi
+
+if [ "$NEED_VHOST" = 1 ]; then
   sudo cp -a "$NGINX_SITE" "$NGINX_SITE.bak-$TS"
-  sed -e "s/@@APP_HOST@@/$APP_HOST/g" -e "s/@@API_HOST@@/$API_HOST/g" \
-    "$SRC_DIR/nginx-app-vhost.conf" | sudo tee -a "$NGINX_SITE" > /dev/null
+  if [ -n "${STALE_AT:-}" ]; then
+    # The app block is always the tail of the file (this script appends it last), so
+    # deleting from its marker to EOF replaces exactly that block and leaves the api.,
+    # s3. and monitor. servers untouched.
+    sudo sed -i "${STALE_AT},\$d" "$NGINX_SITE"
+  fi
+  sudo tee -a "$NGINX_SITE" < "$RENDERED" > /dev/null
   if ! sudo nginx -t; then
     echo "nginx -t failed — restoring $NGINX_SITE (nothing reloaded, api. untouched)" >&2
     sudo cp -a "$NGINX_SITE.bak-$TS" "$NGINX_SITE"
     sudo nginx -t
+    rm -f "$RENDERED"
     exit 1
   fi
   sudo systemctl reload nginx
   echo "nginx reloaded (backup: $NGINX_SITE.bak-$TS)"
 fi
+rm -f "$RENDERED"
 
 # ------------------------------------------------------- 7. the API knows the host
 if [ "$SKIP_ENV" = 1 ]; then

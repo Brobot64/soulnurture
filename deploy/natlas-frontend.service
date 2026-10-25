@@ -9,7 +9,10 @@ User=natlas
 WorkingDirectory=/opt/natlas-frontend
 Environment=NODE_ENV=production
 Environment=HOST=127.0.0.1
-Environment=PORT=3100
+# 3200, not 3100: Loki in the monitoring stack publishes 127.0.0.1:3100 on this box,
+# so the frontend could never bind there. vps-frontend-same-origin.sh asserts this
+# value matches its own FRONTEND_PORT, the release script's health URL and the vhost.
+Environment=PORT=3200
 ExecStart=/usr/bin/node .output/server/index.mjs
 Restart=always
 RestartSec=3

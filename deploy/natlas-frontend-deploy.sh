@@ -16,7 +16,9 @@ if [ "$(id -un)" = "root" ]; then
 fi
 
 APP_DIR=/opt/natlas-frontend
-SSR_URL=http://127.0.0.1:3100
+# Must match Environment=PORT= in natlas-frontend.service and the port the app vhost
+# proxies to; vps-frontend-same-origin.sh checks all three before installing anything.
+SSR_URL=http://127.0.0.1:3200
 
 cd "$APP_DIR"
 exec 9>/tmp/natlas-frontend-deploy.lock
@@ -58,7 +60,9 @@ build() {
 
 health_gate() {
   # Not just a port check: the SSR server has to actually render, so a process that
-  # boots, holds 3100 open and errors every request still fails the gate.
+  # boots, holds the port open and errors every request still fails the gate. That is
+  # what caught the first release run pointing at 127.0.0.1:3100 — Loki answered, and
+  # Loki's answer is not an HTML page.
   rm -f /tmp/natlas-frontend-probe.html
   for _ in $(seq 1 20); do
     sleep 2
