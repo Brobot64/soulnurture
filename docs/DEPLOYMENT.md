@@ -911,6 +911,15 @@ sudo apt install -y nginx certbot
 # forwards `Connection: upgrade` only when the client actually requested an
 # upgrade, so plain HTTP on the same path (engine.io polling fallback) still
 # gets `Connection: close`.
+#
+# NOT INSTALLED ON THE PROD BOX (verified 2026-10-25): no `map` exists anywhere
+# under /etc/nginx, and the live api. vhost has been setting
+# `proxy_set_header Connection "upgrade";` literally since October — with the
+# socket websocket-only by design, that works and polling was never the path.
+# `deploy/nginx-app-vhost.conf` therefore copies the INSTALLED form, not this
+# document: referencing $connection_upgrade without the map is an [emerg] that
+# fails `nginx -t`. Either install the map here or keep every vhost literal; what
+# must not happen is a doc and a box describing different configs.
 map $http_upgrade $connection_upgrade {
   default upgrade;
   ''      close;
@@ -1031,6 +1040,15 @@ sudo certbot certonly --webroot -w /var/www/html \
   --deploy-hook "systemctl reload nginx"
 
 # 2) Now enable the vhosts (certs exist → nginx -t passes) and drop the stock site.
+#    sites-enabled is a GLOB (`include /etc/nginx/sites-enabled/*`), so anything you
+#    drop in there is live config. Backups go in sites-available, where nginx never
+#    reads them — `sites-enabled/` must hold symlinks only.
+#    PROD TRIPWIRE FOUND 2026-10-25: `sites-enabled/natlas.bak-20261011` is a plain
+#    file, so every api./s3./monitor. server block is defined twice and `nginx -t`
+#    warns "conflicting server name … ignored" on every single reload. Harmless only
+#    by ordering luck — `natlas` sorts first, so the current file wins and the stale
+#    copy is the one dropped — but a renamed site file or a reordered glob would put
+#    the October-11 config back in production. It belongs in /root, not there.
 sudo ln -s /etc/nginx/sites-available/natlas /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
