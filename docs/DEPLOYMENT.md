@@ -741,9 +741,16 @@ prompt. The sections below stay as the manual reference for what it changes and 
 The frontend is a second repo the `deploy` user clones and builds; its `.output/` and
 `node_modules/` are untracked, exactly like the backend's.
 
-A GitHub deploy key is bound to exactly one repository, so the API's `~deploy/.ssh/natlas_github`
-key (§12) cannot be reused here — it would be rejected as "already in use". Mint a second
-read-only pair and reach it through a Host alias, leaving the API's fetch path untouched:
+**If the repo is public, no credential is needed** — and that is the smaller-blast-radius
+choice, so the installer probes for it first (`GIT_TERMINAL_PROMPT=0 git ls-remote
+https://github.com/Brobot64/soulnurture-frontend HEAD`) and clones over anonymous HTTPS
+when that answers. `Brobot64/soulnurture-frontend` is public today, verified from the box
+on 2026-10-25, so the lane runs with no new key at all. Make it private later and the
+same script switches to the deploy-key path below and pauses once for the paste — a
+GitHub deploy key is bound to exactly one repository, so the API's
+`~deploy/.ssh/natlas_github` key (§12) cannot be reused here; it would be rejected as
+"already in use". Mint a second read-only pair and reach it through a Host alias, leaving
+the API's fetch path untouched:
 
 ```bash
 sudo -u deploy ssh-keygen -t ed25519 -a 100 -f /home/deploy/.ssh/natlas_github_frontend \

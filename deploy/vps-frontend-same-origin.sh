@@ -10,10 +10,11 @@
 # session cookie was third-party, and Safari's ITP drops it, so sign-in could
 # never stick.
 #
-# Re-runnable by design. Step 2 stops with the public key it just made and exits
-# 0: add it as a read-only Deploy Key on Brobot64/soulnurture-frontend (a GitHub
-# deploy key is bound to one repo, so the API's key cannot be reused), then run
-# the same command again and it carries on.
+# Re-runnable by design. If the frontend repo is private, step 2 stops with the
+# public key it just made and exits 0: add it as a read-only Deploy Key on
+# Brobot64/soulnurture-frontend (a GitHub deploy key is bound to one repo, so the
+# API's key cannot be reused), then run the same command again and it carries on.
+# A public repo is cloned over anonymous HTTPS and never pauses.
 #
 # Flags:  -y | --yes          don't ask before restarting the API
 #         --skip-api-env       leave /opt/natlas/.env untouched (you patch it yourself)
@@ -22,7 +23,12 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 SRC_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 APP_DIR=/opt/natlas-frontend
-FRONTEND_REMOTE=git@github-frontend:Brobot64/soulnurture-frontend.git
+FRONTEND_REPO=Brobot64/soulnurture-frontend
+FRONTEND_HTTPS=https://github.com/$FRONTEND_REPO.git
+# only needed if the repo is private: a GitHub deploy key is bound to exactly one
+# repository, so the API's natlas_github key cannot be reused here.
+FRONTEND_SSH=git@github-frontend:$FRONTEND_REPO.git
+FRONTEND_REMOTE="$FRONTEND_SSH"   # decided for real in step 2
 NGINX_SITE=/etc/nginx/sites-available/natlas
 ENV_FILE=/opt/natlas/.env
 LINEAGE_DIR=/etc/letsencrypt/live
@@ -78,8 +84,21 @@ echo "API host   : $API_HOST (already live)"
 echo "New app host: https://$APP_HOST  ->  / = 127.0.0.1:3100 (SSR), /api = 127.0.0.1:3000"
 id natlas >/dev/null 2>&1 || { echo "user 'natlas' does not exist — the backend unit runs as it (§6); fix that first" >&2; exit 1; }
 
-# ------------------------------------------------- 2. read-only pull key + alias
-step "Frontend GitHub credentials for the deploy user"
+# ------------------------------------------ 2. how does the box read the repo?
+step "Source access for $FRONTEND_REPO"
+# A public repo needs no credential at all, so probe anonymous HTTPS first and only
+# mint a read-only deploy key when that is refused. GIT_TERMINAL_PROMPT=0 because a
+# private repo otherwise hangs here waiting for a username.
+NEED_KEY=0
+if GIT_TERMINAL_PROMPT=0 git ls-remote -h "$FRONTEND_HTTPS" HEAD >/dev/null 2>&1; then
+  FRONTEND_REMOTE="$FRONTEND_HTTPS"
+  echo "answers anonymously over HTTPS (public) — no deploy key, no new credential on this box"
+else
+  echo "HTTPS read refused (private repo) — a dedicated read-only deploy key is required"
+  NEED_KEY=1
+fi
+
+if [ "$NEED_KEY" = 1 ]; then
 KEYFILE="$HOME/.ssh/natlas_github_frontend"
 [ -f "$KEYFILE" ] || ssh-keygen -t ed25519 -a 100 -f "$KEYFILE" -N '' -C 'natlas-vps-frontend-pull' -q
 touch "$HOME/.ssh/config"
@@ -118,6 +137,7 @@ EOF
   exit 0
 fi
 echo "GitHub answers for the frontend repo: $(printf '%s' "$HELLO" | head -1)"
+fi   # end of the deploy-key path (step 2)
 
 # ------------------------------------------------------------ 3. the app checkout
 step "Syncing $APP_DIR to origin/main"
