@@ -11,7 +11,8 @@ with zero DNS setup. Replace `YOUR_VPS_IP` everywhere below with your Contabo IP
 
 | Hostname | Serves |
 |---|---|
-| `api.YOUR_VPS_IP.sslip.io` | NestJS backend (this repo) |
+| `app.YOUR_VPS_IP.sslip.io` | **The web app, and the API under its `/api` path** — the browser's only entry point (§6A) |
+| `api.YOUR_VPS_IP.sslip.io` | NestJS backend (this repo) — still needed while the frontend is also hosted on Vercel |
 | `s3.YOUR_VPS_IP.sslip.io` | RustFS object storage (S3 API + console) |
 | `monitor.YOUR_VPS_IP.sslip.io` | Grafana dashboards |
 
@@ -26,6 +27,7 @@ SSH runs on **port 2222** throughout (§1): `ssh -p 2222 deploy@YOUR_VPS_IP`.
 | Component | Runtime | Port (bind) | Memory cap | Persistence |
 |---|---|---|---|---|
 | NestJS API | systemd (`natlas.service`), native Node 24 | 127.0.0.1:3000 | ~512 MB | — (stateless) |
+| Frontend (TanStack Start SSR) | systemd (`natlas-frontend.service`), native Node 24 | 127.0.0.1:3100 | ~256 MB | — (stateless) |
 | N-ATLaS LLM | Ollama (native, systemd) | 127.0.0.1:11434 | ~6 GB (model resident) | `/opt/ollama/models` |
 | PostgreSQL 17 | Docker Compose | 127.0.0.1:5432 | 1.5 GB | named volume `pgdata` |
 | RustFS (S3) | Docker Compose | 127.0.0.1:9000 / 9001 | 512 MB | named volume `rustfs-data` |
@@ -693,6 +695,230 @@ Rollback: `git checkout <previous-tag> && npm ci && npx prisma generate --config
 
 ---
 
+## 6A. Frontend on the VPS — the same-origin lane (this is what fixes iPhone)
+
+**The problem this solves.** While the web app is hosted on Vercel and the API on
+`api.YOUR_VPS_IP.sslip.io`, the session cookie is **third-party** to the page. The
+backend therefore runs with `BETTER_AUTH_CROSS_SITE_COOKIES=true`, which makes
+better-auth emit `SameSite=None; Secure` (§6) — Chrome and Edge still accept that,
+**Safari on iOS does not**: its Intelligent Tracking Prevention drops third-party
+cookies by default. The visible symptom is exactly "I can't access it on my phone":
+sign-in POSTs succeed, the cookie is never stored, the very next request is
+anonymous, and the app bounces the user back to sign-in or renders as unreachable.
+Nothing in the app is broken — the browser refused to carry the credential.
+
+**The fix is topology, not code.** Serve the frontend from the *same host* the API is
+reached on, and the cookie becomes first-party: no SameSite exception, no CORS
+preflight, no ITP case. nginx does the joining — `app.YOUR_VPS_IP.sslip.io` routes
+`/api*` to the NestJS API on 127.0.0.1:3000 and everything else to the SSR server on
+127.0.0.1:3100, so the browser only ever talks to one origin. The frontend's
+`VITE_API_BASE_URL` is deliberately **empty**, which makes every call relative
+(`src/lib/api.ts` → `fetch('/api/…')`, `src/lib/socket.ts` → falls back to
+`window.location.origin`).
+
+Do not delete the `api.` vhost yet: it is what the Vercel deployment (and the probes
+in `test/*.mjs`) still use, and `BETTER_AUTH_CROSS_SITE_COOKIES=true` keeps that
+combination working — a `None` cookie is still fine first-party. Flip it to `false`
+only once Vercel is retired (step 5 below).
+
+### 1. One-time server setup
+
+The frontend is a second repo the `deploy` user clones and builds; its `.output/` and
+`node_modules/` are untracked, exactly like the backend's.
+
+A GitHub deploy key is bound to exactly one repository, so the API's `~deploy/.ssh/natlas_github`
+key (§12) cannot be reused here — it would be rejected as "already in use". Mint a second
+read-only pair and reach it through a Host alias, leaving the API's fetch path untouched:
+
+```bash
+sudo -u deploy ssh-keygen -t ed25519 -a 100 -f /home/deploy/.ssh/natlas_github_frontend \
+  -N '' -C 'natlas-vps-frontend-pull'
+cat /home/deploy/.ssh/natlas_github_frontend.pub
+# GitHub → Brobot64/soulnurture-frontend → Settings → Deploy keys → Add (read-only, NO write access)
+
+cat >> /home/deploy/.ssh/config <<'EOF'
+Host github-frontend
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/natlas_github_frontend
+  IdentitiesOnly yes
+EOF
+# pin GitHub's host key under the new alias too (same fingerprint as §12), or fetch dies with
+# "Host key verification failed" on the first deploy
+ssh-keyscan -t ed25519 github.com >> /home/deploy/.ssh/known_hosts
+sudo -u deploy chown deploy:deploy /home/deploy/.ssh/config /home/deploy/.ssh/known_hosts
+
+sudo -u deploy git clone git@github-frontend:Brobot64/soulnurture-frontend.git /opt/natlas-frontend
+sudo -u deploy ssh -T git@github-frontend    # "Hi Brobot64/soulnurture-frontend!" = the key works
+cd /opt/natlas-frontend && sudo -u deploy git remote -v   # must show github-frontend, not github.com
+```
+
+`/etc/systemd/system/natlas-frontend.service` (same hardening posture as
+`natlas.service`; nitro's Node server reads `PORT`/`HOST` from the environment):
+
+```ini
+[Unit]
+Description=Natlas frontend (TanStack Start SSR)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=natlas
+WorkingDirectory=/opt/natlas-frontend
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=3100
+ExecStart=/usr/bin/node .output/server/index.mjs
+Restart=always
+RestartSec=3
+# hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/natlas-frontend
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now natlas-frontend
+# it answers 503 until a build exists — expected on the very first enable
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3100/
+```
+
+### 2. `/usr/local/bin/natlas-frontend-deploy` (root-owned, 755)
+
+Mirror of `natlas-deploy` (§12): single-flight, marker written only after the health
+gate passes, auto-rollback. Two things it guards that a plain build does not:
+
+```bash
+#!/usr/bin/env bash
+# natlas-frontend-deploy — same-origin frontend lane. Manual for now:
+#   ssh -p 2222 deploy@YOUR_VPS_IP /usr/local/bin/natlas-frontend-deploy
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+if [ "$(id -un)" = "root" ]; then
+  echo "run as deploy, not root (npm output must stay deploy-owned)" >&2
+  exit 1
+fi
+
+cd /opt/natlas-frontend
+exec 9>/tmp/natlas-frontend-deploy.lock
+flock -n 9 || { echo "another frontend deploy is already running; aborting"; exit 1; }
+
+MARKER="$HOME/.natlas-frontend-last-deploy"
+LAST=$(cat "$MARKER" 2>/dev/null || git rev-parse HEAD)
+
+git fetch origin
+git checkout -f main
+git reset --hard origin/main
+NEW=$(git rev-parse HEAD)
+if [ "$LAST" = "$NEW" ]; then
+  echo "already deployed at $(git rev-parse --short "$NEW"); nothing to do"
+  exit 0
+fi
+
+build() {
+  npm ci
+  # EMPTY, not unset: .env is gitignored, so a fresh clone has no
+  # VITE_API_BASE_URL at all and src/lib/api.ts would then default to
+  # http://localhost:3000 — i.e. every student's phone calling its own
+  # localhost. NITRO_PRESET overrides only here; Vercel's own build keeps
+  # its platform preset.
+  NITRO_PRESET=node_server VITE_API_BASE_URL= npm run build
+  # Same-origin is the whole point of this lane, so refuse to ship a bundle
+  # with an absolute origin baked in: that silently re-creates the iOS bug.
+  if grep -rqs -e 'localhost:3000' -e 'sslip\.io' .output/public; then
+    echo "BUILD GUARD: an absolute API origin is baked into .output/public; not deploying" >&2
+    exit 1
+  fi
+}
+
+build
+sudo systemctl restart natlas-frontend
+
+# health gate: the SSR server must actually render, not just hold the port open
+for _ in $(seq 1 20); do
+  sleep 2
+  if curl -sf -m 5 http://127.0.0.1:3100/ -o /tmp/natlas-frontend-probe.html \
+     && grep -qs '<html' /tmp/natlas-frontend-probe.html; then
+    echo "$NEW" > "$MARKER"
+    echo "FRONTEND DEPLOY OK: $(git rev-parse --short "$LAST") -> $(git rev-parse --short "$NEW")"
+    exit 0
+  fi
+done
+
+echo "HEALTH GATE FAILED after deploying $(git rev-parse --short "$NEW"); rolling back to $(git rev-parse --short "$LAST")" >&2
+git reset --hard "$LAST"
+build
+sudo systemctl restart natlas-frontend
+exit 1
+```
+
+The `vite build` is the heaviest thing this server does after Ollama — if it dies with
+exit 137, that is the OOM killer and swap (§1) is what makes the retry succeed.
+
+### 3. Backend `.env` for the new origin
+
+Add the app origin wherever an origin is checked (the `api.` entries stay while
+Vercel is live):
+
+```bash
+ALLOWED_ORIGINS=https://app.YOUR_VPS_IP.sslip.io,https://<project>.vercel.app
+BETTER_AUTH_TRUSTED_ORIGINS=https://app.YOUR_VPS_IP.sslip.io,https://<project>.vercel.app
+WEB_APP_URL=https://app.YOUR_VPS_IP.sslip.io   # emailed verify links land in the app
+sudo systemctl restart natlas
+```
+
+`BETTER_AUTH_URL` stays `https://api.YOUR_VPS_IP.sslip.io` — it is the API's own
+canonical URL, and better-auth accepts the app origin through the trusted-origins list
+above. `sudo systemctl restart natlas` is not optional: both values are read once at
+boot.
+
+### 4. First deploy + verification
+
+```bash
+sudo certbot certonly --webroot -w /var/www/html --cert-name api.YOUR_VPS_IP.sslip.io \
+  -d api.YOUR_VPS_IP.sslip.io -d app.YOUR_VPS_IP.sslip.io \
+  -d s3.YOUR_VPS_IP.sslip.io -d monitor.YOUR_VPS_IP.sslip.io \
+  --agree-tos -m you@example.com --non-interactive   # same lineage → one renewal
+sudo nginx -t && sudo systemctl reload nginx          # after adding the app vhost (§7)
+ssh -p 2222 deploy@YOUR_VPS_IP /usr/local/bin/natlas-frontend-deploy   # as deploy — the script refuses root
+```
+
+Then, in this order — each step rules out a different failure:
+
+```bash
+curl -sI https://app.YOUR_VPS_IP.sslip.io/ | head -3          # SSR over TLS
+curl -s  https://app.YOUR_VPS_IP.sslip.io/api/health/auth     # /api joined to the same origin
+# the cookie a browser would receive: first-party, so SameSite=Lax is enough
+curl -si -X POST https://app.YOUR_VPS_IP.sslip.io/api/auth/sign-in/email \
+  -H 'Content-Type: application/json' -d '{"email":"nobody@example.com","password":"x"}' \
+  | grep -i '^set-cookie' | cut -c1-120
+```
+
+The `set-cookie` line is the acceptance test for the iPhone report, and it has to be
+read **from the app origin**: a cookie whose `Domain` is the API host, or a response
+that only works on `api.`, means the lane is not actually same-origin. Sign in on an
+iPhone (Safari → Settings → Advanced → ADB or a Mac's Web Inspector over USB) and
+confirm `/api/auth/get-session` returns the user on the second request instead of
+401 — that single check is what was impossible while the page and the API were two
+hosts.
+
+### 5. Retiring Vercel (optional, later)
+
+Nothing about the VPS lane requires this, and doing it early costs the fallback. When
+you choose to: in `/opt/natlas/.env` drop the `vercel.app` entries from both origin
+lists and set `BETTER_AUTH_CROSS_SITE_COOKIES=false` (with the page and API on one
+origin, `Lax` is enough and is the safer default), then `sudo systemctl restart
+natlas`. Existing sessions survive — only the cookie attributes change. Keep the
+`api.` vhost: `test/*.mjs` probes and any direct API use still point at it.
+
+---
+
 ## 7. Nginx + TLS (the only public door)
 
 ```bash
@@ -758,8 +984,69 @@ server {
   }
 }
 
+# --- Web app, same-origin (§6A): the page and /api answer on ONE host, so the
+#     session cookie is first-party and iOS Safari stops dropping it. `/api` is a
+#     longer prefix than `/`, so nginx routes it to the API regardless of order;
+#     the socket.io block must still come first of the two (longest match wins).
+#     The frontend is built with an empty VITE_API_BASE_URL, so the browser never
+#     sees another origin — and nothing here needs CORS.
+server {
+  listen 80;
+  server_name app.YOUR_VPS_IP.sslip.io;
+  location /.well-known/acme-challenge/ { root /var/www/html; }
+  location / { return 301 https://$host$request_uri; }
+}
+server {
+  listen 443 ssl http2;
+  server_name app.YOUR_VPS_IP.sslip.io;
+
+  ssl_certificate     /etc/letsencrypt/live/api.YOUR_VPS_IP.sslip.io/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/api.YOUR_VPS_IP.sslip.io/privkey.pem;
+
+  client_max_body_size 12m;                 # voice notes travel through this host too
+  add_header X-Frame-Options DENY always;
+  add_header X-Content-Type-Options nosniff always;
+  add_header Strict-Transport-Security "max-age=31536000" always;
+
+  location /api/socket.io {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+  }
+
+  location /api {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 60s;
+  }
+
+  # SSR server (nitro node-server). No caching headers here: the page renders
+  # per request and the session is in the cookie, so an intermediary cache with
+  # a shared key would serve one student's signed-in shell to another.
+  location / {
+    proxy_pass http://127.0.0.1:3100;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 30s;
+  }
+}
+
 # --- RustFS (S3 API + console) — client_max_body_size raised for direct PUTs
-# (one SAN cert covers all three hostnames → every block loads the api. lineage)
+# (one SAN cert covers all four hostnames → every block loads the api. lineage)
 server {
   listen 80;
   server_name s3.YOUR_VPS_IP.sslip.io;
@@ -809,7 +1096,7 @@ server {
 #    works before any natlas vhost exists (cert --nginx would fail here: the
 #    vhost config references cert files that don't exist yet).
 sudo certbot certonly --webroot -w /var/www/html \
-  -d api.YOUR_VPS_IP.sslip.io -d s3.YOUR_VPS_IP.sslip.io -d monitor.YOUR_VPS_IP.sslip.io \
+  -d api.YOUR_VPS_IP.sslip.io -d app.YOUR_VPS_IP.sslip.io -d s3.YOUR_VPS_IP.sslip.io -d monitor.YOUR_VPS_IP.sslip.io \
   --agree-tos -m you@example.com --non-interactive \
   --deploy-hook "systemctl reload nginx"
 
@@ -987,13 +1274,20 @@ ollama list && ollama run natlas "Say hello in Hausa" --verbose
 E2E_BASE_URL=https://api.YOUR_VPS_IP.sslip.io npm run test:e2e:journey
 E2E_BASE_URL=https://api.YOUR_VPS_IP.sslip.io npm run test:e2e:school-chat
 
+# Web app, same-origin lane (§6A) — the page AND the API through the page's host
+curl -s -o /dev/null -w '%{http_code}\n' https://app.YOUR_VPS_IP.sslip.io/
+curl -s https://app.YOUR_VPS_IP.sslip.io/api/health/auth
 # WebSocket upgrade through nginx (expect "HTTP/1.1 101 Switching Protocols")
 curl -si -H "Connection: Upgrade" -H "Upgrade: websocket" \
   -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
   "https://api.YOUR_VPS_IP.sslip.io/api/socket.io/?EIO=4&transport=websocket" | head -3
+# …and the same through the app host, which is what a browser actually uses
+curl -si -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  "https://app.YOUR_VPS_IP.sslip.io/api/socket.io/?EIO=4&transport=websocket" | head -3
 ```
 
-Final checks: Grafana shows all scrape targets UP · alert test notification arrives · `journalctl -u natlas` shows the AI worker start line ("AI async worker started") · attribution string present in the product footer · `STAFF_BOOTSTRAP_KEY` differs from dev.
+Final checks: Grafana shows all scrape targets UP · alert test notification arrives · `journalctl -u natlas` shows the AI worker start line ("AI async worker started") · attribution string present in the product footer · `STAFF_BOOTSTRAP_KEY` differs from dev · **a real iPhone signs in on `https://app.YOUR_VPS_IP.sslip.io` and stays signed in through a page reload** (desktop browsers cannot detect this class of failure — see §6A — so an iPhone is the only honest test).
 
 ---
 
@@ -1010,6 +1304,8 @@ Final checks: Grafana shows all scrape targets UP · alert test notification arr
 | Update N-ATLaS model | re-run `hf download` → `ollama create natlas -f Modelfile` (zero-downtime: the worker retries while Ollama reloads) |
 | DB backup restore | see §3 restore drill |
 | New release | merge to `main` — CI/CD deploys automatically (§12); manual: §6 |
+| Frontend release (same-origin lane) | `ssh -p 2222 deploy@YOUR_VPS_IP /usr/local/bin/natlas-frontend-deploy` (§6A) — manual until CI has a second forced-command key |
+| Frontend logs / status | `sudo journalctl -u natlas-frontend -f`, `systemctl status natlas-frontend` |
 
 ---
 
@@ -1023,6 +1319,12 @@ main push → deploy job: SSH :2222 (forced command) → /usr/local/bin/natlas-d
 ```
 
 The deploy job checks out nothing and holds no server password — the GitHub secret can do exactly one thing: trigger the deploy script.
+
+**The frontend lane (§6A) is deliberately still manual.** `restrict,command=` pins one key to one
+script, so automating it means a *second* keypair whose private half lives in the frontend repo's
+secrets and whose public half carries `command="/usr/local/bin/natlas-frontend-deploy"` — the API's
+key must never gain the ability to restart the app host. Until that exists, a frontend release is one
+`ssh` as `deploy`, and the script is idempotent, so re-running it is never a hazard.
 
 ### One-time server setup
 
