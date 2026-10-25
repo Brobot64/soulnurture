@@ -1267,7 +1267,7 @@ Final checks: Grafana shows all scrape targets UP · alert test notification arr
 | Update N-ATLaS model | re-run `hf download` → `ollama create natlas -f Modelfile` (zero-downtime: the worker retries while Ollama reloads) |
 | DB backup restore | see §3 restore drill |
 | New release | merge to `main` — CI/CD deploys automatically (§12); manual: §6 |
-| Frontend release (same-origin lane) | `ssh -p 2222 deploy@YOUR_VPS_IP /usr/local/bin/natlas-frontend-deploy` (§6A) — manual until CI has a second forced-command key |
+| Frontend release (same-origin lane) | automatic on push to the frontend's `main` (`.github/workflows/deploy-vps.yml`, §6A/§12 — live once that workflow is merged); manual: `ssh -p 2222 deploy@YOUR_VPS_IP /usr/local/bin/natlas-frontend-deploy` |
 | Frontend lane install/repair | `bash /opt/natlas/deploy/vps-frontend-same-origin.sh` (§6A) — idempotent; re-run it after any box rebuild, and again after pasting the Deploy Key if it paused |
 | Frontend logs / status | `sudo journalctl -u natlas-frontend -f`, `systemctl status natlas-frontend` |
 
@@ -1284,11 +1284,22 @@ main push → deploy job: SSH :2222 (forced command) → /usr/local/bin/natlas-d
 
 The deploy job checks out nothing and holds no server password — the GitHub secret can do exactly one thing: trigger the deploy script.
 
-**The frontend lane (§6A) is deliberately still manual.** `restrict,command=` pins one key to one
-script, so automating it means a *second* keypair whose private half lives in the frontend repo's
-secrets and whose public half carries `command="/usr/local/bin/natlas-frontend-deploy"` — the API's
-key must never gain the ability to restart the app host. Until that exists, a frontend release is one
-`ssh` as `deploy`, and the script is idempotent, so re-running it is never a hazard.
+**The frontend lane (§6A) is automated by its own key, not this repo's.** `restrict,command=` pins
+one key to one script, so the frontend CI uses a *second* keypair — private half in the frontend
+repo's Actions secrets as `FRONTEND_VPS_SSH_KEY`, public half installed for `deploy` as
+`restrict,command="/usr/local/bin/natlas-frontend-deploy" … github-actions-frontend-vps-deploy`.
+The API's key must never gain the ability to restart the app host, and it has not: the two entries
+in `~deploy/.ssh/authorized_keys` force different scripts. Verified by asking that key for
+`cat /etc/shadow` and receiving the deploy script's output instead — a forced command replaces
+whatever the client asks for, so the key's whole reach is "rebuild `main` and restart
+`natlas-frontend`". The workflow is `.github/workflows/deploy-vps.yml` in
+`Brobot64/soulnurture-frontend` (branch `FRONTEND_VPS_CI_001`, live on `main` once merged); it runs
+no build on the runner because the release is only real once the artifact the box serves passes
+`natlas-frontend-deploy`'s health gate, and it needs no repo credential because this repo is public
+and the box pulls over anonymous HTTPS. A failed build or a failed gate exits non-zero, which fails
+the Actions run, which is what GitHub's own "Failures" notification emails — the workflow sends
+nothing, so nothing here can silently stop sending it. Until that branch merges, a frontend release
+is still one `ssh` as `deploy`, and the script is idempotent, so re-running it is never a hazard.
 
 ### One-time server setup
 

@@ -415,7 +415,9 @@ signed in. Until that passes, keep the Vercel URL and the api. vhost live, and
 leave BETTER_AUTH_CROSS_SITE_COOKIES=true (a SameSite=None cookie is still fine
 first-party — flipping it now would break the Vercel site).
 
-Distribute https://$APP_HOST to the pilot students. Next release:
+Distribute https://$APP_HOST to the pilot students. Releases after this one are
+automatic once .github/workflows/deploy-vps.yml is on the frontend's main: a push there
+runs this box's natlas-frontend-deploy over a forced-command key. Manual equivalent:
     ssh -p 2222 deploy@YOUR_VPS_IP /usr/local/bin/natlas-frontend-deploy
 Logs: sudo journalctl -u natlas-frontend -f
 Re-run this script any time: it changes only what is missing.
