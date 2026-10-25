@@ -164,7 +164,13 @@ sudo systemctl enable natlas-frontend
 # ------------------------------------------------------------- 5. TLS for the host
 step "Certificate coverage for $APP_HOST"
 FULLCHAIN="$LINEAGE_DIR/$API_HOST/fullchain.pem"
-[ -r "$FULLCHAIN" ] || { echo "no lineage at $LINEAGE_DIR/$API_HOST — issue the API certificate first (§7)"; exit 1; }
+# Ask openssl through sudo: certbot keeps the lineage root-readable (0600/0700), so a
+# plain `[ -r ]` as the unprivileged user reports a real certificate as missing — the
+# first run of this script died exactly that way on a box with a healthy three-SAN cert.
+if ! sudo openssl x509 -in "$FULLCHAIN" -noout -subject >/dev/null 2>&1; then
+  echo "no certificate lineage readable at $FULLCHAIN — issue the API certificate first (§7)" >&2
+  exit 1
+fi
 if sudo openssl x509 -in "$FULLCHAIN" -noout -text | grep -q "DNS:$APP_HOST"; then
   echo "already covered by the existing lineage"
 else
