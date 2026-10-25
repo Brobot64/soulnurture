@@ -171,15 +171,19 @@ grep -q "proxy_pass http://127.0.0.1:@@SSR_PORT@@" "$SRC_DIR/nginx-app-vhost.con
 # Prove the port is free before anything is enabled on it. The first run of this lane
 # picked 3100, which the monitoring stack's Loki already publishes on 127.0.0.1; the
 # frontend could not bind and nginx was about to proxy students' page requests into a
-# log database. 'node' is allowed to hold it — that is this service, already running.
-# No pipe here on purpose: `ss | grep -q` lets grep close the pipe, pipefail turns the
+# log database. The only acceptable holder is natlas-frontend itself.
+# Not a name match: node does not show up as "node" in `ss` — the live service reports
+# users:(("MainThread",pid=2190260,...)), so matching on the process name would reject
+# this lane's own service on every re-run. The pid systemd gives us is the identity.
+# No pipe here either: `ss | grep -q` lets grep close the pipe, pipefail turns the
 # resulting SIGPIPE into a non-zero status, and a port that IS taken would read as free.
 PORT_HELD=$(sudo ss -ltnpH "sport = :$FRONTEND_PORT" 2>/dev/null || true)
 if [ -n "${PORT_HELD//[[:space:]]/}" ]; then
+  MAIN_PID=$(systemctl show -p MainPID --value natlas-frontend 2>/dev/null || echo 0)
   case "$PORT_HELD" in
-    *node*) echo "port $FRONTEND_PORT is already served by node (natlas-frontend running) — reusing it" ;;
+    *"pid=$MAIN_PID,"*) echo "port $FRONTEND_PORT is held by natlas-frontend (pid $MAIN_PID) already running — reusing it" ;;
     *)
-      echo "port $FRONTEND_PORT is taken by something that is not this service:"
+      echo "port $FRONTEND_PORT is taken by something that is not natlas-frontend (its MainPID is ${MAIN_PID:-0}):"
       printf '%s\n' "$PORT_HELD"
       echo "Set FRONTEND_PORT in this script to a free port and re-run (3100 belongs to Loki)." >&2
       exit 1 ;;
@@ -360,8 +364,32 @@ check() {   # one line per URL — curl's own -w, so no printf %-collision
 }
 check "$APP_HOST" "/"
 check "$APP_HOST" "/api/health/auth"
-check "$APP_HOST" "/api/socket.io/?EIO=4&transport=websocket"   # 400/401 here is fine: nginx reached the API
 check "$API_HOST" "/api/health/auth"                            # the Vercel lane must still work
+
+# The realtime socket cannot be checked with a plain GET: this gateway is websocket-only
+# (src/realtime/realtime.gateway.ts:39) and engine.io owns the path, so any GET on it
+# returns the backend's Nest 404 envelope — which looks exactly like a broken lane (an
+# earlier run of this script printed that 404 as its socket line). Ask for the upgrade
+# instead: 101 proves both halves at once, that nginx carries Connection/Upgrade and
+# that ALLOWED_ORIGINS contains this origin (the gateway answers 400 for one it does not
+# know — verified against api., which is not an origin any browser page is served from).
+# --http1.1 is required: over HTTP/2 the Upgrade headers are dropped and curl gets the 404.
+socket_upgrade_check() {
+  local host=$1 headers status
+  headers=$(mktemp)
+  # The response is captured from a header file, not a pipe: a successful upgrade leaves
+  # curl streaming frames until `-m` cuts it (exit 28), and `curl | head -1` would turn
+  # that SIGPIPE into a "failed" pipeline — reporting the one good result as the bad one.
+  curl -s --http1.1 -m 6 -D "$headers" -o /dev/null \
+    -H "Connection: Upgrade" -H "Upgrade: websocket" \
+    -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+    -H "Origin: https://$host" "https://$host/api/socket.io/?EIO=4&transport=websocket" || true
+  status=$(sed -n '1p' "$headers" | tr -d '\r')
+  rm -f "$headers"
+  printf 'WSS  %-46s -> %s\n' "https://$host/api/socket.io" "${status:-no answer}"
+}
+socket_upgrade_check "$APP_HOST"
+socket_upgrade_check "$API_HOST"
 
 cat <<EOF
 

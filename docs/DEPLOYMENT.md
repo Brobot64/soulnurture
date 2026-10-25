@@ -1233,14 +1233,21 @@ E2E_BASE_URL=https://api.YOUR_VPS_IP.sslip.io npm run test:e2e:school-chat
 # Web app, same-origin lane (§6A) — the page AND the API through the page's host
 curl -s -o /dev/null -w '%{http_code}\n' https://app.YOUR_VPS_IP.sslip.io/
 curl -s https://app.YOUR_VPS_IP.sslip.io/api/health/auth
-# WebSocket upgrade through nginx (expect "HTTP/1.1 101 Switching Protocols")
-curl -si -H "Connection: Upgrade" -H "Upgrade: websocket" \
+# WebSocket upgrade through nginx (expect "HTTP/1.1 101 Switching Protocols").
+# --http1.1 is not decoration: over HTTP/2 curl drops the Upgrade headers and the
+# socket.io path answers this backend's Nest 404 envelope, which reads as a dead lane.
+# A plain GET on /api/socket.io ALWAYS 404s (the gateway is websocket-only,
+# src/realtime/realtime.gateway.ts:39) — the upgrade is the only honest socket check.
+curl -si --http1.1 -m 6 -H "Connection: Upgrade" -H "Upgrade: websocket" \
   -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
-  "https://api.YOUR_VPS_IP.sslip.io/api/socket.io/?EIO=4&transport=websocket" | head -3
-# …and the same through the app host, which is what a browser actually uses
-curl -si -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  "https://api.YOUR_VPS_IP.sslip.io/api/socket.io/?EIO=4&transport=websocket" | head -1
+# …and the same through the app host, which is what a browser actually uses. Send its
+# Origin too: the gateway filters on ALLOWED_ORIGINS and answers 400 for an origin it
+# does not know, so 101-with-Origin is the proof that §6A step 3 actually took effect.
+curl -si --http1.1 -m 6 -H "Connection: Upgrade" -H "Upgrade: websocket" \
   -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
-  "https://app.YOUR_VPS_IP.sslip.io/api/socket.io/?EIO=4&transport=websocket" | head -3
+  -H "Origin: https://app.YOUR_VPS_IP.sslip.io" \
+  "https://app.YOUR_VPS_IP.sslip.io/api/socket.io/?EIO=4&transport=websocket" | head -1
 ```
 
 Final checks: Grafana shows all scrape targets UP · alert test notification arrives · `journalctl -u natlas` shows the AI worker start line ("AI async worker started") · attribution string present in the product footer · `STAFF_BOOTSTRAP_KEY` differs from dev · **a real iPhone signs in on `https://app.YOUR_VPS_IP.sslip.io` and stays signed in through a page reload** (desktop browsers cannot detect this class of failure — see §6A — so an iPhone is the only honest test).
