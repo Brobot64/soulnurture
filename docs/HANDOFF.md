@@ -155,8 +155,28 @@ The credential is scoped **server-side**: a second keypair (`~/.ssh/natlas-front
 
 
 
-## 1. Who we are building (30-second orientation)
 
+## 0G. Session delta — 2026-10-28 (the two runbooks were lying; both re-measured against prod and rewritten)
+
+**Mandate (owner):** "Update the stale DEPLOYMENT.md and HANDOFF.md first." The stale parts were not typos — they were *checks that can no longer pass*, in the two files a cold session trusts most.
+
+**What was wrong, and how it was found: by measuring instead of reading.** `DEPLOYMENT.md` §10 still opened with `systemctl status ollama …` and `ollama list && ollama run natlas "Say hello in Hausa" --verbose`, and §5 was the Ollama install procedure — nine weeks after the vernacular lane moved to a hosted endpoint. `HANDOFF.md` §4 claimed "Branch `master`; **zero commits** — 23 untracked paths" and "No Phase C code exists", and §6's first two next-actions were "commit everything first" and `npm install zod-to-json-schema`. `main` has 107 commits and Phase C is in prod.
+
+**Verified on the box 2026-10-28 (counts only, never values):** `/opt/natlas` at **`e3b8c77`** with `~deploy/.natlas-last-deploy` matching → **prod == main**. `natlas`, `natlas-frontend`, `nginx` active. **1.4 GB RAM used / ~10.4 GB available** — because no model runs here: `ollama.service` is still `active + enabled`, bound to `127.0.0.1:11434`, **34 MB resident**, and nothing in the app reads it. `NATLAS_LLM_BASE_URL` is an `https://` endpoint, `NATLAS_LLM_API_KEY` set, `AI_VERNACULAR_REPLY_MODE=n-atlas-translate`, **and all three `NATLAS_ASR_URL_{YO,HA,IG}` + `NATLAS_ASR_API_KEY` are configured with `NATLAS_ASR_BASE_URL` empty** — which retires the "ASR prod wiring still needs the owner's hands" note two sessions were carrying.
+
+**The correction that changes the plan, not just the prose:** `FRONTEND_VPS_SAME_ORIGIN_001` **is merged** (PR #13 → `e3b8c77`) and deployed, so `/opt/natlas/deploy/vps-frontend-same-origin.sh` is on the box and the lane is self-updating — §0E's "merging it is what puts `deploy/` on the box permanently" is done. And `FRONTEND_VPS_CI_001` **is merged** to the frontend's `main` (`73f3391`, PR #14) — but the frontend marker still reads **`3e641ce`** and `natlas-frontend` has not restarted since the 2026-10-25 install. **A run that passed its own health gate would have moved that marker, so the lane has never completed.** Merged-file ≠ working-lane; §12 now says so with the marker path as the check, and the §6 ordering puts "make the release lane real" ahead of merging `MOBILE_OVERFLOW_001`, because merging is what would have exercised it silently.
+
+**What the rewrite keeps on purpose:** the Ollama install commands are **not deleted** — they became §5 *fallback A* (the dev/no-HF-account route, and the reason the provider has a keyless branch: `Authorization` is only sent when `NATLAS_LLM_API_KEY` is set). Same for the `services/n-atlas-asr` sidecar (§5 *fallback B*, still never executed) — with the newly-documented asymmetry that the sidecar shells out to **ffmpeg** so it accepts webm/m4a, while the hosted endpoints are libsndfile-only, which is exactly why the browser records 16 kHz mono WAV.
+
+**Two facts a future reader will otherwise re-litigate, now in §5:** the app posts `POST {NATLAS_LLM_BASE_URL}/v1/chat/completions` — the base URL carries **no `/v1`** (the old §5 text claimed `/api/chat`, which would silently 404 any hand-tested curl); and a **`paused` endpoint ≠ a `scaledToZero` one** — sleeping wakes on first call (~10–16 min, far beyond the 45 s/12 s/4 s/10 s budgets), paused answers an instant 400 and `resume_endpoint` can 403 on billing.
+
+**Also landed, because the runbook had drifted further than the two sections named:** §0's component table and RAM budget (the 5–6 GB resident model is gone), §6's `.env` template (`openai-native` + `n-atlas` + `http://127.0.0.1:11434` → the hosted values), §6A's "pauses to paste the Deploy Key" (the frontend repo is public — anonymous HTTPS, nothing to paste), §8's blackbox targets (**added `https://app…/`** — a dead SSR box left the API green and nothing paged) and its alert rules (an `Ollama down` row would page for a service nothing calls; the hosted lane shows up as `natlas_custom_ai_jobs_failed` instead), §11's day-2 rows, and `MONITORING.md`'s ten Ollama references including a triage step ("is Ollama up?") that pointed at the wrong thing entirely.
+
+**Open next:** nothing here is a code change — §6 is now the ordered list, and its top three items (iPhone sign-in on `app.`, the frontend marker, the two merges) are all gates that need the owner. Also worth a future pass: `docs/PHASE-C-PLAN.md` predates its own completion, and `README` was not re-checked in this session.
+
+---
+
+## 1. Who we are building (30-second orientation)
 **Soul Nurture AI (repo: `natlas`, project codename "Natlas")** — a school-based emotional-wellbeing backend for an NGO (PN Africa context), in week 3–4 of an 8-week MVP. Students (e.g. "Jude", 300-level Sociology at Miva University, Nigeria) walk a **4-step journey**: Check-in → Reflect (AI conversation) → Resources → Human Support. Professionals (counsellors/psychologists/support staff) triage via a dashboard: safeguarding flags **with reasons**, support requests, follow-ups, audit trail.
 
 Strategic positioning:
@@ -231,17 +251,53 @@ SMTP failure during signup/bootstrap: logged + `verificationEmailSent:false` ret
 
 ## 4. Current state (precise, as of handoff)
 
-**Shipped & green (Phase B):**
-- Provider: Groq (real key in `.env`; throws `AiGenerationError` now), `AI_CONFIG` surface + `GET /api/v1/ai/config`, staff bootstrap endpoint, AI disclosure (+ acknowledge), intent engine + executors (flags persist w/ `intentId`), async worker (DB-clock scheduling; REPLY lane), conversations sync/holding lanes, disclosure ack, classLabel on student PATCH, review endpoints for support-requests + follow-up create/update, bootstrap/user provisioning (hashed + `credential` accounts), roles guard self-resolution.
-- Schema/migrations: `ai_intent_and_async` (SupportFlag.intentId + AiGenerationJob + AiJobStatus), `counsellor_ops_review_note` (SupportRequest.reviewNote). Prisma client regenerated.
-- **Verification standing**: `npm run build` clean; `npm run lint` **0 issues**; unit **111/111** (incl. escalation corpus 11 rows + worker claim/retry/FAILED/reclaim/race + bootstrap 6); seed 5/5 approved resources + 2 support people; **E2E journey 90/90 twice (idempotent reruns)**; outage drill validated holding+queue+FAILED path.
+> **Refreshed 2026-10-28 from the box and the remotes, not from memory.** The version this section
+> carried until then was the Phase-B snapshot: "Branch `master`; **zero commits** — 23 untracked
+> paths", "Paused (Phase C) — nothing built", "No new dependencies installed". Every one of those
+> lines is now false — Phase C shipped, `main` carries 107 commits and 67 spec files, prod is deployed
+> by CI, and the frontend has its own repo, Vercel project and VPS lane. A stale *state* section is
+> worse than a missing one, because it reads as authority: a cold session would have re-implemented
+> work that is already live, or trusted "zero commits" and tried to build a git history from scratch.
+> The dated session deltas above (§0…§0F) are the record of how it got here; this section is where
+> things stand now.
 
-**Paused (Phase C) — nothing built:**
-- `docs/PHASE-C-PLAN.md` (approved by user) covers: provider chain (OpenAI primary / Groq fallback / `n-atlas` slot), `AiUsageDaily` + $20 discipline, guardrails config/service + eval corpus (20/20/20/10), N-ATLaS vernacular layer (language config/detector/keyword packs/VERNACULAR worker branch/languageOffer/ASR sidecar `services/n-atlas-asr/`), activities (catalog + orchestration + feeling-after), session summaries → pgvector memory → localized carry-over hooks, load probe (`verify:load`), E2E/doc extensions.
-- **No Phase C code exists. No new dependencies installed** (the first `npm install zod-to-json-schema` was denied/withheld — user paused). `package.json` is untouched from Phase B.
+**Repos and refs (verified 2026-10-28 by `git fetch` + reading prod state over SSH):**
 
-**Repository state:**
-- Branch `master`; **zero commits** — 23 untracked paths (ALL code, `.env` local files, docs). `/docs/DEPLOYMENT.md` + `docs/PHASE-C-PLAN.md` + `docs/HANDOFF.md` present. `.env` and `.env.local` are git-ignored local files containing REAL secrets (Groq API key, HF/Awarri token, SMTP creds) — **never echo these into code/docs/commits; the handoff (this file) deliberately references variable names only.**
+- Backend `Brobot64/soulnurture` — `main` = **`e3b8c77`** (merge of PR #13, `FRONTEND_VPS_SAME_ORIGIN_001`). **Prod `/opt/natlas` is at `e3b8c77` and `~deploy/.natlas-last-deploy` matches it**, so prod == main today; the standing rule still applies — read the `DEPLOY OK: <old> -> <new>` pair or the marker, never run titles.
+- The working branch at the time of writing, `FRONTEND_VPS_SAME_ORIGIN_001` = `9c7b111`, is **1 ahead of `main`** (the §0F docs delta) and 1 behind (the merge commit). Docs-only, no deploy risk, but it is not on `main`.
+- Frontend `Brobot64/soulnurture-frontend` (a **separate repo**, and it is **public** — the box clones it over anonymous HTTPS, no Deploy Key) — `main` = **`73f3391`** (merge of PR #14, the VPS CI workflow), Vercel-deployed.
+- **The VPS serves an older frontend than Vercel does**: `/opt/natlas-frontend` HEAD and `~deploy/.natlas-frontend-last-deploy` both read **`3e641ce`**, and `natlas-frontend.service` has not restarted since the 2026-10-25 install. So `.github/workflows/deploy-vps.yml` is merged but **has never completed a successful run** (a run that passed the health gate would have moved the marker). `FRONTEND_VPS_SSH_KEY` and the Notifications→Actions→Failures setting are the two candidate causes; check the run log before assuming the lane exists.
+- `MOBILE_OVERFLOW_001` = `d267963` (the mobile pass, §0F) is **pushed and unmerged** — the only frontend work not on `main`.
+
+**What is live on the VPS (Contabo 6 vCPU / 12 GB / Ubuntu 24.04, `169.58.86.169`, SSH port 2222):**
+
+- Four vhosts on one Let's Encrypt SAN lineage (api / app / monitor / s3), valid to **2027-01-23**. `natlas`, `natlas-frontend` and `nginx` all `active`.
+- `https://app.169.58.86.169.sslip.io` is the same-origin lane: nginx sends `/api*` → `127.0.0.1:3000` and everything else → nitro SSR on **`127.0.0.1:3200`** (never 3100 — Loki publishes that; §0E). It exists to make the session cookie first-party so iPhone Safari stops dropping it.
+- **RAM headroom is real, and it is because nothing model-shaped runs here**: measured 2026-10-28, **1.4 GB used / ~10.4 GB available**. The old plan budgeted 5–6 GB for a resident Ollama model; `ollama.service` is still `active + enabled` at 34 MB and nothing in the app reads it (`DEPLOYMENT.md` §5 fallback A). Removing it is a live change on a prod box → the owner's call.
+
+**AI lanes (env presence verified by counts only — never echo values):**
+
+- Chat generation: `AI_PROVIDER_CHAIN=openai,groq`. N-ATLaS is deliberately **not** a chat-chain member.
+- Vernacular lane: `AI_VERNACULAR_REPLY_MODE=n-atlas-translate`, `NATLAS_LLM_BASE_URL` = the hosted HF Inference Endpoint (AWS us-east-1 L4, `minReplica 0`, 15-min scale-to-zero, vLLM, `--max-model-len 16384`), `NATLAS_LLM_API_KEY` set. **A scale-to-zero wake is ~10–16 min against timeouts measured in seconds** (45 s understanding / 12 s render / 4 s identify / 10 s translate), so any probe that must show the lane working needs the endpoint warmed ~15 min first.
+- Voice: all three `NATLAS_ASR_URL_{YO,HA,IG}` + `NATLAS_ASR_API_KEY` are configured in prod, `NATLAS_ASR_BASE_URL` empty → the hosted endpoints serve yo/ha/ig and the `services/n-atlas-asr` sidecar has still never been installed. The browser records 16 kHz mono WAV because those endpoints decode with libsndfile, which rejects webm/opus.
+
+**Feature state:** school tenancy is complete on prod (every staff surface is school-scoped), both platform admins are seeded, the safety stack (TIER_3 → whole-school alert + tray request), consent gate, AI-response reporting + the boundary marker, human chat pool over websocket-only Socket.IO, pilot analytics (JSON + CSV, small-group suppression), mood feedback and the landing page are all merged and deployed.
+
+**Open acceptance — none of these are code, all of them are gates someone has to walk through:**
+
+1. **A real iPhone signs in on `https://app…sslip.io` and survives a reload.** This is the reason the lane exists and it is still unproven; Vercel, `api.` and `BETTER_AUTH_CROSS_SITE_COOKIES=true` all stay until it passes.
+2. **No prod message has ever been observed with `aiPayload.understanding.via='n-atlas-local'`.** The endpoint answers directly; the app-level path is unwitnessed. `test/yoruba-live-probe.mjs` writes prod data — owner's call.
+3. **Vernacular ASR accuracy is unproven on real speech** — only a synthetic tone has passed the plumbing. Needs ~10 s of native audio per language (yo ẹ/ọ, ha ƙ/ɗ, ig ị/ọ/ụ/ṅ).
+4. **Native-speaker review** of the 180 corpus translations + new keyword packs, still flagged `PENDING_NATIVE_REVIEW` in `src/ai/intents/`.
+5. **Check-in-derived wellbeing indicators** are still not implemented — flags remain message-driven only (§0B class of gap, the last one standing).
+6. Figma Phase 2 sign-off (task #4) and its Phase 3 deferral list.
+
+**Repo hygiene a new session must not "clean up":**
+
+- Nine untracked `test/*.mjs` probes (`conversation-inspector`, `e2e-phase-one`, `local-fallback-probe`, `pilot-live-probe`, `pivot-vs-direct`, `socket-probe`, `vernacular-probe`, `whoami-probe`, `yoruba-live-probe`) are **the owner's files**. Never commit, never delete. They are also why `npm run lint` reports pre-existing warnings — that is expected, not a regression.
+- `frontend/.probe/` is a working 390/360 measurement rig (§0F) — untracked on purpose.
+- Six local backend branches (`MOOD_FEEDBACK_001`, `NATLAS_DOC_001`, `NATLAS_RESCUE_001`, `NATLAS_SIDECAR_001`, `NATLAS_TRANSLATE_ONLY_001`, `VERNACULAR_SAFETY_017`) show commits ahead of `main`. The rescue pass (task #23) already moved what `main` lacked, so they are almost certainly leftovers — but re-diff before deleting anything; "stale" is a hypothesis, not a fact.
+- Two prod-hygiene items deliberately untouched, both because they are live nginx/prod changes: `/etc/nginx/sites-enabled/natlas.bak-20261011` is a plain file that matches the include glob, so nginx loads the stale copy and warns `conflicting server name` on every `nginx -t` since Oct 11 (move it to `sites-available/`), and `ALLOWED_ORIGINS` still lists `http://localhost:3000` in prod.
 
 ---
 
@@ -264,12 +320,24 @@ SMTP failure during signup/bootstrap: logged + `verificationEmailSent:false` ret
 
 ## 6. When work resumes — ordered next actions
 
-1. **Commit everything** first (`master` has no history): review `git status` (23 untracked), make sure `.env`/`.env.local` are ignored, then an initial commit + a `phase-b-complete` commit. This is the top reliability risk until fixed: one bad `rm` loses 100% of the work.
-2. `npm install zod-to-json-schema franc` (Phase C deps; the denied install resumes here).
-3. Follow `docs/PHASE-C-PLAN.md` **Implementation order** (§1..9). Step 1 = chain provider + OpenAI provider + `AiUsageDaily` + specs; the AI_PROVIDER token moves to `ChainedAiProvider` (useExisting); keep `usage.provider` in aiPayload for explainability; `.env.example` additions (`OPENAI_*`, `AI_PROVIDER_CHAIN`, `OPENAI_DAILY_REQUEST_CAP`).
-4. After every phase: `npm run build` + `npm run lint` + `npm run test` (report counts) and extend `test/e2e-journey.mjs` acts per plan Phase G; clinical packet printouts for the reviewer once vernacular keywords exist (they are NOT to ship un-reviewed).
-5. N-ATLaS sidecar spike (Phase C step 5): enumerate `NCAIR1` org ASR repos on HF (exact names/paths/gates) before wiring `NAtlasAsrProvider`; keep ASR English path on Groq Whisper meanwhile.
-6. Deployment doc updates per plan Phase G (RAM table, pgvector image swap, OpenAI spend panel, nginx burst limits, sidecar unit) land AFTER code phases; keep `README` reflecting reality.
+> Rewritten 2026-10-28. It used to open with "commit everything first (`master` has no history)" and
+> "npm install zod-to-json-schema franc (Phase C deps; the denied install resumes here)" — the repo has
+> 107 commits and Phase C shipped long ago, so anyone following that list would have re-done work or
+> stalled on a decision that was already made. Order below is by dependency, not by ease: each item
+> unblocks the next one, and the first three are gates the agent cannot walk alone.
+
+1. **Run the iPhone check** (owner, one device): sign in at `https://app.169.58.86.169.sslip.io`, reload, still signed in? Until that is yes, keep Vercel + `api.` + `BETTER_AUTH_CROSS_SITE_COOKIES=true` exactly as they are — the same-origin lane is insurance, not a replacement. If it passes, then and only then decide about retiring Vercel and setting the cookie flag to `false`.
+2. **Make the frontend release lane real** (owner's GitHub, then verifiable by the agent): the workflow is merged but has never completed a run (§4). Read the run log on `Brobot64/soulnurture-frontend` → add the `FRONTEND_VPS_SSH_KEY` secret if missing → turn on Notifications → Actions → **Failures** with the owner's verified email → run `/usr/local/bin/natlas-frontend-deploy` once by hand and confirm `~deploy/.natlas-frontend-last-deploy` moves off `3e641ce`. The marker, not the green tick, is the proof.
+3. **Then merge `MOBILE_OVERFLOW_001`** (`d267963`, the mobile pass) to the frontend's `main` — it is a production push on both hosts (Vercel *and* the VPS lane), which is why it waits on 2.
+4. **Get `9c7b111` (§0F) onto backend `main`.** Docs-only, and the deploy lane treats it as a no-op (`marker == HEAD` → "already deployed; nothing to do"), so it is the cheapest merge on the list — but until it lands, `deploy/` and the docs on prod are one session behind.
+5. **Witness the vernacular lane end to end** (owner's go-ahead — it writes prod data): warm the N-ATLaS endpoint ~15 min first, then `test/yoruba-live-probe.mjs`, then read `aiPayload.understanding.via` back with `test/conversation-inspector.mjs`. Acceptance is a message with `via='n-atlas-local'`, which has never been seen.
+6. **Prove the voice lane on real speech**: ~10 s of native audio per language through the app, checking diacritics (yo ẹ/ọ, ha ƙ/ɗ, ig ị/ọ/ụ/ṅ). Endpoints and env are configured; only the audio quality is unverified.
+7. **Native-speaker review** of the 180 corpus translations and new keyword packs (`PENDING_NATIVE_REVIEW`). Human gate, blocks treating escalation parity as proven.
+8. **Implement the check-in-derived wellbeing indicators** — the last open tenancy gap (§0B class): flags are still message-driven only, so a student whose check-ins trend badly never trips anything. Plan lives in `docs/PHASE-C-PLAN.md`/the dashboards plan; both are outside the repo.
+9. **Prod hygiene, one sitting** (each is a live change, so confirm first): move `/etc/nginx/sites-enabled/natlas.bak-20261011` to `sites-available/` so `nginx -t` finally tests clean; drop `http://localhost:3000` from prod `ALLOWED_ORIGINS`; decide about the vestigial `ollama.service` (keep as the documented fallback A, or `systemctl disable --now` it and delete `blackbox-ollama`).
+10. **Before the pilot grows**: the N-ATLaS and NCAIR1 ASR licences cap at **1000 active end-users / rolling 30 days**. Track enrolment; past that needs a commercial arrangement with Awarri, which is a lead-time item, not a surprise.
+11. **After every code phase**: `npm run build` + `npm run lint` + `npm run test` reported with counts, and extend `test/e2e-journey.mjs` for new acts. Lint's ~4 warnings come from the owner's untracked probes (§4) — do not "fix" them by committing or deleting those files.
+12. **Keep the docs honest as a first-class task.** `DEPLOYMENT.md` §5/§10 shipped an `ollama run natlas "Say hello in Hausa"` go-live check for weeks after the model left the box, and this file's §4 claimed zero commits. A check that can no longer pass is not documentation — it is a false negative waiting to be trusted. When you retire a lane, delete its checks in the same commit.
 
 ---
 
