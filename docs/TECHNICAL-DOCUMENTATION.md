@@ -64,7 +64,7 @@ safety layer does not depend on the language model being available.
 
 | Area | Location | Responsibility |
 |---|---|---|
-| Conversations | `src/conversations/` | Sending a message, the turn budget, the holding lane, closing a conversation |
+| Conversations | `src/conversations/` | Sending a message, the holding lane, closing a conversation |
 | AI service | `src/ai/ai.service.ts` | One turn: context → prompt → model → intent verdict → render → result |
 | Language layer | `src/ai/language/` | Detection, per-turn language rule, reply rendering and its validation, scripted copy |
 | Intent engine | `src/ai/intents/` | Keyword and AI-category matching, severity, executors (flag, scripted safety, resources) |
@@ -206,9 +206,10 @@ queued for the worker.
 
 ## 6. Context and memory
 
-- **History**: the last 12 messages of the conversation, excluding the current
-  student message (sent once, as the current turn) and queued placeholders.
-  Newest messages are kept when the character budget (12,000) is tight.
+- **History**: the last 40 messages of the conversation (`AI_CONTEXT_MESSAGE_LIMIT`),
+  excluding the current student message (sent once, as the current turn) and
+  queued placeholders. Newest messages are kept when the character budget
+  (30,000) is tight.
 - **Language tags**: non-English turns are tagged, for example `[Hausa] …`.
 - **Check-in**: the feeling, intensity and description of the linked check-in.
 - **Resources**: up to 8 approved, active resources. The model may only

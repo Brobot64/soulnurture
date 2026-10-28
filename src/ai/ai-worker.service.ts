@@ -118,9 +118,10 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
       1,
     );
     const idle = await this.prisma.$queryRaw<
-      { id: string; studentId: string }[]
+      { id: string; studentId: string; checkInId: string | null; userId: string }[]
     >`
-      SELECT c.id, c."studentId" FROM conversation c
+      SELECT c.id, c."studentId", c."checkInId", s."userId" FROM conversation c
+      JOIN student_profile s ON s.id = c."studentId"
       WHERE c.status = 'ACTIVE'
         AND c."updatedAt" < NOW() - (interval '1 second' * ${idleSeconds})
         AND EXISTS (
@@ -158,6 +159,15 @@ export class AiWorkerService implements OnModuleInit, OnModuleDestroy {
           idleMinutes: this.aiConfig.memory.idleMinutes,
         },
       });
+      this.realtime.emitToUser(
+        row.userId,
+        REALTIME_EVENTS.CONVERSATION_CLOSED,
+        {
+          conversationId: row.id,
+          checkInId: row.checkInId,
+          reason: 'IDLE',
+        },
+      );
     }
   }
 

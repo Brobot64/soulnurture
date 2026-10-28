@@ -683,9 +683,10 @@ GROQ_TEMPERATURE=0.2
 GROQ_INPUT_USD_CENTS_PER_1M=10
 GROQ_OUTPUT_USD_CENTS_PER_1M=30
 
-# Bounded AI context (privacy/cost control)
-AI_CONTEXT_MESSAGE_LIMIT=12
-AI_CONTEXT_CHARACTER_LIMIT=12000
+# Bounded AI context (privacy/cost control) — the reply prompt replays the most
+# recent 40 messages, capped by characters first
+AI_CONTEXT_MESSAGE_LIMIT=40
+AI_CONTEXT_CHARACTER_LIMIT=30000
 
 # Async AI generation (in-app DB queue)
 AI_ASYNC_POLL_MS=5000
@@ -694,16 +695,14 @@ AI_ASYNC_HOLDING_MESSAGE=Thank you for sharing that with me — I am still think
 # Guardrails — input/output caps + per-student rate windows
 AI_MAX_MESSAGE_CHARS=1200
 AI_MAX_REPLY_CHARS=700
-AI_RATE_LIMIT_DAILY=20
+AI_RATE_LIMIT_DAILY=120
 AI_RATE_LIMIT_PER_MINUTE=6
 
-# Guided check-in replies — free-text turn budget before wrap-up
-# (3 base; a single "Tell more" tap extends to 5; quick-reply taps are free)
-AI_GUIDED_MAX_BASE_TURNS=3
-AI_GUIDED_MAX_EXTENDED_TURNS=5
-
-# Session-summary memory (requires the pgvector image from §3)
-AI_SESSION_IDLE_MINUTES=120
+# Session-summary memory (requires the pgvector image from §3).
+# This is the check-in's expiry: 3 = a conversation closes 180 s after the
+# student's last message. A check-in has no turn cap — it ends here, or when
+# the student taps "Complete".
+AI_SESSION_IDLE_MINUTES=3
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 
 # Language layer

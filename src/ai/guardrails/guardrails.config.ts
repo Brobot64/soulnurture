@@ -73,7 +73,7 @@ export interface GuardrailsConfig {
 export const GUARDRAILS_DEFAULTS = {
   maxMessageChars: 1200,
   maxReplyChars: 700,
-  perStudentDaily: 20,
+  perStudentDaily: 120,
   perStudentPerMinute: 6,
   injectionPatterns: [
     {

@@ -410,7 +410,8 @@ model ConversationMessage {
   content             String
   /// Guided-reply marker when the student tapped a quick reply instead of
   /// typing free text (TELL_MORE | SHOW_IDEA | TALK_TO_SOMEONE). null = the
-  /// student typed; the turn budget counts only these free-text messages.
+  /// student typed. The marker alone picks the reply directive; there is no
+  /// turn budget, so nothing is counted off it.
   quickReply          String?
   /// True when the student sent this turn from a voice transcription (the
   /// transcript is posted as plain content; this flag keeps the two lanes

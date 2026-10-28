@@ -20,6 +20,8 @@ import { ConsentRequiredException } from '../consent/consent.errors.js';
 import { ConsentService } from '../consent/consent.service.js';
 import { NatlasLlmProvider } from '../ai/providers/natlas/natlas-llm.provider.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { REALTIME_EVENTS } from '../realtime/realtime.events.js';
+import { RealtimeService } from '../realtime/realtime.service.js';
 import { SupportFlagAlertsService } from '../support-flags/support-flag-alerts.service.js';
 import { ConversationsService } from './conversations.service.js';
 
@@ -39,15 +41,11 @@ const aiConfigStub = {
   },
   safeguarding: { persistModelCandidates: true },
   guided: {
-    maxBaseTurns: 3,
-    maxExtendedTurns: 5,
-    extension: 'TELL_MORE',
     directives: {
       TELL_MORE: 'DIRECTIVE_TELL_MORE',
       SHOW_IDEA: 'DIRECTIVE_SHOW_IDEA',
       TALK_TO_SOMEONE: 'DIRECTIVE_TALK_TO_SOMEONE',
     },
-    wrapUpDirective: 'DIRECTIVE_WRAP_UP',
     flagDirective: 'DIRECTIVE_FLAG',
   },
   language: {
@@ -79,6 +77,7 @@ describe('ConversationsService', () => {
   let consentService: {
     hasAcceptedForStudent: ReturnType<typeof vi.fn>;
   };
+  let realtime: { emitToUser: ReturnType<typeof vi.fn> };
 
   const student = {
     id: 'student-1',
@@ -146,6 +145,7 @@ describe('ConversationsService', () => {
     consentService = {
       hasAcceptedForStudent: vi.fn().mockResolvedValue(true),
     };
+    realtime = { emitToUser: vi.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -167,6 +167,7 @@ describe('ConversationsService', () => {
         { provide: GuardrailService, useValue: guardrail },
         { provide: AuditService, useValue: auditService },
         { provide: ConsentService, useValue: consentService },
+        { provide: RealtimeService, useValue: realtime },
         { provide: AI_CONFIG, useValue: aiConfigStub },
       ],
     }).compile();
@@ -804,14 +805,7 @@ describe('ConversationsService', () => {
         }),
       );
       const sent = ai.generateAndApply.mock.calls[0][0];
-      expect(sent).toEqual(
-        expect.objectContaining({
-          quickReply: 'TELL_MORE',
-          freeTextTurns: 0,
-          turnBudget: 5,
-          finalTurn: false,
-        }),
-      );
+      expect(sent).toEqual(expect.objectContaining({ quickReply: 'TELL_MORE' }));
     });
 
     it('persists viaVoice on spoken turns and defaults it to false', async () => {
@@ -838,137 +832,22 @@ describe('ConversationsService', () => {
       );
     });
 
-    it('counts free-text turns against the base budget and flags the final turn', async () => {
-      mockActiveConversation([
-        { id: 'm1', role: MessageRole.USER, quickReply: null },
-        { id: 'm2', role: MessageRole.ASSISTANT, quickReply: null },
-        { id: 'm3', role: MessageRole.USER, quickReply: null },
-      ]);
-
-      await service.sendMessage('user-1', 'conv-1', { content: 'third turn' });
-
-      const sent = ai.generateAndApply.mock.calls[0][0];
-      expect(sent).toEqual(
-        expect.objectContaining({
+    it('sends past any turn count with no budget fields — a check-in only ends on close or expiry', async () => {
+      mockActiveConversation(
+        Array.from({ length: 30 }, (_unused, index) => ({
+          id: `m${index}`,
+          role: MessageRole.USER,
           quickReply: null,
-          freeTextTurns: 3,
-          turnBudget: 3,
-          finalTurn: true,
-        }),
+        })),
       );
-    });
 
-    it('extends the free-text budget to 5 once any TELL_MORE exists in the conversation', async () => {
-      mockActiveConversation([
-        { id: 'm1', role: MessageRole.USER, quickReply: null },
-        { id: 'm2', role: MessageRole.USER, quickReply: 'TELL_MORE' },
-        { id: 'm3', role: MessageRole.USER, quickReply: null },
-      ]);
-
-      await service.sendMessage('user-1', 'conv-1', {
-        content: 'third free turn',
-      });
+      await service.sendMessage('user-1', 'conv-1', { content: 'turn 31' });
 
       const sent = ai.generateAndApply.mock.calls[0][0];
-      expect(sent).toEqual(
-        expect.objectContaining({
-          freeTextTurns: 3,
-          turnBudget: 5,
-          finalTurn: false,
-        }),
-      );
-    });
-
-    it('wraps at 5 total turns even when the free-text budget was extended', async () => {
-      mockActiveConversation([
-        { id: 'm1', role: MessageRole.USER, quickReply: null },
-        { id: 'm2', role: MessageRole.USER, quickReply: 'TELL_MORE' },
-        { id: 'm3', role: MessageRole.USER, quickReply: null },
-        { id: 'm4', role: MessageRole.USER, quickReply: null },
-      ]);
-
-      await service.sendMessage('user-1', 'conv-1', {
-        content: 'fourth free turn',
-      });
-
-      const sent = ai.generateAndApply.mock.calls[0][0];
-      expect(sent).toEqual(
-        expect.objectContaining({
-          freeTextTurns: 4,
-          turnBudget: 5,
-          finalTurn: true,
-        }),
-      );
-    });
-
-    it('quick-reply taps skip the free-text budget but count toward the total cap', async () => {
-      mockActiveConversation([
-        { id: 'm1', role: MessageRole.USER, quickReply: null },
-        { id: 'm2', role: MessageRole.USER, quickReply: null },
-      ]);
-
-      await service.sendMessage('user-1', 'conv-1', {
-        content: 'Show me an idea',
-        quickReply: 'SHOW_IDEA',
-      });
-
-      const sent = ai.generateAndApply.mock.calls[0][0];
-      expect(sent).toEqual(
-        expect.objectContaining({
-          quickReply: 'SHOW_IDEA',
-          freeTextTurns: 2,
-          turnBudget: 3,
-          finalTurn: false,
-        }),
-      );
-    });
-
-    it('a fifth-turn tap wraps the conversation up', async () => {
-      mockActiveConversation([
-        { id: 'm1', role: MessageRole.USER, quickReply: null },
-        { id: 'm2', role: MessageRole.USER, quickReply: 'TELL_MORE' },
-        { id: 'm3', role: MessageRole.USER, quickReply: null },
-        { id: 'm4', role: MessageRole.USER, quickReply: null },
-      ]);
-
-      await service.sendMessage('user-1', 'conv-1', {
-        content: 'Show me an idea',
-        quickReply: 'SHOW_IDEA',
-      });
-
-      const sent = ai.generateAndApply.mock.calls[0][0];
-      expect(sent).toEqual(
-        expect.objectContaining({
-          quickReply: 'SHOW_IDEA',
-          freeTextTurns: 3,
-          turnBudget: 5,
-          finalTurn: true,
-        }),
-      );
-    });
-
-    it('a tap-only conversation still wraps at 5 total turns', async () => {
-      mockActiveConversation([
-        { id: 'm1', role: MessageRole.USER, quickReply: 'SHOW_IDEA' },
-        { id: 'm2', role: MessageRole.USER, quickReply: 'SHOW_IDEA' },
-        { id: 'm3', role: MessageRole.USER, quickReply: 'SHOW_IDEA' },
-        { id: 'm4', role: MessageRole.USER, quickReply: 'TELL_MORE' },
-      ]);
-
-      await service.sendMessage('user-1', 'conv-1', {
-        content: 'Tell you more',
-        quickReply: 'TELL_MORE',
-      });
-
-      const sent = ai.generateAndApply.mock.calls[0][0];
-      expect(sent).toEqual(
-        expect.objectContaining({
-          quickReply: 'TELL_MORE',
-          freeTextTurns: 0,
-          turnBudget: 5,
-          finalTurn: true,
-        }),
-      );
+      expect(sent).toEqual(expect.objectContaining({ quickReply: null }));
+      expect(sent).not.toHaveProperty('freeTextTurns');
+      expect(sent).not.toHaveProperty('turnBudget');
+      expect(sent).not.toHaveProperty('finalTurn');
     });
   });
 
@@ -1179,6 +1058,7 @@ describe('ConversationsService', () => {
       prisma.conversation.findUnique.mockResolvedValue({
         id: 'conv-1',
         studentId: student.id,
+        checkInId: 'check-1',
         status: 'ACTIVE',
         messages: [{ id: 'msg-1' }, { id: 'msg-2' }],
       });
@@ -1214,6 +1094,11 @@ describe('ConversationsService', () => {
           meta: { summaryQueued: true },
         }),
       );
+      expect(realtime.emitToUser).toHaveBeenCalledWith(
+        'user-1',
+        REALTIME_EVENTS.CONVERSATION_CLOSED,
+        { conversationId: 'conv-1', checkInId: 'check-1', reason: 'MANUAL' },
+      );
     });
 
     it('is idempotent: an already CLOSED conversation queues nothing', async () => {
@@ -1231,6 +1116,7 @@ describe('ConversationsService', () => {
       expect(prisma.sessionSummary.findUnique).not.toHaveBeenCalled();
       expect(prisma.aiGenerationJob.create).not.toHaveBeenCalled();
       expect(auditService.log).not.toHaveBeenCalled();
+      expect(realtime.emitToUser).not.toHaveBeenCalled();
     });
 
     it('queues nothing for a conversation without messages', async () => {

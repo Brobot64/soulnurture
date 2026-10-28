@@ -162,23 +162,12 @@ export interface AiConfig {
      */
     persistModelCandidates: boolean;
   };
-  /** Guided check-in replies: quick-reply directives + the turn budget.
+  /** Guided check-in replies: the per-quick-reply system-prompt directives.
    * Non-secret; exposed via GET /api/v1/ai/config so the guided behaviour
-   * is explainable to professional roles. */
+   * is explainable to professional roles. There is no turn budget — a
+   * check-in runs until the student completes it or it expires. */
   guided: {
-    /** Free-text turns allowed before wrap-up when no extension was used. */
-    maxBaseTurns: number;
-    /** Free-text turns allowed once the student tapped "Tell more" — and
-     * the hard cap on TOTAL student turns (free text + quick replies):
-     * the chat always wraps by this turn however the student got there. */
-    maxExtendedTurns: number;
-    /** The quick reply that extends the budget base → extended. */
-    extension: QuickReplyValue;
-    /** Per-quick-reply system-prompt directives (TELL_MORE is skipped on
-     * the final turn — wrap-up outranks it). */
     directives: Record<QuickReplyValue, string>;
-    /** Appended on the final turn of a guided check-in. */
-    wrapUpDirective: string;
     /** REPLACES every guided directive while a support flag is OPEN on the
      * conversation — safeguarding outranks the guided experience. */
     flagDirective: string;
@@ -198,9 +187,6 @@ export const AI_CONFIG_DEFAULTS = {
   holdingMessage:
     'Thank you for sharing that with me — I am still thinking about it and will be right here.',
   guided: {
-    maxBaseTurns: 3,
-    maxExtendedTurns: 5,
-    extension: 'TELL_MORE' as QuickReplyValue,
     directives: {
       TELL_MORE:
         'The student chose "Tell more". Invite them to share in their own words about their check-in. Reference what they told you. Ask exactly one gentle question. Never probe safeguarding details.',
@@ -209,8 +195,6 @@ export const AI_CONFIG_DEFAULTS = {
       TALK_TO_SOMEONE:
         'The student wants to talk to a person. Respond with the approved human-support bridge: praise the step, point to school counsellor / trusted adult. Keep it brief.',
     } satisfies Record<QuickReplyValue, string>,
-    wrapUpDirective:
-      "This is the student's final turn of this reflection. Close warmly, summarise what they shared, ask no further questions.",
     flagDirective:
       'A safeguarding concern is open for this student. Do not explore or probe. Use only the approved support and routing language.',
   },
@@ -301,7 +285,9 @@ export function buildAiConfig(config: ConfigService): AiConfig {
       timeoutMs: 10_000,
     },
     memory: {
-      idleMinutes: Number(config.get<string>('AI_SESSION_IDLE_MINUTES') ?? 120),
+      /** Idle expiry, in MINUTES (worker granularity is minutes × 60 seconds).
+       * 3 = a check-in ends 180 s after the last student message. */
+      idleMinutes: Number(config.get<string>('AI_SESSION_IDLE_MINUTES') ?? 3),
       recallDays: 30,
       hookDays: 14,
       maxRecents: 2,
@@ -341,9 +327,9 @@ export function buildAiConfig(config: ConfigService): AiConfig {
       understandingTimeoutMs: 15_000,
     },
     context: {
-      messageLimit: Number(config.get<string>('AI_CONTEXT_MESSAGE_LIMIT') ?? 12),
+      messageLimit: Number(config.get<string>('AI_CONTEXT_MESSAGE_LIMIT') ?? 40),
       characterLimit: Number(
-        config.get<string>('AI_CONTEXT_CHARACTER_LIMIT') ?? 12_000,
+        config.get<string>('AI_CONTEXT_CHARACTER_LIMIT') ?? 30_000,
       ),
     },
     async: {
@@ -358,17 +344,7 @@ export function buildAiConfig(config: ConfigService): AiConfig {
       persistModelCandidates: true,
     },
     guided: {
-      maxBaseTurns: Number(
-        config.get<string>('AI_GUIDED_MAX_BASE_TURNS') ??
-          AI_CONFIG_DEFAULTS.guided.maxBaseTurns,
-      ),
-      maxExtendedTurns: Number(
-        config.get<string>('AI_GUIDED_MAX_EXTENDED_TURNS') ??
-          AI_CONFIG_DEFAULTS.guided.maxExtendedTurns,
-      ),
-      extension: AI_CONFIG_DEFAULTS.guided.extension,
       directives: AI_CONFIG_DEFAULTS.guided.directives,
-      wrapUpDirective: AI_CONFIG_DEFAULTS.guided.wrapUpDirective,
       flagDirective: AI_CONFIG_DEFAULTS.guided.flagDirective,
     },
     guardrails: {

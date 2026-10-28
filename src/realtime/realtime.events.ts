@@ -11,6 +11,11 @@ export const REALTIME_EVENTS = {
   /// A conversation message was rewritten in place (async AI reply landed or
   /// failed). Payload: { conversationId, messageId, asyncState }.
   CONVERSATION_MESSAGE_UPDATED: 'conversation.message.updated',
+  /// An AI check-in conversation ended — the student tapped "Complete" or the
+  /// worker's idle expiry closed it. The client has no turn cap of its own, so
+  /// this is what stops a live chat when the server ends it.
+  /// Payload: { conversationId, checkInId, reason }.
+  CONVERSATION_CLOSED: 'conversation.closed',
   NOTIFICATION_NEW: 'notification.new',
   NOTIFICATION_UNREAD_UPDATED: 'notification.unread.updated',
 } as const;

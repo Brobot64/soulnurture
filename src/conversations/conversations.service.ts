@@ -26,6 +26,8 @@ import { AuditService } from '../audit/audit.service.js';
 import { ConsentRequiredException } from '../consent/consent.errors.js';
 import { ConsentService } from '../consent/consent.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { RealtimeService } from '../realtime/realtime.service.js';
+import { REALTIME_EVENTS } from '../realtime/realtime.events.js';
 import { inSchool } from '../common/tenant/school-scope.js';
 import { REVIEWER_ROLES } from '../common/guards/roles.decorator.js';
 import { STAFF_ROLES } from '../users/dto/staff-bootstrap.dto.js';
@@ -70,6 +72,7 @@ export class ConversationsService {
     private readonly flagAlerts: SupportFlagAlertsService,
     private readonly auditService: AuditService,
     private readonly consentService: ConsentService,
+    private readonly realtime: RealtimeService,
     @Inject(AI_CONFIG) private readonly aiConfig: AiConfig,
   ) {}
 
@@ -236,6 +239,14 @@ export class ConversationsService {
       meta: { summaryQueued },
     });
 
+    // Push after the write, so any device still open on this check-in sees a
+    // closed conversation rather than one it can still type into.
+    this.realtime.emitToUser(userId, REALTIME_EVENTS.CONVERSATION_CLOSED, {
+      conversationId: conversation.id,
+      checkInId: conversation.checkInId,
+      reason: 'MANUAL',
+    });
+
     return { conversation: closed, summaryQueued };
   }
 
@@ -310,29 +321,6 @@ export class ConversationsService {
       },
     });
 
-    // Guided turn budget. Free-text turns (quickReply null) wrap at the
-    // base budget unless a "Tell more" tap extended it. Quick-reply taps
-    // never consume the free-text budget, but EVERY student turn counts
-    // toward the hard total cap — the chat can never exceed maxExtendedTurns
-    // turns, however the student got there.
-    const guided = this.aiConfig.guided;
-    const priorUserMessages = conversation.messages.filter(
-      (m) => m.role === MessageRole.USER,
-    );
-    const freeTextTurns =
-      priorUserMessages.filter((m) => m.quickReply === null).length +
-      (dto.quickReply ? 0 : 1);
-    const totalTurns = priorUserMessages.length + 1;
-    const hadTellMore =
-      priorUserMessages.some((m) => m.quickReply === guided.extension) ||
-      dto.quickReply === guided.extension;
-    const turnBudget = hadTellMore
-      ? guided.maxExtendedTurns
-      : guided.maxBaseTurns;
-    const finalTurn =
-      totalTurns >= guided.maxExtendedTurns ||
-      (!dto.quickReply && freeTextTurns >= turnBudget);
-
     const orchestrationInput = {
       studentId: student.id,
       conversationId: conversation.id,
@@ -343,9 +331,6 @@ export class ConversationsService {
       studentRef: student.displayName ?? student.firstName ?? 'Student',
       classLabel: student.classLabel ?? null,
       quickReply: dto.quickReply ?? null,
-      freeTextTurns,
-      turnBudget,
-      finalTurn,
     } as const;
 
     // Full orchestration on the happy path; on provider failure the student

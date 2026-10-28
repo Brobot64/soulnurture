@@ -2,31 +2,43 @@ import { ConfigService } from '@nestjs/config';
 import { buildAiConfig } from './ai.config.js';
 
 describe('buildAiConfig guided block', () => {
-  it('defaults to 3 base / 5 extended turns with the TELL_MORE extension', () => {
+  it('carries the quick-reply directives and no turn budget', () => {
     const config = buildAiConfig(new ConfigService({}));
 
-    expect(config.guided.maxBaseTurns).toBe(3);
-    expect(config.guided.maxExtendedTurns).toBe(5);
-    expect(config.guided.extension).toBe('TELL_MORE');
     expect(config.guided.directives.TELL_MORE).toContain('Tell more');
     expect(config.guided.directives.SHOW_IDEA).toContain('idea');
     expect(config.guided.directives.TALK_TO_SOMEONE).toContain('counsellor');
-    expect(config.guided.wrapUpDirective).toContain('final turn');
     expect(config.guided.flagDirective.toLowerCase()).toContain(
       'safeguarding',
     );
+    expect(config.guided).not.toHaveProperty('maxBaseTurns');
+    expect(config.guided).not.toHaveProperty('maxExtendedTurns');
+    expect(config.guided).not.toHaveProperty('wrapUpDirective');
   });
 
-  it('honours AI_GUIDED_MAX_BASE_TURNS / AI_GUIDED_MAX_EXTENDED_TURNS overrides', () => {
+  it('defaults the check-in end + budget knobs: 180 s idle, 40-message context, 120 turns/day', () => {
+    const config = buildAiConfig(new ConfigService({}));
+
+    expect(config.memory.idleMinutes).toBe(3);
+    expect(config.context).toEqual({
+      messageLimit: 40,
+      characterLimit: 30_000,
+    });
+    expect(config.guardrails.rate.perStudentDaily).toBe(120);
+  });
+
+  it('honours AI_SESSION_IDLE_MINUTES / AI_CONTEXT_MESSAGE_LIMIT / AI_RATE_LIMIT_DAILY', () => {
     const config = buildAiConfig(
       new ConfigService({
-        AI_GUIDED_MAX_BASE_TURNS: '4',
-        AI_GUIDED_MAX_EXTENDED_TURNS: '7',
+        AI_SESSION_IDLE_MINUTES: '45',
+        AI_CONTEXT_MESSAGE_LIMIT: '20',
+        AI_RATE_LIMIT_DAILY: '50',
       }),
     );
 
-    expect(config.guided.maxBaseTurns).toBe(4);
-    expect(config.guided.maxExtendedTurns).toBe(7);
+    expect(config.memory.idleMinutes).toBe(45);
+    expect(config.context.messageLimit).toBe(20);
+    expect(config.guardrails.rate.perStudentDaily).toBe(50);
   });
 });
 
