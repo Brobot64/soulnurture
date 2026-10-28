@@ -10,17 +10,28 @@ import {
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service.js';
 import { ChatService } from '../chat/chat.service.js';
-import { inSchool, schoolOf, supportPeopleInSchool } from '../common/tenant/school-scope.js';
+import {
+  inSchool,
+  schoolOf,
+  supportPeopleInSchool,
+} from '../common/tenant/school-scope.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
 import type { CreateSupportRequestDto } from './dto/create-support-request.dto.js';
 import type { ReviewSupportRequestDto } from './dto/review-support-request.dto.js';
 import {
+  deriveFollowUpState,
   deriveQueueStatus,
+  deriveUrgency,
   isActiveFlagStatus,
   isWithinCompletedWeek,
+  matchesQueueFilter,
+  type FollowUpState,
+  type QueueFilter,
   type QueueStatus,
   type SupportPrompt,
+  type Urgency,
 } from './queue-status.js';
 
 const STUDENT_REQUEST_SELECT = {
@@ -43,6 +54,7 @@ export class SupportRequestsService {
     private readonly studentsService: StudentsService,
     private readonly auditService: AuditService,
     private readonly chatService: ChatService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async listPeople(userId: string) {
@@ -152,16 +164,19 @@ export class SupportRequestsService {
   }
 
   /**
-   * Staff queue (figma node 146:914): the school's support requests with a
-   * derived review-queue status, prompt pill, tile counts and optional
-   * status filter / student-ID-email search. Professionals only see their
-   * own school (the design footnote: "You only see requests you are
-   * authorised to view"). Chip counts always describe the whole school
-   * queue — search and chip selection narrow the table only.
+   * Staff queue (figma node 146:914): the school's support requests, each with
+   * the four independent facts the screen renders — stored lifecycle,
+   * NEW/REVIEWED chip split, follow-up state and urgency — plus tile counts and
+   * optional chip filter / student-ID-email search. Professionals only see
+   * their own school (the design footnote: "You only see requests you are
+   * authorised to view"). Urgent requests sort first, then newest.
+   * Chip counts always describe the whole school queue — search and chip
+   * selection narrow the table only — and each count is produced by the same
+   * `matchesQueueFilter` predicate that selects the rows below.
    */
   async listQueue(
     userId: string,
-    filters: { status?: QueueStatus; q?: string },
+    filters: { status?: QueueFilter; q?: string },
   ): Promise<SupportQueueResult> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -170,8 +185,8 @@ export class SupportRequestsService {
     if (!user?.schoolId) return { items: [], counts: emptyQueueCounts() };
 
     const search = filters.q?.trim().toLowerCase();
-    // School scope only — chip counts must describe the whole school queue
-    // even while search narrows the table rows.
+    // School scope only: a reviewer sees their own school's queue and nothing
+    // else. The search term narrows the whole response, counts included.
     const requests = await this.prisma.supportRequest.findMany({
       where: {
         status: { not: SupportRequestStatus.CANCELLED },
@@ -231,47 +246,79 @@ export class SupportRequestsService {
     const derived = requests.map((request) => ({
       request,
       queueStatus: deriveQueueStatus(request),
-      prompt: (
-        request.conversationId && flagged.has(request.conversationId)
-          ? 'REVIEW_SUGGESTED'
-          : 'NONE'
-      ) as SupportPrompt,
+      followUpState: deriveFollowUpState(request),
+      urgency: deriveUrgency(request),
+      prompt: (request.conversationId && flagged.has(request.conversationId)
+        ? 'REVIEW_SUGGESTED'
+        : 'NONE') as SupportPrompt,
     }));
 
+    // The search narrows the view, and every number on the screen describes
+    // that view — a chip that says 3 has 3 rows behind it, and the table
+    // showing 1 row under "New (8)" is the same lie this queue just shipped.
+    const visible = search
+      ? derived.filter(
+          (row) =>
+            [
+              row.request.student.studentCode,
+              row.request.student.studentRef,
+              row.request.student.user.email,
+            ]
+              .filter((value): value is string => Boolean(value))
+              .some((value) => value.toLowerCase().includes(search)),
+        )
+      : derived;
+
+    // Every chip's count is the exact set `matchesQueueFilter` returns below —
+    // counts and rows are computed from one predicate, so they cannot drift.
     const counts: SupportQueueCounts = {
-      all: derived.length,
+      all: visible.length,
       new: 0,
       reviewed: 0,
       followUpRequired: 0,
       followUpCompleted: 0,
+      completedThisWeek: 0,
     };
-    for (const row of derived) {
-      if (row.queueStatus === 'NEW') counts.new += 1;
-      else if (row.queueStatus === 'REVIEWED') counts.reviewed += 1;
-      else if (row.queueStatus === 'FOLLOW_UP_REQUIRED') {
+    for (const row of visible) {
+      if (matchesQueueFilter(row.request, 'NEW')) counts.new += 1;
+      if (matchesQueueFilter(row.request, 'REVIEWED')) counts.reviewed += 1;
+      if (matchesQueueFilter(row.request, 'FOLLOW_UP_REQUIRED')) {
         counts.followUpRequired += 1;
-      } else if (
+      }
+      if (matchesQueueFilter(row.request, 'FOLLOW_UP_COMPLETED')) {
+        counts.followUpCompleted += 1;
+      }
+      if (
         row.request.followUps.some(
           (followUp) =>
             followUp.completedAt &&
             isWithinCompletedWeek(followUp.completedAt, now),
         )
       ) {
-        counts.followUpCompleted += 1;
+        counts.completedThisWeek += 1;
       }
     }
 
-    const items = derived
-      .filter((row) => !filters.status || row.queueStatus === filters.status)
+    const items = visible
+      // Urgent first, then newest: the queue must not order a "I do not feel
+      // safe right now" request by the clock alone.
+      .sort((a, b) => {
+        if (a.urgency !== b.urgency) return a.urgency === 'URGENT' ? -1 : 1;
+        return b.request.createdAt.getTime() - a.request.createdAt.getTime();
+      })
       .filter(
         (row) =>
-          !search ||
-          [row.request.student.studentCode, row.request.student.studentRef, row.request.student.user.email]
-            .filter((value): value is string => Boolean(value))
-            .some((value) => value.toLowerCase().includes(search)),
+          !filters.status || matchesQueueFilter(row.request, filters.status),
       )
-      .map(({ request, queueStatus, prompt }) =>
-        toQueueItem(request, queueStatus, prompt, userId),
+      .map(({ request, queueStatus, followUpState, urgency, prompt }) =>
+        toQueueItem(
+          request,
+          queueStatus,
+          followUpState,
+          urgency,
+          prompt,
+          userId,
+        ),
       );
 
     return { items, counts };
@@ -280,15 +327,12 @@ export class SupportRequestsService {
   /**
    * Counsellor review (report simplified scope: status plus notes).
    * Professionals progress a request through its review statuses and attach
-   * a review note; students see the updated status in their own list. The
+   * a review note; students see the updated status in their own list and get
+   * one notification per real change, so a status never moves silently. The
    * lookup is tenant-scoped: a request belonging to another school reads as
    * absent, so no professional can progress rows they are not entitled to.
    */
-  async review(
-    userId: string,
-    id: string,
-    dto: ReviewSupportRequestDto,
-  ) {
+  async review(userId: string, id: string, dto: ReviewSupportRequestDto) {
     const schoolId = await schoolOf(this.prisma, userId);
     if (!schoolId) throw new NotFoundException('Support request not found');
     const existing = await this.prisma.supportRequest.findFirst({
@@ -301,6 +345,10 @@ export class SupportRequestsService {
       data: {
         status: dto.status,
         reviewNote: dto.reviewNote ?? existing.reviewNote,
+        // A reschedule replaces the old arrangement; anything else leaves it
+        // exactly as the student last saw it.
+        ...(dto.scheduledAt ? { scheduledAt: new Date(dto.scheduledAt) } : {}),
+        ...(dto.locationLabel ? { locationLabel: dto.locationLabel } : {}),
       },
       include: { supportPerson: true },
     });
@@ -310,7 +358,11 @@ export class SupportRequestsService {
       action: 'support_request.status_changed',
       entity: 'SupportRequest',
       entityId: id,
-      meta: { from: existing.status, to: dto.status },
+      meta: {
+        from: existing.status,
+        to: dto.status,
+        scheduledAt: dto.scheduledAt ?? null,
+      },
     });
 
     let chatThreadId: string | null = null;
@@ -333,9 +385,77 @@ export class SupportRequestsService {
       chatThreadId = opened.id;
     }
 
+    // Only a change tells the student. Saving the same status with an edited
+    // note is a staff-side correction, not a new event in the student's week.
+    if (dto.status !== existing.status) {
+      await this.notifyStudentOfStatus(
+        existing.studentId,
+        id,
+        dto.status,
+        updated.supportPerson?.name,
+      );
+    }
+
     return { ...updated, chatThreadId };
   }
+
+  /**
+   * The student's own notification: what changed and where to read it. Never
+   * carries `reviewNote` — that field is private staff reasoning — and never
+   * promises a response, only what the recorded status now is.
+   */
+  private async notifyStudentOfStatus(
+    studentId: string,
+    requestId: string,
+    status: SupportRequestStatus,
+    supportPersonName: string | null | undefined,
+  ) {
+    const copy = STUDENT_STATUS_NOTIFICATIONS[status];
+    if (!copy) return;
+    const student = await this.prisma.studentProfile.findUnique({
+      where: { id: studentId },
+      select: { userId: true },
+    });
+    if (!student) return;
+    const by = supportPersonName?.trim();
+    await this.notifications.push({
+      userId: student.userId,
+      type: SUPPORT_STATUS_NOTIFICATION_TYPE,
+      title: copy.title,
+      body: by ? `${by} — ${copy.body}` : copy.body,
+      data: { requestId, status },
+    });
+  }
 }
+
+// --- Student-facing status alerts -------------------------------------------
+
+export const SUPPORT_STATUS_NOTIFICATION_TYPE = 'SUPPORT_REQUEST_STATUS';
+
+const STUDENT_STATUS_NOTIFICATIONS: Partial<
+  Record<SupportRequestStatus, { title: string; body: string }>
+> = {
+  [SupportRequestStatus.ACCEPTED]: {
+    title: 'Your support request was accepted',
+    body: 'A school professional accepted your request to talk. Open the request to see its details.',
+  },
+  [SupportRequestStatus.SCHEDULED]: {
+    title: 'Your support request is marked as scheduled',
+    body: 'A time and location may have been added to your request. Check the request details and ask your school to confirm the arrangement.',
+  },
+  [SupportRequestStatus.IN_PROGRESS]: {
+    title: 'Support for your request is in progress',
+    body: 'A school professional marked your request as in progress. Follow the arrangements you agreed with your school.',
+  },
+  [SupportRequestStatus.COMPLETED]: {
+    title: 'Your support request is complete',
+    body: 'A school professional marked this request as completed. You can ask to talk again any time you need support.',
+  },
+  [SupportRequestStatus.CANCELLED]: {
+    title: 'Your support request was cancelled',
+    body: 'This request was marked as cancelled. You can ask to talk again if you still need support.',
+  },
+};
 
 // --- Staff queue row shape --------------------------------------------------
 
@@ -358,9 +478,19 @@ export interface SupportQueueItem {
   initialMessage: string | null;
   initialMessageAt: Date | null;
   reviewNote: string | null;
+  /** The stored lifecycle — what actually happened to this request. */
   requestStatus: SupportRequestStatus;
+  /** Coarse chip split: has a professional acted yet (NEW vs REVIEWED)? */
   queueStatus: QueueStatus;
+  /** Independent of `queueStatus`: is a follow-up open / done / never booked. */
+  followUpState: FollowUpState;
+  /** Independent of both: did the student say they do not feel safe. */
+  urgency: Urgency;
   prompt: SupportPrompt;
+  /** The arrangement the student can already see, so the review dialog can
+   * prefill instead of silently blanking it on the next save. */
+  scheduledAt: Date | null;
+  locationLabel: string | null;
   followUpId: string | null;
   followUpStatus: FollowUpStatus | null;
   canManageFollowUp: boolean;
@@ -377,6 +507,9 @@ export interface SupportQueueCounts {
   reviewed: number;
   followUpRequired: number;
   followUpCompleted: number;
+  /** The "Completed this week" tile: a rolling 7-day window, narrower than
+   * the `followUpCompleted` chip, which counts every completed follow-up. */
+  completedThisWeek: number;
 }
 
 export interface SupportQueueResult {
@@ -393,6 +526,8 @@ type QueueRequestRow = {
   initialMessageAt: Date | null;
   reviewNote: string | null;
   status: SupportRequestStatus;
+  scheduledAt: Date | null;
+  locationLabel: string | null;
   conversationId: string | null;
   followUps: {
     id: string;
@@ -425,12 +560,15 @@ function emptyQueueCounts(): SupportQueueCounts {
     reviewed: 0,
     followUpRequired: 0,
     followUpCompleted: 0,
+    completedThisWeek: 0,
   };
 }
 
 function toQueueItem(
   request: QueueRequestRow,
   queueStatus: QueueStatus,
+  followUpState: FollowUpState,
+  urgency: Urgency,
   prompt: SupportPrompt,
   userId: string,
 ): SupportQueueItem {
@@ -467,7 +605,11 @@ function toQueueItem(
     reviewNote: request.reviewNote,
     requestStatus: request.status,
     queueStatus,
+    followUpState,
+    urgency,
     prompt,
+    scheduledAt: request.scheduledAt,
+    locationLabel: request.locationLabel,
     followUpId: selectedFollowUp?.id ?? null,
     followUpStatus: selectedFollowUp?.status ?? null,
     canManageFollowUp: selectedFollowUp?.professional?.userId === userId,

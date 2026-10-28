@@ -1,46 +1,236 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { FollowUpStatus, SupportRequestStatus, SupportTiming } from '@prisma/client';
+import { validate } from 'class-validator';
+import {
+  FollowUpStatus,
+  SupportRequestStatus,
+  SupportTiming,
+} from '@prisma/client';
 import { AuditService } from '../audit/audit.service.js';
 import { ChatService } from '../chat/chat.service.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
-import { deriveQueueStatus } from './queue-status.js';
+import { ReviewSupportRequestDto } from './dto/review-support-request.dto.js';
+import {
+  QUEUE_STATUSES,
+  deriveFollowUpState,
+  deriveQueueStatus,
+  deriveUrgency,
+  matchesQueueFilter,
+  type QueueRow,
+} from './queue-status.js';
 import { SupportRequestsService } from './support-requests.service.js';
 
-describe('deriveQueueStatus precedence', () => {
-  it.each([FollowUpStatus.PENDING, FollowUpStatus.SCHEDULED])(
-    '%s takes precedence over historical completion in either order',
+const OPEN = [FollowUpStatus.PENDING, FollowUpStatus.SCHEDULED] as const;
+
+function row(overrides: Partial<QueueRow> = {}): QueueRow {
+  return {
+    status: SupportRequestStatus.PENDING,
+    timing: SupportTiming.GENTLE_1_2_DAYS,
+    followUps: [],
+    ...overrides,
+  };
+}
+
+describe('deriveQueueStatus — has a professional acted yet?', () => {
+  it.each([SupportRequestStatus.PENDING, SupportRequestStatus.ESCALATED])(
+    '%s is NEW',
     (status) => {
-      for (const requestStatus of [SupportRequestStatus.PENDING, SupportRequestStatus.COMPLETED]) {
-        for (const followUps of [
-          [{ status: FollowUpStatus.COMPLETED }, { status }],
-          [{ status }, { status: FollowUpStatus.COMPLETED }],
-        ]) {
-          expect(deriveQueueStatus({ status: requestStatus, followUps })).toBe('FOLLOW_UP_REQUIRED');
-        }
-      }
+      expect(deriveQueueStatus(row({ status }))).toBe('NEW');
     },
   );
 
-  it('keeps completed precedence when no follow-up is open', () => {
-    expect(deriveQueueStatus({
-      status: SupportRequestStatus.PENDING,
-      followUps: [{ status: FollowUpStatus.COMPLETED }, { status: FollowUpStatus.CANCELLED }],
-    })).toBe('FOLLOW_UP_COMPLETED');
+  it.each([
+    SupportRequestStatus.ACCEPTED,
+    SupportRequestStatus.SCHEDULED,
+    SupportRequestStatus.IN_PROGRESS,
+    SupportRequestStatus.COMPLETED,
+  ])('%s is REVIEWED', (status) => {
+    expect(deriveQueueStatus(row({ status }))).toBe('REVIEWED');
   });
 
-  it.each([
-    { status: SupportRequestStatus.PENDING, expected: 'NEW' },
-    { status: SupportRequestStatus.ESCALATED, expected: 'NEW' },
-    { status: SupportRequestStatus.ACCEPTED, expected: 'REVIEWED' },
-    { status: SupportRequestStatus.SCHEDULED, expected: 'REVIEWED' },
-    { status: SupportRequestStatus.IN_PROGRESS, expected: 'REVIEWED' },
-    { status: SupportRequestStatus.COMPLETED, expected: 'REVIEWED' },
-  ])('ignores cancelled follow-ups for request $status', ({ status, expected }) => {
-    expect(deriveQueueStatus({
-      status, followUps: [{ status: FollowUpStatus.CANCELLED }],
-    })).toBe(expected);
+  it('is never overridden by a follow-up', () => {
+    for (const status of OPEN) {
+      expect(
+        deriveQueueStatus(
+          row({
+            status: SupportRequestStatus.PENDING,
+            followUps: [{ status }, { status: FollowUpStatus.COMPLETED }],
+          }),
+        ),
+      ).toBe('NEW');
+    }
+  });
+
+  it('stays REVIEWED once acted, whatever the follow-ups say', () => {
+    for (const followUps of [
+      [],
+      [{ status: FollowUpStatus.COMPLETED }],
+      [{ status: FollowUpStatus.SCHEDULED }],
+    ]) {
+      expect(
+        deriveQueueStatus({
+          status: SupportRequestStatus.COMPLETED,
+          timing: SupportTiming.GENTLE_1_2_DAYS,
+          followUps,
+        }),
+      ).toBe('REVIEWED');
+    }
+  });
+});
+
+describe('deriveFollowUpState', () => {
+  it.each(OPEN)('%s is REQUIRED even beside an older completion', (status) => {
+    for (const followUps of [
+      [{ status: FollowUpStatus.COMPLETED }, { status }],
+      [{ status }, { status: FollowUpStatus.COMPLETED }],
+    ]) {
+      expect(deriveFollowUpState(row({ followUps }))).toBe('REQUIRED');
+    }
+  });
+
+  it('is COMPLETED once nothing is open', () => {
+    expect(
+      deriveFollowUpState(
+        row({
+          followUps: [
+            { status: FollowUpStatus.COMPLETED },
+            { status: FollowUpStatus.CANCELLED },
+          ],
+        }),
+      ),
+    ).toBe('COMPLETED');
+  });
+
+  it.each([[[]], [[{ status: FollowUpStatus.CANCELLED }]]])(
+    'is NONE with nothing but %j',
+    (followUps) => {
+      expect(deriveFollowUpState(row({ followUps }))).toBe('NONE');
+    },
+  );
+});
+
+describe('deriveUrgency', () => {
+  it('is URGENT when the student said they do not feel safe', () => {
+    expect(deriveUrgency(row({ timing: SupportTiming.URGENT_UNSAFE }))).toBe(
+      'URGENT',
+    );
+  });
+
+  it('stays URGENT after a professional accepts it', () => {
+    expect(
+      deriveUrgency(
+        row({
+          status: SupportRequestStatus.ACCEPTED,
+          timing: SupportTiming.URGENT_UNSAFE,
+        }),
+      ),
+    ).toBe('URGENT');
+  });
+
+  it('is URGENT while the request sits escalated', () => {
+    expect(deriveUrgency(row({ status: SupportRequestStatus.ESCALATED }))).toBe(
+      'URGENT',
+    );
+  });
+
+  it.each([SupportTiming.GENTLE_1_2_DAYS, SupportTiming.TODAY_STUDY_PERIOD])(
+    '%s is NORMAL',
+    (timing) => {
+      expect(deriveUrgency(row({ timing }))).toBe('NORMAL');
+    },
+  );
+
+  it('does not read urgency from the chip split', () => {
+    const urgentButNew = row({ timing: SupportTiming.URGENT_UNSAFE });
+    expect(deriveQueueStatus(urgentButNew)).toBe('NEW');
+    expect(deriveUrgency(urgentButNew)).toBe('URGENT');
+  });
+});
+
+describe('matchesQueueFilter', () => {
+  it('is the single predicate behind every chip count', () => {
+    const cases = [
+      row({ status: SupportRequestStatus.PENDING }),
+      row({ status: SupportRequestStatus.ACCEPTED }),
+      row({
+        status: SupportRequestStatus.ACCEPTED,
+        followUps: [{ status: FollowUpStatus.SCHEDULED }],
+      }),
+      row({
+        status: SupportRequestStatus.COMPLETED,
+        followUps: [{ status: FollowUpStatus.COMPLETED }],
+      }),
+    ];
+    for (const request of cases) {
+      for (const filter of QUEUE_STATUSES) {
+        const viaPredicate = matchesQueueFilter(request, filter);
+        const viaParts =
+          filter === 'FOLLOW_UP_REQUIRED'
+            ? deriveFollowUpState(request) === 'REQUIRED'
+            : filter === 'FOLLOW_UP_COMPLETED'
+              ? deriveFollowUpState(request) === 'COMPLETED'
+              : deriveQueueStatus(request) === filter;
+        expect(viaPredicate).toBe(viaParts);
+      }
+    }
+  });
+
+  it('lets one row match two chips — the chips are filters, not a partition', () => {
+    const request = row({
+      status: SupportRequestStatus.PENDING,
+      followUps: [{ status: FollowUpStatus.PENDING }],
+    });
+    expect(matchesQueueFilter(request, 'NEW')).toBe(true);
+    expect(matchesQueueFilter(request, 'FOLLOW_UP_REQUIRED')).toBe(true);
+    expect(matchesQueueFilter(request, 'REVIEWED')).toBe(false);
+    expect(matchesQueueFilter(request, 'FOLLOW_UP_COMPLETED')).toBe(false);
+  });
+});
+
+describe('ReviewSupportRequestDto schedule fields', () => {
+  async function errors(input: Record<string, unknown>) {
+    const dto = Object.assign(new ReviewSupportRequestDto(), input);
+    return (await validate(dto)).map((error) => error.property);
+  }
+
+  it('demands a time and a place before a request can read as scheduled', async () => {
+    expect(await errors({ status: SupportRequestStatus.SCHEDULED })).toEqual(
+      expect.arrayContaining(['scheduledAt', 'locationLabel']),
+    );
+  });
+
+  it('accepts a complete arrangement', async () => {
+    expect(
+      await errors({
+        status: SupportRequestStatus.SCHEDULED,
+        scheduledAt: '2026-11-04T10:30:00.000Z',
+        locationLabel: 'Counselling office',
+      }),
+    ).toEqual([]);
+  });
+
+  it('does not force a schedule onto the other review statuses', async () => {
+    expect(await errors({ status: SupportRequestStatus.ACCEPTED })).toEqual([]);
+    expect(await errors({ status: SupportRequestStatus.COMPLETED })).toEqual(
+      [],
+    );
+  });
+
+  it('still rejects a malformed timestamp or blank location when supplied', async () => {
+    expect(
+      await errors({
+        status: SupportRequestStatus.ACCEPTED,
+        scheduledAt: 'next tuesday',
+      }),
+    ).toContain('scheduledAt');
+    expect(
+      await errors({
+        status: SupportRequestStatus.IN_PROGRESS,
+        locationLabel: '   ',
+      }),
+    ).toContain('locationLabel');
   });
 });
 
@@ -49,6 +239,7 @@ describe('SupportRequestsService', () => {
   let prisma: {
     supportPerson: Record<string, ReturnType<typeof vi.fn>>;
     supportRequest: Record<string, ReturnType<typeof vi.fn>>;
+    studentProfile: Record<string, ReturnType<typeof vi.fn>>;
     user: Record<string, ReturnType<typeof vi.fn>>;
     supportFlag: Record<string, ReturnType<typeof vi.fn>>;
     conversation: Record<string, ReturnType<typeof vi.fn>>;
@@ -56,6 +247,7 @@ describe('SupportRequestsService', () => {
   };
   let audit: { log: ReturnType<typeof vi.fn> };
   let chat: { openDirectThread: ReturnType<typeof vi.fn> };
+  let notifications: { push: ReturnType<typeof vi.fn> };
 
   const student = {
     id: 'student-1',
@@ -74,7 +266,9 @@ describe('SupportRequestsService', () => {
     locationLabel: true,
     createdAt: true,
     updatedAt: true,
-    supportPerson: { select: { id: true, name: true, type: true, title: true } },
+    supportPerson: {
+      select: { id: true, name: true, type: true, title: true },
+    },
   };
 
   beforeEach(async () => {
@@ -87,18 +281,22 @@ describe('SupportRequestsService', () => {
         update: vi.fn(),
       },
       user: { findUnique: vi.fn() },
+      studentProfile: { findUnique: vi.fn() },
       supportFlag: { findMany: vi.fn() },
       conversation: { findFirst: vi.fn() },
       conversationMessage: { findFirst: vi.fn() },
     };
     audit = { log: vi.fn() };
     chat = { openDirectThread: vi.fn() };
+    notifications = { push: vi.fn() };
 
     // Staff mutations resolve their tenant from the actor's account.
     prisma.user.findUnique.mockResolvedValue({
       schoolId: 'school-1',
       name: 'Mrs. Adebayo',
     });
+    // The student behind a request profile is who a status alert goes to.
+    prisma.studentProfile.findUnique.mockResolvedValue({ userId: 'user-1' });
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -110,6 +308,7 @@ describe('SupportRequestsService', () => {
         },
         { provide: AuditService, useValue: audit },
         { provide: ChatService, useValue: chat },
+        { provide: NotificationsService, useValue: notifications },
       ],
     }).compile();
 
@@ -135,37 +334,57 @@ describe('SupportRequestsService', () => {
     expect(prisma.supportPerson.findMany).toHaveBeenCalledWith({
       where: schoolContactScope,
       select: {
-        id: true, name: true, type: true, title: true,
-        availabilityLabel: true, availableToday: true, imageUrl: true,
+        id: true,
+        name: true,
+        type: true,
+        title: true,
+        availabilityLabel: true,
+        availableToday: true,
+        imageUrl: true,
       },
       orderBy: { name: 'asc' },
     });
     expect(result).toHaveLength(1);
   });
 
-  it.each([null, { schoolId: null }])('fails closed without a school (%j)', async (user) => {
-    prisma.user.findUnique.mockResolvedValue(user);
+  it.each([null, { schoolId: null }])(
+    'fails closed without a school (%j)',
+    async (user) => {
+      prisma.user.findUnique.mockResolvedValue(user);
 
-    expect(await service.listPeople('user-1')).toEqual([]);
-    await expect(service.create('user-1', {
-      supportPersonId: 'p1', personType: 'COUNSELLOR', timing: SupportTiming.GENTLE_1_2_DAYS,
-    })).rejects.toThrow(NotFoundException);
+      expect(await service.listPeople('user-1')).toEqual([]);
+      await expect(
+        service.create('user-1', {
+          supportPersonId: 'p1',
+          personType: 'COUNSELLOR',
+          timing: SupportTiming.GENTLE_1_2_DAYS,
+        }),
+      ).rejects.toThrow(NotFoundException);
 
-    expect(prisma.supportPerson.findMany).not.toHaveBeenCalled();
-    expect(prisma.supportPerson.findFirst).not.toHaveBeenCalled();
-    expect(prisma.supportRequest.create).not.toHaveBeenCalled();
-    expect(audit.log).not.toHaveBeenCalled();
-  });
+      expect(prisma.supportPerson.findMany).not.toHaveBeenCalled();
+      expect(prisma.supportPerson.findFirst).not.toHaveBeenCalled();
+      expect(prisma.supportRequest.create).not.toHaveBeenCalled();
+      expect(audit.log).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['foreign-school', 'unlinked', 'deactivated', 'wrong-type'])(
     'rejects a %s contact without creating a request',
     async (supportPersonId) => {
       prisma.supportPerson.findFirst.mockResolvedValue(null);
-      await expect(service.create('user-1', {
-        supportPersonId, personType: 'COUNSELLOR', timing: SupportTiming.GENTLE_1_2_DAYS,
-      })).rejects.toThrow(NotFoundException);
+      await expect(
+        service.create('user-1', {
+          supportPersonId,
+          personType: 'COUNSELLOR',
+          timing: SupportTiming.GENTLE_1_2_DAYS,
+        }),
+      ).rejects.toThrow(NotFoundException);
       expect(prisma.supportPerson.findFirst).toHaveBeenCalledWith({
-        where: { id: supportPersonId, type: 'COUNSELLOR', ...schoolContactScope },
+        where: {
+          id: supportPersonId,
+          type: 'COUNSELLOR',
+          ...schoolContactScope,
+        },
       });
       expect(prisma.supportRequest.create).not.toHaveBeenCalled();
       expect(audit.log).not.toHaveBeenCalled();
@@ -184,7 +403,10 @@ describe('SupportRequestsService', () => {
   });
 
   it('escalates an urgent/unsafe request and audits it', async () => {
-    prisma.supportPerson.findFirst.mockResolvedValue({ id: 'p1', active: true });
+    prisma.supportPerson.findFirst.mockResolvedValue({
+      id: 'p1',
+      active: true,
+    });
     prisma.supportRequest.create.mockResolvedValue({
       id: 'req-1',
       studentId: student.id,
@@ -210,7 +432,10 @@ describe('SupportRequestsService', () => {
   });
 
   it('creates a gentle request as PENDING', async () => {
-    prisma.supportPerson.findFirst.mockResolvedValue({ id: 'p1', active: true });
+    prisma.supportPerson.findFirst.mockResolvedValue({
+      id: 'p1',
+      active: true,
+    });
     prisma.supportRequest.create.mockResolvedValue({
       id: 'req-1',
       status: SupportRequestStatus.PENDING,
@@ -256,7 +481,9 @@ describe('SupportRequestsService', () => {
     async (id) => {
       prisma.supportRequest.findFirst.mockResolvedValue(null);
 
-      await expect(service.getOne('user-1', id)).rejects.toThrow(NotFoundException);
+      await expect(service.getOne('user-1', id)).rejects.toThrow(
+        NotFoundException,
+      );
       expect(prisma.supportRequest.findFirst).toHaveBeenCalledWith({
         where: { id, studentId: 'student-1' },
         select: studentRequestSelect,
@@ -387,10 +614,160 @@ describe('SupportRequestsService', () => {
     );
   });
 
+  it('writes the agreed time and place when a review schedules the request', async () => {
+    prisma.supportRequest.findFirst.mockResolvedValue({
+      id: 'req-1',
+      status: 'PENDING',
+      reviewNote: null,
+      studentId: 'student-1',
+    });
+    prisma.supportRequest.update.mockResolvedValue({
+      id: 'req-1',
+      status: 'SCHEDULED',
+      reviewNote: null,
+      scheduledAt: new Date('2026-11-04T10:30:00Z'),
+      locationLabel: 'Counselling office, Block C',
+      supportPerson: { id: 'p1', name: 'Mrs. Adebayo' },
+    });
+
+    await service.review('staff-1', 'req-1', {
+      status: SupportRequestStatus.SCHEDULED,
+      scheduledAt: '2026-11-04T10:30:00.000Z',
+      locationLabel: 'Counselling office, Block C',
+    });
+
+    expect(prisma.supportRequest.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          status: SupportRequestStatus.SCHEDULED,
+          reviewNote: null,
+          scheduledAt: new Date('2026-11-04T10:30:00Z'),
+          locationLabel: 'Counselling office, Block C',
+        },
+      }),
+    );
+  });
+
+  it('leaves an existing arrangement alone for statuses that are not scheduling', async () => {
+    prisma.supportRequest.findFirst.mockResolvedValue({
+      id: 'req-1',
+      status: 'SCHEDULED',
+      reviewNote: null,
+      scheduledAt: new Date('2026-11-04T10:30:00Z'),
+      locationLabel: 'Counselling office, Block C',
+      studentId: 'student-1',
+    });
+    prisma.supportRequest.update.mockResolvedValue({
+      id: 'req-1',
+      status: 'IN_PROGRESS',
+      reviewNote: null,
+      supportPerson: { id: 'p1', name: 'Mrs. Adebayo' },
+    });
+
+    await service.review('staff-1', 'req-1', {
+      status: SupportRequestStatus.IN_PROGRESS,
+    });
+
+    expect(prisma.supportRequest.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { status: SupportRequestStatus.IN_PROGRESS, reviewNote: null },
+      }),
+    );
+  });
+
+  it('tells the student when the status actually changes, without the private note', async () => {
+    prisma.supportRequest.findFirst.mockResolvedValue({
+      id: 'req-1',
+      status: 'PENDING',
+      reviewNote: null,
+      studentId: 'student-1',
+    });
+    prisma.supportRequest.update.mockResolvedValue({
+      id: 'req-1',
+      status: 'ACCEPTED',
+      reviewNote: 'Family situation — keep to myself',
+      supportPerson: { id: 'p1', name: 'Mrs. Adebayo' },
+    });
+    chat.openDirectThread.mockResolvedValue({ id: 'thread-1', created: true });
+
+    await service.review('staff-1', 'req-1', {
+      status: SupportRequestStatus.ACCEPTED,
+      reviewNote: 'Family situation — keep to myself',
+    });
+
+    expect(notifications.push).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'user-1',
+        type: 'SUPPORT_REQUEST_STATUS',
+        data: { requestId: 'req-1', status: SupportRequestStatus.ACCEPTED },
+      }),
+    );
+    const [push] = notifications.push.mock.calls;
+    expect(push[0].body).toContain('Mrs. Adebayo');
+    expect(push[0].body).not.toContain('Family situation');
+    expect(push[0].title).not.toContain('Family situation');
+  });
+
+  it.each([
+    SupportRequestStatus.SCHEDULED,
+    SupportRequestStatus.IN_PROGRESS,
+    SupportRequestStatus.COMPLETED,
+    SupportRequestStatus.CANCELLED,
+  ])('announces a %s change in the student’s own words', async (status) => {
+    prisma.supportRequest.findFirst.mockResolvedValue({
+      id: 'req-1',
+      status: 'PENDING',
+      reviewNote: null,
+      studentId: 'student-1',
+    });
+    prisma.supportRequest.update.mockResolvedValue({
+      id: 'req-1',
+      status,
+      reviewNote: null,
+      supportPerson: { id: 'p1', name: 'Mrs. Adebayo' },
+    });
+
+    await service.review('staff-1', 'req-1', {
+      status,
+      ...(status === SupportRequestStatus.SCHEDULED
+        ? { scheduledAt: '2026-11-04T10:30:00.000Z', locationLabel: 'Library' }
+        : {}),
+    });
+
+    expect(notifications.push).toHaveBeenCalledTimes(1);
+    expect(notifications.push.mock.calls[0][0].title).toMatch(/./);
+  });
+
+  it('stays silent when a save only corrects the note under the same status', async () => {
+    prisma.supportRequest.findFirst.mockResolvedValue({
+      id: 'req-1',
+      status: 'ACCEPTED',
+      reviewNote: 'older note',
+      studentId: 'student-1',
+    });
+    prisma.supportRequest.update.mockResolvedValue({
+      id: 'req-1',
+      status: 'ACCEPTED',
+      reviewNote: 'corrected note',
+      supportPerson: { id: 'p1', name: 'Mrs. Adebayo' },
+    });
+
+    chat.openDirectThread.mockResolvedValue({ id: 'thread-1', created: true });
+
+    await service.review('staff-1', 'req-1', {
+      status: SupportRequestStatus.ACCEPTED,
+      reviewNote: 'corrected note',
+    });
+
+    expect(notifications.push).not.toHaveBeenCalled();
+  });
+
   it('throws for reviewing a missing request', async () => {
     prisma.supportRequest.findFirst.mockResolvedValue(null);
     await expect(
-      service.review('staff-1', 'missing', { status: SupportRequestStatus.ACCEPTED }),
+      service.review('staff-1', 'missing', {
+        status: SupportRequestStatus.ACCEPTED,
+      }),
     ).rejects.toThrow(NotFoundException);
   });
 
@@ -476,6 +853,7 @@ describe('SupportRequestsService', () => {
           reviewed: 0,
           followUpRequired: 0,
           followUpCompleted: 0,
+          completedThisWeek: 0,
         },
       });
       expect(prisma.supportRequest.findMany).not.toHaveBeenCalled();
@@ -549,9 +927,15 @@ describe('SupportRequestsService', () => {
 
       const result = await service.listQueue('staff-1', {});
 
+      // Escalated sorts ahead of the newer pending row: urgency outranks time.
+      expect(result.items.map((item) => item.id)).toEqual(['req-2', 'req-1']);
       expect(result.items.map((item) => item.queueStatus)).toEqual([
         'NEW',
         'NEW',
+      ]);
+      expect(result.items.map((item) => item.urgency)).toEqual([
+        'URGENT',
+        'NORMAL',
       ]);
       expect(result.counts).toEqual(
         expect.objectContaining({ all: 2, new: 2, reviewed: 0 }),
@@ -560,133 +944,227 @@ describe('SupportRequestsService', () => {
 
     it('maps accepted/scheduled/in-progress/completed requests to REVIEWED', async () => {
       prisma.supportRequest.findMany.mockResolvedValue([
-        queueRow({ id: 'a', status: SupportRequestStatus.ACCEPTED }),
-        queueRow({ id: 'b', status: SupportRequestStatus.SCHEDULED }),
-        queueRow({ id: 'c', status: SupportRequestStatus.IN_PROGRESS }),
-        queueRow({ id: 'd', status: SupportRequestStatus.COMPLETED }),
+        queueRow({
+          id: 'a',
+          status: SupportRequestStatus.ACCEPTED,
+          createdAt: new Date('2026-10-07T09:00:00Z'),
+        }),
+        queueRow({
+          id: 'b',
+          status: SupportRequestStatus.SCHEDULED,
+          createdAt: new Date('2026-10-08T09:00:00Z'),
+        }),
+        queueRow({
+          id: 'c',
+          status: SupportRequestStatus.IN_PROGRESS,
+          createdAt: new Date('2026-10-09T09:00:00Z'),
+        }),
+        queueRow({
+          id: 'd',
+          status: SupportRequestStatus.COMPLETED,
+          createdAt: new Date('2026-10-10T09:00:00Z'),
+        }),
       ]);
 
       const result = await service.listQueue('staff-1', {});
 
-      expect(result.items.every((item) => item.queueStatus === 'REVIEWED')).toBe(
-        true,
-      );
+      expect(
+        result.items.every((item) => item.queueStatus === 'REVIEWED'),
+      ).toBe(true);
+      // The coarse chip split must not erase the lifecycle: each row still
+      // reports which of the four states it is actually in.
+      expect(result.items.map((item) => item.requestStatus)).toEqual([
+        SupportRequestStatus.COMPLETED,
+        SupportRequestStatus.IN_PROGRESS,
+        SupportRequestStatus.SCHEDULED,
+        SupportRequestStatus.ACCEPTED,
+      ]);
       expect(result.counts.reviewed).toBe(4);
     });
 
+    it('sorts urgent rows first, then newest', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({
+          id: 'gentle',
+          createdAt: new Date('2026-10-12T09:00:00Z'),
+          timing: SupportTiming.GENTLE_1_2_DAYS,
+        }),
+        queueRow({
+          id: 'unsafe',
+          createdAt: new Date('2026-10-01T09:00:00Z'),
+          timing: SupportTiming.URGENT_UNSAFE,
+        }),
+        queueRow({
+          id: 'today',
+          createdAt: new Date('2026-10-11T09:00:00Z'),
+          timing: SupportTiming.TODAY_STUDY_PERIOD,
+        }),
+      ]);
+
+      const result = await service.listQueue('staff-1', {});
+
+      expect(result.items.map((item) => [item.id, item.urgency])).toEqual([
+        ['unsafe', 'URGENT'],
+        ['gentle', 'NORMAL'],
+        ['today', 'NORMAL'],
+      ]);
+    });
+
     it.each([
-      { status: 'PENDING', professional: { userId: 'staff-1' }, canManage: true },
-      { status: 'SCHEDULED', professional: { userId: 'staff-1' }, canManage: true },
+      {
+        status: 'PENDING',
+        professional: { userId: 'staff-1' },
+        canManage: true,
+      },
+      {
+        status: 'SCHEDULED',
+        professional: { userId: 'staff-1' },
+        canManage: true,
+      },
       { status: 'PENDING', professional: null, canManage: false },
-      { status: 'SCHEDULED', professional: { userId: 'other-staff' }, canManage: false },
-    ])('surfaces open follow-up status and grants management only to its owner (%j)', async ({ status, professional, canManage }) => {
-      const dueAt = new Date('2026-10-12T12:00:00Z');
-      prisma.supportRequest.findMany.mockResolvedValue([
-        queueRow({
-          status: SupportRequestStatus.ACCEPTED,
-          followUps: [{ id: 'fu-1', status, dueAt, completedAt: null, professional }],
-        }),
-      ]);
-
-      const result = await service.listQueue('staff-1', {});
-
-      expect(result.items[0]).toMatchObject({
-        queueStatus: 'FOLLOW_UP_REQUIRED',
-        followUpId: 'fu-1',
-        followUpStatus: status,
-        followUpDueAt: dueAt,
-        canManageFollowUp: canManage,
-      });
-      expect(result.items[0].student).toEqual({
-        id: 'student-1',
-        firstName: 'Amara',
-        lastName: 'Nwosu',
-        displayName: null,
-        classLabel: 'Year 10',
-        studentCode: 'GSS/2026/0142',
-        studentRef: null,
-        email: 'amara@school.edu.ng',
-      });
-      expect(result.items[0]).not.toHaveProperty('professional');
-      expect(result.items[0]).not.toHaveProperty('followUps');
-      expect(result.counts.followUpRequired).toBe(1);
-    });
-
-    it.each([
-      { selectedOwner: 'other-staff', laterOwner: 'staff-1', canManage: false },
-      { selectedOwner: 'staff-1', laterOwner: 'other-staff', canManage: true },
-    ])('bases all follow-up fields on the earliest open row, not another owned row (%j)', async ({ selectedOwner, laterOwner, canManage }) => {
-      const dueAt = new Date('2026-10-12T12:00:00Z');
-      prisma.supportRequest.findMany.mockResolvedValue([
-        queueRow({
-          followUps: [
-            { id: 'undated', status: 'PENDING', dueAt: null, completedAt: null, professional: { userId: laterOwner } },
-            { id: 'later', status: 'PENDING', dueAt: new Date('2026-10-13T12:00:00Z'), completedAt: null, professional: { userId: laterOwner } },
-            { id: 'closed', status: 'CANCELLED', dueAt: new Date('2026-10-11T12:00:00Z'), completedAt: null, professional: { userId: 'staff-1' } },
-            { id: 'earliest', status: 'SCHEDULED', dueAt, completedAt: null, professional: { userId: selectedOwner } },
-          ],
-        }),
-      ]);
-
-      const result = await service.listQueue('staff-1', {});
-
-      expect(result.items[0]).toMatchObject({
-        followUpId: 'earliest',
-        followUpStatus: 'SCHEDULED',
-        followUpDueAt: dueAt,
-        canManageFollowUp: canManage,
-      });
-    });
-
-    it.each([
-      { statuses: [] },
-      { statuses: ['COMPLETED'] },
-      { statuses: ['CANCELLED'] },
-      { statuses: ['COMPLETED', 'CANCELLED'] },
+      {
+        status: 'SCHEDULED',
+        professional: { userId: 'other-staff' },
+        canManage: false,
+      },
     ])(
-      'returns null open-follow-up fields and no management when none are open (%j)',
-      async ({ statuses }) => {
+      'surfaces open follow-up status and grants management only to its owner (%j)',
+      async ({ status, professional, canManage }) => {
+        const dueAt = new Date('2026-10-12T12:00:00Z');
         prisma.supportRequest.findMany.mockResolvedValue([
           queueRow({
-            followUps: statuses.map((status) => ({
-              id: `fu-${status}`, status, dueAt: null, completedAt: null,
-              professional: { userId: 'staff-1' },
-            })),
+            status: SupportRequestStatus.ACCEPTED,
+            followUps: [
+              { id: 'fu-1', status, dueAt, completedAt: null, professional },
+            ],
           }),
         ]);
 
         const result = await service.listQueue('staff-1', {});
 
         expect(result.items[0]).toMatchObject({
-          followUpId: null, followUpStatus: null, followUpDueAt: null,
-          canManageFollowUp: false,
+          queueStatus: 'REVIEWED',
+          followUpState: 'REQUIRED',
+          followUpId: 'fu-1',
+          followUpStatus: status,
+          followUpDueAt: dueAt,
+          canManageFollowUp: canManage,
+        });
+        expect(result.items[0].student).toEqual({
+          id: 'student-1',
+          firstName: 'Amara',
+          lastName: 'Nwosu',
+          displayName: null,
+          classLabel: 'Year 10',
+          studentCode: 'GSS/2026/0142',
+          studentRef: null,
+          email: 'amara@school.edu.ng',
+        });
+        expect(result.items[0]).not.toHaveProperty('professional');
+        expect(result.items[0]).not.toHaveProperty('followUps');
+        expect(result.counts.followUpRequired).toBe(1);
+      },
+    );
+
+    it.each([
+      { selectedOwner: 'other-staff', laterOwner: 'staff-1', canManage: false },
+      { selectedOwner: 'staff-1', laterOwner: 'other-staff', canManage: true },
+    ])(
+      'bases all follow-up fields on the earliest open row, not another owned row (%j)',
+      async ({ selectedOwner, laterOwner, canManage }) => {
+        const dueAt = new Date('2026-10-12T12:00:00Z');
+        prisma.supportRequest.findMany.mockResolvedValue([
+          queueRow({
+            followUps: [
+              {
+                id: 'undated',
+                status: 'PENDING',
+                dueAt: null,
+                completedAt: null,
+                professional: { userId: laterOwner },
+              },
+              {
+                id: 'later',
+                status: 'PENDING',
+                dueAt: new Date('2026-10-13T12:00:00Z'),
+                completedAt: null,
+                professional: { userId: laterOwner },
+              },
+              {
+                id: 'closed',
+                status: 'CANCELLED',
+                dueAt: new Date('2026-10-11T12:00:00Z'),
+                completedAt: null,
+                professional: { userId: 'staff-1' },
+              },
+              {
+                id: 'earliest',
+                status: 'SCHEDULED',
+                dueAt,
+                completedAt: null,
+                professional: { userId: selectedOwner },
+              },
+            ],
+          }),
+        ]);
+
+        const result = await service.listQueue('staff-1', {});
+
+        expect(result.items[0]).toMatchObject({
+          followUpId: 'earliest',
+          followUpStatus: 'SCHEDULED',
+          followUpDueAt: dueAt,
+          canManageFollowUp: canManage,
         });
       },
     );
 
     it.each(['PENDING', 'SCHEDULED'])(
-      'an open %s follow-up wins over historical completion and the request status',
+      'an open %s follow-up lands the row under Follow-Up Required without erasing the request status',
       async (status) => {
         const completedAt = new Date(Date.now() - DAY);
         prisma.supportRequest.findMany.mockResolvedValue([
           queueRow({
             status: SupportRequestStatus.PENDING,
             followUps: [
-              { id: 'done', status: 'COMPLETED', dueAt: null, completedAt, professional: { userId: 'staff-1' } },
-              { id: 'open', status, dueAt: null, completedAt: null, professional: null },
+              {
+                id: 'done',
+                status: 'COMPLETED',
+                dueAt: null,
+                completedAt,
+                professional: { userId: 'staff-1' },
+              },
+              {
+                id: 'open',
+                status,
+                dueAt: null,
+                completedAt: null,
+                professional: null,
+              },
             ],
           }),
         ]);
 
-        const result = await service.listQueue('staff-1', { status: 'FOLLOW_UP_REQUIRED' });
+        const result = await service.listQueue('staff-1', {
+          status: 'FOLLOW_UP_REQUIRED',
+        });
 
         expect(result.items).toHaveLength(1);
         expect(result.items[0]).toMatchObject({
-          queueStatus: 'FOLLOW_UP_REQUIRED', followUpId: 'open', followUpStatus: status,
-          followUpCompletedAt: completedAt, canManageFollowUp: false,
+          queueStatus: 'NEW',
+          followUpState: 'REQUIRED',
+          followUpId: 'open',
+          followUpStatus: status,
+          followUpCompletedAt: completedAt,
+          canManageFollowUp: false,
         });
         expect(result.counts).toEqual({
-          all: 1, new: 0, reviewed: 0, followUpRequired: 1, followUpCompleted: 0,
+          all: 1,
+          new: 1,
+          reviewed: 0,
+          followUpRequired: 1,
+          followUpCompleted: 0,
+          completedThisWeek: 1,
         });
       },
     );
@@ -697,9 +1175,11 @@ describe('SupportRequestsService', () => {
           id: 'recent',
           followUps: [
             {
+              id: 'fu-recent',
               status: 'COMPLETED',
               dueAt: null,
               completedAt: new Date(Date.now() - 2 * DAY),
+              professional: null,
             },
           ],
         }),
@@ -707,9 +1187,11 @@ describe('SupportRequestsService', () => {
           id: 'stale',
           followUps: [
             {
+              id: 'fu-stale',
               status: 'COMPLETED',
               dueAt: null,
               completedAt: new Date(Date.now() - 10 * DAY),
+              professional: null,
             },
           ],
         }),
@@ -717,8 +1199,47 @@ describe('SupportRequestsService', () => {
 
       const result = await service.listQueue('staff-1', {});
 
-      expect(result.counts.followUpCompleted).toBe(1);
+      // The chip counts every completed follow-up, which is exactly the set
+      // clicking it shows; the tile is the narrower 7-day window.
+      expect(result.counts.followUpCompleted).toBe(2);
+      expect(result.counts.completedThisWeek).toBe(1);
+      expect(
+        (await service.listQueue('staff-1', { status: 'FOLLOW_UP_COMPLETED' }))
+          .items,
+      ).toHaveLength(2);
     });
+
+    it.each([
+      { statuses: [] as string[] },
+      { statuses: ['COMPLETED'] },
+      { statuses: ['CANCELLED'] },
+      { statuses: ['COMPLETED', 'CANCELLED'] },
+    ])(
+      'returns null open-follow-up fields and no management when none are open (%j)',
+      async ({ statuses }) => {
+        prisma.supportRequest.findMany.mockResolvedValue([
+          queueRow({
+            followUps: statuses.map((status) => ({
+              id: `fu-${status}`,
+              status,
+              dueAt: null,
+              completedAt: null,
+              professional: { userId: 'staff-1' },
+            })),
+          }),
+        ]);
+
+        const result = await service.listQueue('staff-1', {});
+
+        expect(result.items[0]).toMatchObject({
+          followUpId: null,
+          followUpStatus: null,
+          followUpDueAt: null,
+          canManageFollowUp: false,
+          followUpState: statuses.includes('COMPLETED') ? 'COMPLETED' : 'NONE',
+        });
+      },
+    );
 
     it('flags the prompt as REVIEW_SUGGESTED for an active flag on the conversation', async () => {
       prisma.supportRequest.findMany.mockResolvedValue([
@@ -745,10 +1266,12 @@ describe('SupportRequestsService', () => {
 
       const result = await service.listQueue('staff-1', {});
 
-      expect(result.items.find((i) => i.id === 'req-linked')?.conversationId).toBe(
-        'conv-9',
-      );
-      expect(result.items.find((i) => i.id === 'req-plain')?.conversationId).toBeNull();
+      expect(
+        result.items.find((i) => i.id === 'req-linked')?.conversationId,
+      ).toBe('conv-9');
+      expect(
+        result.items.find((i) => i.id === 'req-plain')?.conversationId,
+      ).toBeNull();
     });
 
     it('treats acknowledged flags as no prompt and skips the flag query without conversations', async () => {
@@ -783,7 +1306,7 @@ describe('SupportRequestsService', () => {
       );
     });
 
-    it('narrows rows by student code, ref or email search but never the chip counts', async () => {
+    it('narrows the chip counts by search too, so a number never exceeds its rows', async () => {
       prisma.supportRequest.findMany.mockResolvedValue([
         queueRow({
           id: 'req-hit',
@@ -814,8 +1337,34 @@ describe('SupportRequestsService', () => {
       const result = await service.listQueue('staff-1', { q: 'amara@school' });
 
       expect(result.items.map((item) => item.id)).toEqual(['req-hit']);
+      // The counts describe the view, not the whole school: with a search term
+      // typed, "All" is what the table actually holds.
       expect(result.counts).toEqual(
-        expect.objectContaining({ all: 2, new: 2 }),
+        expect.objectContaining({ all: 1, new: 1, reviewed: 0 }),
+      );
+    });
+
+    it('reports a search that matches nothing as an empty queue', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({
+          id: 'req-hit',
+          student: {
+            user: { email: 'amara@school.test' },
+            firstName: 'Amara',
+            lastName: 'N',
+            displayName: null,
+            classLabel: 'Year 10',
+            studentRef: null,
+            studentCode: 'GSS/2026/0142',
+          },
+        }),
+      ]);
+
+      const result = await service.listQueue('staff-1', { q: 'nobody-here' });
+
+      expect(result.items).toEqual([]);
+      expect(result.counts).toEqual(
+        expect.objectContaining({ all: 0, new: 0, reviewed: 0 }),
       );
     });
   });

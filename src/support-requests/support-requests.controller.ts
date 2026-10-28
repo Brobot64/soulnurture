@@ -21,7 +21,7 @@ import {
 import { Roles } from '../common/guards/roles.decorator.js';
 import { CreateSupportRequestDto } from './dto/create-support-request.dto.js';
 import { ReviewSupportRequestDto } from './dto/review-support-request.dto.js';
-import { QUEUE_STATUSES, type QueueStatus } from './queue-status.js';
+import { QUEUE_STATUSES, type QueueFilter } from './queue-status.js';
 import { SupportRequestsService } from './support-requests.service.js';
 
 @ApiTags('Support Requests (contract)')
@@ -82,17 +82,17 @@ export class SupportRequestsController {
     @Query('status') status?: string,
     @Query('q') q?: string,
   ) {
-    let queueStatus: QueueStatus | undefined;
+    let queueFilter: QueueFilter | undefined;
     if (status !== undefined) {
-      if (!QUEUE_STATUSES.includes(status as QueueStatus)) {
+      if (!QUEUE_STATUSES.includes(status as QueueFilter)) {
         throw new BadRequestException(
           `status must be one of ${QUEUE_STATUSES.join(', ')}`,
         );
       }
-      queueStatus = status as QueueStatus;
+      queueFilter = status as QueueFilter;
     }
     return this.supportRequestsService.listQueue(session.user.id, {
-      status: queueStatus,
+      status: queueFilter,
       q,
     });
   }
