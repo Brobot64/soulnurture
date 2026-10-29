@@ -16,8 +16,8 @@ Day-to-day operator's companion to `docs/DEPLOYMENT.md` (the bring-up runbook). 
            │     │     │     │                │
         node-  cad-  pg-   blackbox        promtail
         export visor export exporter       (journald → Loki:
-         9100  8080  9187   9115            natlas, nginx, ollama)
-         host metrics | PG stats | HTTP probes: api/s3/ollama
+         9100  8080  9187   9115            natlas, natlas-frontend, nginx)
+         host metrics | PG stats | HTTP probes: api / app / s3
 ```
 
 | Piece | Answers |
@@ -25,11 +25,11 @@ Day-to-day operator's companion to `docs/DEPLOYMENT.md` (the bring-up runbook). 
 | node-exporter | CPU / memory / disk / load of the VPS itself |
 | cadvisor | Per-container CPU / memory (which container is eating RAM) |
 | postgres-exporter | DB health + **Natlas business gauges** (`natlas_custom_*`) |
-| blackbox-exporter | Are the public doors actually answering: API, RustFS, Ollama |
-| promtail → Loki | Every journald line (API, nginx, Ollama) searchable in Grafana |
+| blackbox-exporter | Are the public doors actually answering: the API, the web app page, RustFS |
+| promtail → Loki | Every journald line (API, frontend SSR, nginx) searchable in Grafana |
 | Grafana | Dashboards, alert rules, email contact point |
 
-Everything runs as containers from `/opt/infra/docker-compose.yml`; the Natlas API itself is a native systemd service (`natlas`).
+Everything runs as containers from `/opt/infra/docker-compose.yml`; the two Node services are native systemd units (`natlas`, `natlas-frontend`). **No model runs on this box** — N-ATLaS and the three vernacular ASR endpoints are hosted (`DEPLOYMENT.md` §5), so *their* health is not a port you can probe here; it shows up as AI jobs failing.
 
 ## 2. Access
 
@@ -48,9 +48,9 @@ Grafana → Explore → Prometheus, run `up`. Expect **7 series, all `1`**:
 | job | What it is |
 |---|---|
 | node, cadvisor, postgres | the three exporters |
-| blackbox-api | ×2 — `https://api…/api/health/auth` (through nginx) **and** `http://127.0.0.1:3000/…` (native) |
+| blackbox-api | ×2 live — `https://api…/api/health/auth` (through nginx) **and** `http://127.0.0.1:3000/…` (native). **The web page on `app…` is not probed** (`DEPLOYMENT.md` §8 templates it, the box does not have it yet), so a dead `natlas-frontend` is invisible to alerts today: check `systemctl status natlas-frontend` whenever students report the site being down while every dashboard is green |
 | blackbox-s3 | `https://s3…/health` (RustFS) |
-| blackbox-ollama | `http://127.0.0.1:11434/api/tags` |
+| blackbox-ollama | `http://127.0.0.1:11434/api/tags` — **optional**: that is the retired local model lane (`DEPLOYMENT.md` §5 fallback A). It answers, but nothing calls it; delete this job with the unit if you remove it |
 
 A `0` on the public target but `1` on the native one = nginx/TLS problem, not an app problem.
 
@@ -92,16 +92,18 @@ SMTP is wired into the Grafana container (`GF_SMTP_*` in `/opt/infra/.env`). **H
 |---|---|---|---|
 | API down | `probe_success{job="blackbox-api"}` | is below 1 | 2m |
 | RustFS (S3) down | `probe_success{job="blackbox-s3"}` | is below 1 | 2m |
-| Ollama down | `probe_success{job="blackbox-ollama"}` | is below 1 | 5m |
 | Disk filling | `node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}` | is below 0.15 | — |
 | Memory pressure | `node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes` | is below 0.10 | — |
 | AI queue stuck | `natlas_custom_ai_jobs_pending` | is above 10 | 15m |
+| AI jobs failing | `delta(natlas_custom_ai_jobs_failed[15m])` | is above 0 | — |
 | Safeguarding backlog | `natlas_custom_support_flags_open` | is above 5 | 30m |
 
 Notes:
 
 - "API down" fires per target (public and native are separate series, distinguished by the `instance` label) — if only the public one is down, suspect nginx/certs, not the app.
-- The last two rules make the AI pipeline and the safeguarding flow operational first-class citizens: a stuck model queue or an unreviewed pile of flags pages you, not a student.
+- The last three rules make the AI pipeline and the safeguarding flow operational first-class citizens: a stuck model queue, a job that died, or an unreviewed pile of flags pages you, not a student.
+- **`delta`, not `increase`** on `natlas_custom_ai_jobs_failed`: `queries.yaml` defines it as a GAUGE holding `count(*) FROM ai_generation_job WHERE status = 'FAILED'` — a cumulative total of rows, not a counter that resets, so `increase()` on it is meaningless. `delta(...) > 0` asks the only question that matters: *did anything fail in the last 15 minutes?* (A `> 0` threshold on the gauge itself would fire forever once the first failure is archived.)
+- **The gap to close:** nothing probes `https://app…/` yet, so if `natlas-frontend.service` dies the whole site is down for students and every dashboard stays green — the API is a different target and a different process. Add the third `blackbox-api` target from `DEPLOYMENT.md` §8, reload Prometheus, then a "Web app page down" rule on `probe_success{instance=~"app\\..*"}`.
 - Test the pipeline end-to-end once: stop a service (`sudo systemctl stop natlas`) until "API down" fires and the email lands, then start it again.
 
 ## 6. Logs (Loki)
@@ -112,7 +114,8 @@ Grafana → Explore → **Loki**:
 |---|---|
 | `{unit="natlas.service"}` | Natlas API (NestJS) logs |
 | `{unit="natlas.service"} \|= "error"` | API errors only |
-| `{syslog_id="ollama"}` | Ollama model traffic |
+| `{unit="natlas-frontend.service"}` | The SSR web app (the process that serves `app…`) |
+| `{syslog_id="ollama"}` | The retired local model lane — still collected, only interesting if `DEPLOYMENT.md` §5 fallback A is revived |
 | `{unit="nginx.service"}` \|= " 500 " | nginx 5xx responses |
 
 Log-based metrics work too, e.g. error trend: `sum(count_over_time({unit="natlas.service"} |= "error" [5m]))`.
@@ -164,7 +167,8 @@ GitHub Actions CI (npm ci → oxlint → vitest → build)
 | Restart API / infra | `sudo systemctl restart natlas` / `cd /opt/infra && docker compose restart` |
 | Disk triage | `docker system df` · `df -h /` · `journalctl --disk-usage` |
 | TLS cert expiry | `sudo certbot renew --dry-run` (renewal timer: `systemctl list-timers certbot`) |
-| Ollama | `ollama ps` · `curl -s localhost:11434/api/tags` |
+| Web app logs / status | `sudo journalctl -u natlas-frontend -f` · `systemctl status natlas-frontend` (port **3200**, never 3100 — Loki owns that) |
+| Vernacular model health | **Not on this box**: endpoint state through the Hugging Face Endpoints MCP (`get_endpoint`, `get_endpoint_replicas`). `ollama ps` only if §5 fallback A was revived |
 
 ## 10. Incident triage recipes
 
@@ -176,13 +180,13 @@ GitHub Actions CI (npm ci → oxlint → vitest → build)
 
 **"AI queue stuck"** (`natlas_custom_ai_jobs_pending` > 10 for 15m)
 1. The async worker runs inside the API — `sudo journalctl -u natlas | grep -i "ai async\|worker"` for the start line and errors.
-2. Vernacular lane: is Ollama up (`ollama ps`, blackbox-ollama target)? Groq/OpenAI: check provider status + API keys in `/opt/natlas/.env` (`GROQ_API_KEY`, `OPENAI_API_KEY`).
+2. Which provider is failing? The chat lane is `AI_PROVIDER_CHAIN=openai,groq` — check OpenAI/Groq status and the keys in `/opt/natlas/.env` (`OPENAI_API_KEY`, `GROQ_API_KEY`). The **vernacular lane is hosted, so no port on this box tells you anything**: ask the endpoint (MCP `get_endpoint`) whether it is `running`, `scaledToZero` (first call wakes it — ~10–16 min, and every app timeout is in seconds, so a sleeping endpoint legitimately produces failures) or `paused` (answers an instant 400 and needs a maintainer + a valid payment method). `sudo journalctl -u natlas | grep -iE "n-atlas|vernacular"` names which of the three it hit.
 3. Peek at the queue: `cd /opt/infra && docker compose exec -T postgres psql -U natlas -d natlas -c "select status, count(*) from ai_generation_job group by status;"`
 
 **"Safeguarding backlog"** — not an infra failure: staff aren't closing flags. Chase the counsellor lead; check the staff dashboard for the flag list.
 
 **Disk filling** — `docker system df` (images/logs are the usual suspects), `sudo journalctl --vacuum-size=200M` if journald grew; do **not** blind-run `docker system prune -a` (it can remove the pinned images other services need — check what it would delete first).
 
-**Memory pressure** — `free -h` + cAdvisor dashboard to find the container; Ollama is the usual resident (multi-GB by design — that's fine, it's why the box has 12 GB).
+**Memory pressure** — `free -h` + cAdvisor dashboard to find the container. Measured 2026-10-28: **1.4 GB used of 12 GB** — no model is resident here any more (`DEPLOYMENT.md` §5), so pressure today comes from a container that outgrew its cap or from a build. The heaviest transient the box performs is the frontend `vite build`; if it dies with exit 137 that is the OOM killer, and the 4 GB swap (§1) is what makes the retry succeed.
 
 **Cert expiry** (browsers warning): `sudo certbot renew --dry-run`; certbot's systemd timer auto-renews, nginx reloads on renewal.

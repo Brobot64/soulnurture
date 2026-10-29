@@ -196,7 +196,7 @@ The single knob surface (env-driven, non-secret; exposed to professionals via `G
 | `GROQ_CHAT_MODEL` | Chat model | `openai/gpt-oss-20b` |
 | `GROQ_MAX_OUTPUT_TOKENS` | ≥1000 recommended: reasoning models spend thinking budget before JSON | 1000 |
 | `GROQ_TEMPERATURE` | Reply determinism | 0.2 |
-| `AI_CONTEXT_MESSAGE_LIMIT` / `AI_CONTEXT_CHARACTER_LIMIT` | Replay bounds | 12 / 12000 |
+| `AI_CONTEXT_MESSAGE_LIMIT` / `AI_CONTEXT_CHARACTER_LIMIT` | Replay bounds | 40 / 30000 |
 | `AI_ASYNC_POLL_MS` | Worker scan interval (0 = disabled) | 5000 |
 | `AI_ASYNC_HOLDING_MESSAGE` | What students see instantly when AI is down | in config |
 | `STAFF_BOOTSTRAP_KEY` | Enrolment secret; unset/empty closes `POST /api/v1/staff/bootstrap` | — |

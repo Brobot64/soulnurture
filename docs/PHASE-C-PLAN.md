@@ -40,7 +40,7 @@ What I changed and why (the flaws identified):
 
 - **input**: `maxMessageChars=1200` (guide) with truncation + note; `injectionPatterns[]` (model-override probes) → one-line prompt hardening + aiPayload note;
 - **output**: `bannedClaims[]` (diagnosis / medication advice / safety-promises / certification claims) → severe matches replace the reply with scripted copy, soft matches strip the sentence; `maxReplyChars=700`;
-- **rate**: `perStudentDaily=20` (`AI_RATE_LIMIT_DAILY`), `perStudentPerMinute=6`, exceeded → 429 envelope; **the human-support pathway always stays reachable** (the gate guards only AI messages);
+- **rate**: `perStudentDaily=120` (`AI_RATE_LIMIT_DAILY`), `perStudentPerMinute=6`, exceeded → 429 envelope; **the human-support pathway always stays reachable** (the gate guards only AI messages);
 - **budget**: `openaiDailyRequestCap` (see Phase A).
 - Wiring order: gate → validate → **filterOutput** → intent engine → resource whitelist (server safety layer still overrides guardrails).
 - **Eval corpus** (guide §evaluate-safety): `src/ai/guardrails/__fixtures__/eval-set.ts` — 20 normal / 20 boundary (therapy/diagnosis/dependence) / 20 crisis / 10 privacy probes; specs assert crisis recall (INTENTS, unchanged), boundary enforcement on canned violating outputs (proving our filters, not model luck), privacy probesnotes.
@@ -91,7 +91,7 @@ model SessionSummary { id, studentId, conversationId, summary VarChar(400), topi
 ```
 
 - `AiService.summarizeConversation(...)` — primary chain (small JSON, ≤200 tokens): `{summary ≤400, topics ≤6 canonical (exam/family/friendship/money/health/sleep/loneliness/bullying/identity/other), followUpHook ≤140, emotionalTrend CALMER|HEAVIER|UNCHANGED}` → Zod + guardrail filter (low-sensitivity rule: no diagnoses, no secrets, no verbatim trauma) → persist. Vernacular conversations summaries consume `aiPayload.understanding` (translations).
-- Triggers: `POST /api/v1/conversations/:id/close` (student → CLOSED + SUMMARY job) and **worker idle-scan** — conversations ACTIVE with `updatedAt < NOW() - idleMinutes` (`AI_SESSION_IDLE_MINUTES=120`) and no summary → close + enqueue (batch 10/scan).
+- Triggers: `POST /api/v1/conversations/:id/close` (student → CLOSED + SUMMARY job) and **worker idle-scan** — conversations ACTIVE with `updatedAt < NOW() - idleMinutes` (`AI_SESSION_IDLE_MINUTES=3`, i.e. the check-in expires 180 s after the student's last message) and no summary → close + enqueue (batch 10/scan). Both triggers push `conversation.closed` on the student's realtime socket; a check-in has no turn cap, so that push is what ends a live chat.
 - **Language integration**: when the student's preferred language is vernacular, **N-ATLaS localizes summary + hook** (`summaryLocalized`, `followUpHookLocalized` — one cheap async call per session) → the carry-over prompt block + `carriedContext` use them on the student's next session (showcase moment 3).
 - **Memory** (`src/ai/memory/memory.repository.ts` — the raw-SQL owner of everything pgvector): recency (last 2 summaries/30d) + pending hooks (14d) + **vector top-2** (embed current message; cosine ≥ 0.8, 30d); embedding failures degrade to recency-only (graceful, tested). Migration pair `phase_c_memory`: `CREATE EXTENSION vector` + vector DDL.
 

@@ -162,13 +162,13 @@ describe('GuardrailService — rate lane', () => {
     ).not.toThrow();
   });
 
-  it('allows 20 turns per server-local day and rejects the 21st', () => {
+  it('allows 120 turns per server-local day and rejects the 121st', () => {
     const service = createService();
-    // 20 turns spread across distinct minute windows of the same day.
-    for (let i = 0; i < 20; i++) {
+    // 120 turns spread across distinct minute windows of the same day.
+    for (let i = 0; i < 120; i++) {
       service.assertMessageAllowed(
         'student-1',
-        at(8 + Math.floor(i / 6), i % 6, 0),
+        at(8 + Math.floor(i / 60), i % 60, 0),
       );
     }
     const error = capture(() =>
@@ -190,13 +190,16 @@ describe('GuardrailService — rate lane', () => {
     expect(() => service.assertMessageAllowed('student-1', now)).toThrow(
       RateLimitExceededException,
     );
-    // 14 more fresh-minute turns → 20 total allowed today …
-    for (let i = 0; i < 14; i++) {
-      service.assertMessageAllowed('student-1', at(12, 1 + i, 0));
+    // 114 more fresh-minute turns → 120 total allowed today …
+    for (let i = 0; i < 114; i++) {
+      service.assertMessageAllowed(
+        'student-1',
+        at(13 + Math.floor(i / 60), i % 60, 0),
+      );
     }
-    // … and the 21st overall still throws (proving the rejected turn was free).
+    // … and the 121st overall still throws (proving the rejected turn was free).
     expect(() =>
-      service.assertMessageAllowed('student-1', at(12, 16, 0)),
+      service.assertMessageAllowed('student-1', at(15, 1, 0)),
     ).toThrow(RateLimitExceededException);
   });
 

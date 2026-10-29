@@ -28,7 +28,9 @@ SSH runs on **port 2222** throughout (§1): `ssh -p 2222 deploy@YOUR_VPS_IP`.
 |---|---|---|---|---|
 | NestJS API | systemd (`natlas.service`), native Node 24 | 127.0.0.1:3000 | ~512 MB | — (stateless) |
 | Frontend (TanStack Start SSR) | systemd (`natlas-frontend.service`), native Node 24 | 127.0.0.1:3200 | ~256 MB | — (stateless) |
-| N-ATLaS LLM | Ollama (native, systemd) | 127.0.0.1:11434 | ~6 GB (model resident) | `/opt/ollama/models` |
+| N-ATLaS LLM (vernacular lane) | **Off this box** — Hugging Face Inference Endpoint (vLLM on an AWS L4, scale-to-zero) | — | none | the weights never live here (§5) |
+| Vernacular ASR (yo/ha/ig) | **Off this box** — three Hugging Face Inference Endpoints, one per language | — | none | §5 |
+| Ollama — **vestigial** | native systemd, still enabled but unread | 127.0.0.1:11434 | 34 MB idle | `/opt/ollama/models` (§5 fallback A) |
 | PostgreSQL 17 | Docker Compose | 127.0.0.1:5432 | 1.5 GB | named volume `pgdata` |
 | RustFS (S3) | Docker Compose | 127.0.0.1:9000 / 9001 | 512 MB | named volume `rustfs-data` |
 | Prometheus | Docker Compose | 127.0.0.1:9090 | 512 MB | volume `prom-data` |
@@ -41,9 +43,9 @@ SSH runs on **port 2222** throughout (§1): `ssh -p 2222 deploy@YOUR_VPS_IP`.
 | blackbox-exporter | Docker Compose | 9115 (host network) | 64 MB | — |
 | Nginx | apt (native) | 0.0.0.0:80/443 | ~50 MB | /etc/nginx, certs |
 
-Rationale: **infra with state runs in Docker Compose** (clean upgrades, isolated volumes), **Ollama and Node run natively under systemd** (the Ollama install script manages its own service, and native Node avoids bind-mounting source into containers). Nginx is the only public listener. **Nothing else touches the internet.**
+Rationale: **infra with state runs in Docker Compose** (clean upgrades, isolated volumes), **Node runs natively under systemd** (native Node avoids bind-mounting source into containers), and **both model services run off-box** as Hugging Face Inference Endpoints (§5) — which is what lets a 12 GB box with no GPU carry this stack at all. Nginx is the only public listener. **Nothing else touches the internet.**
 
-Memory budget on 12 GB: model resident ≈ 5–6 GB (Q4_K_M) + Postgres 1.5 GB + app 0.5 GB + observability ~1.5 GB + OS ~1 GB ≈ 10 GB → we add 4 GB swap as a pressure valve.
+Memory budget on 12 GB, measured on the running box (2026-10-28): **1.4 GB used, ~10.4 GB available** — Postgres ≤1.5 GB, API ≤0.5 GB, frontend SSR ≤0.25 GB, observability ~1.5 GB, OS ~1 GB. This is *not* the original budget: the Q4_K_M model used to sit resident at 5–6 GB and the whole plan assumed ≈10 GB of the 12 GB. Moving the vernacular lane to the hosted endpoint is what freed it. Keep the 4 GB swap as the pressure valve.
 
 **Vernacular ASR — hosted by default.** Yoruba/Hausa/Igbo voice notes run on the NCAIR1 whisper-small fine-tunes served as three Hugging Face Inference Endpoints (one per language, `NATLAS_ASR_URL_*` in §6): a T4 each, scale-to-zero so idle hours cost nothing, ~2.5 s per note when warm and ~3 min to wake from cold — the provider retries inside `NATLAS_ASR_TIMEOUT_MS` and then answers "the voice model is starting up, try again in a moment". Those endpoints decode audio with libsndfile, so the browser records 16 kHz mono WAV and webm/opus is rejected. `services/n-atlas-asr` stays as the self-hosted alternative when there is no HF account (run + systemd unit at the end of §5); a per-language endpoint URL wins over `NATLAS_ASR_BASE_URL`. With neither configured, yo/ha/ig voice notes get the friendly "type your message instead" 503, while English and Pidgin ride the Groq Whisper chain normally.
 
@@ -171,7 +173,7 @@ Container log rotation (prevents the 200 GB disk filling silently) — `/etc/doc
 sudo systemctl restart docker
 ```
 
-Every compose service below sets `restart: unless-stopped` and memory limits so containers can never starve Ollama.
+Every compose service below sets `restart: unless-stopped` and memory limits so containers can never starve the two Node services (§0 table).
 
 ---
 
@@ -435,7 +437,97 @@ aws --endpoint-url http://127.0.0.1:9000 s3 sync s3://natlas-uploads /opt/backup
 
 ---
 
-## 5. N-ATLaS on the VPS (Ollama, CPU-quantized)
+## 5. N-ATLaS — the vernacular lane (hosted off-box; Ollama is now a fallback)
+
+**What runs on this server is a client, not a model.** The vernacular understanding,
+language-identify, render and translate lanes call an OpenAI-compatible chat API hosted as a
+Hugging Face Inference Endpoint, and the app never loads a weight:
+
+```bash
+# /opt/natlas/.env — the four lines that route the vernacular lane off-box.
+# Values are secrets; never paste them into a chat, terminal log or commit.
+NATLAS_LLM_BASE_URL=https://<endpoint-id>.endpoints.huggingface.cloud   # no /v1 — the provider appends it
+NATLAS_LLM_MODEL=NCAIR1/N-ATLaS
+NATLAS_LLM_API_KEY=<HF token of the account that accepted the NCAIR1 terms>
+AI_VERNACULAR_REPLY_MODE=n-atlas-translate   # render the finished reply into the turn's language
+```
+
+The provider posts `POST {NATLAS_LLM_BASE_URL}/v1/chat/completions` with `model: NCAIR1/N-ATLaS`
+and reads `choices[0].message.content` plus `usage` (`src/ai/providers/natlas/natlas-llm.provider.ts:169`);
+every failure throws `NatlasUnavailableError`, which is what lets the OpenAI fallback stay intact.
+`Authorization` is sent only when `NATLAS_LLM_API_KEY` is set — that is how a local Ollama (below)
+works with no key at all.
+
+**Endpoint configuration** (managed through the Hugging Face Endpoints MCP, not SSH — see §5's
+verification list): account `Cocolette`, **AWS us-east-1, L4 x1, $0.80/hr while allocated**,
+`minReplica 0 / maxReplica 1 / 15-minute scale-to-zero` so idle hours cost nothing, image
+`vllm/vllm-openai:v0.23.0`, gated repo pinned at revision `e294476928aca9030e924ca27bb8e085e8581273`,
+and `model.args: ["--max-model-len","16384"]`. That last one is load-bearing, not cosmetic: the repo
+declares a 131 072-token context, vLLM reserves KV cache for the whole thing, and an L4 leaves ~4 GB
+after the BF16 weights — the endpoint boots to `failed` with `_check_enough_kv_cache_memory` unless
+the cap is passed. HF's schema has no max-model-len knob; `model.args` is the only way in.
+
+**The four timeouts are a hierarchy, and the shortest ones win.** A student is waiting on the sync
+lanes, so a cold endpoint must fall through to OpenAI fast; only the async worker can afford to wait.
+
+| Knob | Default | Lane | Budget logic |
+|---|---|---|---|
+| `NATLAS_LLM_TIMEOUT_MS` | 45 000 | async understanding (worker) | the only lane that can absorb a slow model |
+| `NATLAS_TRANSLATE_TIMEOUT_MS` | 10 000 | sync translation | N-ATLaS is the only translator |
+| `NATLAS_RENDER_TIMEOUT_MS` | 12 000 | sync reply render | fall through to the OpenAI render, then keep English |
+| `NATLAS_IDENTIFY_TIMEOUT_MS` | 4 000 | sync language-ID | strictest — fail open to preference, then English |
+
+### Cold starts are the failure mode, not the model
+
+A sleeping replica answers **503 and does not queue**; that first call is what wakes it, and a full
+wake measured **~14 min** (range 10–16 min) — two orders of magnitude beyond every timeout above.
+So **re-warm the endpoint before any probe that must show the lane working** (call it through the MCP
+~15 min ahead and wait for 200), or the run records `understanding.via='openai'` and reads like a
+model failure when it is a scheduling fact. Related distinction that costs people time:
+**`scaledToZero` ≠ `paused`.** A scaled-to-zero endpoint wakes; a **paused** one answers an instant
+400 ("The endpoint is paused, ask a maintainer to restart it") to every request and will not wake
+itself — and `resume_endpoint` can 403 with *"Payment method required for namespace: Cocolette"*,
+which is a billing action, not an infra one. `resume_endpoint` on a `failed` endpoint (GCP/AWS
+"scheduling failure: unable to schedule") reschedules onto a fresh replica.
+
+**Prod state, verified 2026-10-28** (counts only — never echo the values):
+`NATLAS_LLM_BASE_URL` set to an `https://` endpoint, `NATLAS_LLM_API_KEY` set,
+`AI_VERNACULAR_REPLY_MODE=n-atlas-translate`, and all three `NATLAS_ASR_URL_{YO,HA,IG}` +
+`NATLAS_ASR_API_KEY` set with `NATLAS_ASR_BASE_URL` empty (so voice uses the hosted endpoints, not
+the sidecar). Check without printing secrets:
+
+```bash
+ssh -p 2222 deploy@YOUR_VPS_IP 'for k in NATLAS_LLM_BASE_URL NATLAS_LLM_API_KEY AI_VERNACULAR_REPLY_MODE NATLAS_ASR_URL_YO NATLAS_ASR_URL_HA NATLAS_ASR_URL_IG NATLAS_ASR_API_KEY NATLAS_ASR_BASE_URL; do printf "%s=%s\n" "$k" "$(grep -cE "^$k=." /opt/natlas/.env)"; done'
+# 1 = configured, 0 = not. A key that must be set and reads 0 explains a fallback silently.
+```
+
+**Still open on this lane:** no production message has been observed with
+`aiPayload.understanding.via='n-atlas-local'` — the endpoint is proven to serve, and the wiring is
+proven to be read by the app's config layer, but the end-to-end accept needs a warmed endpoint plus
+a real vernacular turn through the VPS (`test/yoruba-live-probe.mjs`, which writes prod data, so it
+is the owner's call). Read-back without burning chat turns: `test/conversation-inspector.mjs` reads
+`GET /api/v1/conversations/:id`, where `aiPayload.understanding`/`render`/`applicationNotes` are
+persisted per message. Note that a **duplicate** `KEY=` line in `/opt/natlas/.env` silently loses —
+systemd `EnvironmentFile` takes the last occurrence (`grep -cE '^KEY='` before blaming the code).
+
+**License:** display the attribution (*"N-ATLaS is an initiative of the Federal Ministry of
+Communications, Innovation and Digital Economy, powered by Awarri Technologies"* — the verbatim line
+is in the product footer and `GET /api/v1/ai/config`), and stay ≤ 1000 active end-users / 30 days.
+
+### Fallback A — Ollama on this box (retired 2026-10-09; the unit is still installed)
+
+This is the original all-on-VPS lane: the same OpenAI-compatible provider, pointed at a CPU-quantized
+GGUF instead of an endpoint. It is **the dev/offline path and the no-HF-account answer** — a machine
+running its own Ollama serves the vernacular lane with no token at all, which is exactly what the
+provider's keyless branch is for. Nothing in the app reads the box's
+install any more: `NATLAS_LLM_BASE_URL` points at the endpoint, so `ollama.service` sits **active +
+enabled with 34 MB resident and 127.0.0.1:11434 bound** — verified 2026-10-28. Removing it is a live
+change on a production box and is the owner's call, not a cleanup an agent should run.
+
+To use it, set `NATLAS_LLM_BASE_URL=http://127.0.0.1:11434`, leave `NATLAS_LLM_API_KEY` **empty**
+(the provider then omits `Authorization`), and restart `natlas`. Expect ~4–10 tokens/sec on 6 shared
+vCPUs and ~5–6 GB of the 12 GB held by the resident model — i.e. it only competes with the hosted
+lane because the box no longer has to carry the weights.
 
 ```bash
 # --- ollama (native service, binds 127.0.0.1:11434 by default)
@@ -465,17 +557,21 @@ ollama create natlas -f /opt/models/natlas/Modelfile
 ollama run natlas --verbose "I feel overwhelmed about my exams"
 ```
 
-Tuning notes for the 12 GB box:
+Tuning notes if you do bring this lane back up:
 
-- `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_LOADED_MODELS=1` (default service env) keep a single resident copy — the model stays loaded (~5–6 GB) thanks to Ollama's default `keep_alive`, so the async worker's jobs don't pay a load penalty per request.
-- Expected throughput on 6 shared vCPUs: **~4–10 tokens/sec**. Real-time student chat always rides the OpenAI→Groq provider chain (`AI_PROVIDER_CHAIN` in §6 — local N-ATLaS is deliberately *not* a chat-chain member); this Ollama instance serves the **vernacular understanding lane**, reached via `NATLAS_LLM_BASE_URL` (the app posts to `/api/chat` on `http://127.0.0.1:11434` — no `/v1` suffix).
+- `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_LOADED_MODELS=1` (default service env) keep a single resident copy — the model stays loaded (~5–6 GB) thanks to Ollama's default `keep_alive`, so the async worker's jobs don't pay a load penalty per request. On a 12 GB box that is the difference between headroom and swapping, so `NATLAS_KEEP_ALIVE`/`ollama ps` are worth watching.
+- Expected throughput on 6 shared vCPUs: **~4–10 tokens/sec**. Real-time student chat always rides the OpenAI→Groq provider chain (`AI_PROVIDER_CHAIN` in §6 — N-ATLaS is deliberately *not* a chat-chain member); it only ever serves the **vernacular lanes**. Either way the app talks to it the same way as the hosted endpoint: `POST /v1/chat/completions` on the origin in `NATLAS_LLM_BASE_URL`, no `/api/chat` and no key.
 - Ollama must remain on `127.0.0.1` — never open 11434 in ufw.
 
-**License:** display *"N-ATLaS … powered by Awarri Technologies"* in the product and expose it via `GET /api/v1/ai/config`; stay ≤ 1000 active users/30 days.
+### Fallback B — self-hosted vernacular ASR sidecar (built, never installed)
 
-### Deferred to phase 2 — vernacular ASR sidecar
-
-Per the §0 note, yo/ha/ig voice returns a graceful 503 until the sidecar is running. When you want it:
+**Voice is not waiting on this.** Yoruba/Hausa/Igbo voice notes transcribe on the three hosted
+endpoints (`NATLAS_ASR_URL_{YO,HA,IG}` + `NATLAS_ASR_API_KEY`, all set in prod as of 2026-10-28) and
+`NATLAS_ASR_BASE_URL` is deliberately empty. This section is the alternative for a deployment that
+cannot hold an HF account; a per-language endpoint URL always wins over the sidecar, and with
+neither configured that language's voice note answers the friendly "type your message instead" 503
+while English and Pidgin ride Groq Whisper. The unit has never been executed anywhere (the dev
+machine has no Python), so treat first boot as a real smoke test, not a formality.
 
 ```bash
 sudo apt install -y python3-venv ffmpeg        # ffmpeg decodes browser webm/opus
@@ -512,7 +608,9 @@ curl -s http://127.0.0.1:8100/health
 sudo systemctl restart natlas
 ```
 
-whisper-small runs ~1 GB RAM **per warm language** (×3 ≈ 3 GB), loads lazily on first request (~10–30 s cold) and unloads languages idle for `NATLAS_ASR_IDLE_UNLOAD_SECONDS` (600). The VPS is sized for 2–4 concurrent streams; overflow degrades to the same friendly 503. The sidecar has never been executed yet (the dev machine has no Python) — first boot on the VPS is its real smoke test; watch `journalctl -u natlas-asr`.
+whisper-small runs ~1 GB RAM **per warm language** (×3 ≈ 3 GB), loads lazily on first request (~10–30 s cold) and unloads languages idle for `NATLAS_ASR_IDLE_UNLOAD_SECONDS` (600). The VPS is sized for 2–4 concurrent streams; overflow degrades to the same friendly 503. Watch `journalctl -u natlas-asr` on first boot.
+
+Unlike the hosted endpoints (libsndfile only — wav/flac/mp3, and the reason the browser records 16 kHz mono WAV), the sidecar shells out to **ffmpeg**, so it also accepts webm/m4a. Recording format is the same either way: the browser sends WAV, which both lanes decode. To actually route a language here, clear its `NATLAS_ASR_URL_<lang>` — a per-language endpoint URL outranks `NATLAS_ASR_BASE_URL`.
 
 ---
 
@@ -585,9 +683,10 @@ GROQ_TEMPERATURE=0.2
 GROQ_INPUT_USD_CENTS_PER_1M=10
 GROQ_OUTPUT_USD_CENTS_PER_1M=30
 
-# Bounded AI context (privacy/cost control)
-AI_CONTEXT_MESSAGE_LIMIT=12
-AI_CONTEXT_CHARACTER_LIMIT=12000
+# Bounded AI context (privacy/cost control) — the reply prompt replays the most
+# recent 40 messages, capped by characters first
+AI_CONTEXT_MESSAGE_LIMIT=40
+AI_CONTEXT_CHARACTER_LIMIT=30000
 
 # Async AI generation (in-app DB queue)
 AI_ASYNC_POLL_MS=5000
@@ -596,24 +695,34 @@ AI_ASYNC_HOLDING_MESSAGE=Thank you for sharing that with me — I am still think
 # Guardrails — input/output caps + per-student rate windows
 AI_MAX_MESSAGE_CHARS=1200
 AI_MAX_REPLY_CHARS=700
-AI_RATE_LIMIT_DAILY=20
+AI_RATE_LIMIT_DAILY=120
 AI_RATE_LIMIT_PER_MINUTE=6
 
-# Guided check-in replies — free-text turn budget before wrap-up
-# (3 base; a single "Tell more" tap extends to 5; quick-reply taps are free)
-AI_GUIDED_MAX_BASE_TURNS=3
-AI_GUIDED_MAX_EXTENDED_TURNS=5
-
-# Session-summary memory (requires the pgvector image from §3)
-AI_SESSION_IDLE_MINUTES=120
+# Session-summary memory (requires the pgvector image from §3).
+# This is the check-in's expiry: 3 = a conversation closes 180 s after the
+# student's last message. A check-in has no turn cap — it ends here, or when
+# the student taps "Complete".
+AI_SESSION_IDLE_MINUTES=3
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 
 # Language layer
 AI_LANGUAGE_OFFER_ENABLED=true
-AI_VERNACULAR_REPLY_MODE=openai-native
-# Local N-ATLaS (Ollama) — async vernacular understanding lane only
-NATLAS_LLM_BASE_URL=http://127.0.0.1:11434
-NATLAS_LLM_MODEL=n-atlas
+# 'n-atlas-translate' (the default, and what prod runs): the model writes the reply in
+# English with full context + guardrails, then N-ATLaS renders the finished reply into the
+# turn's language in the same request (falls back to an OpenAI render, then to English).
+# 'openai-native' is the rollback if the vernacular endpoint is down.
+AI_VERNACULAR_REPLY_MODE=n-atlas-translate
+# N-ATLaS vernacular lane — the hosted HF Inference Endpoint (§5). This is NOT the Ollama
+# lane any more: base URL = the endpoint origin with NO /v1 (the provider appends it),
+# model = the repo id, key = the HF token (env-only, never echoed, never on AiConfig).
+# Leave BASE_URL empty to route the vernacular lane straight to the OpenAI fallback.
+NATLAS_LLM_BASE_URL=https://<endpoint-id>.endpoints.huggingface.cloud
+NATLAS_LLM_MODEL=NCAIR1/N-ATLaS
+NATLAS_LLM_API_KEY=<hf token>
+NATLAS_LLM_TIMEOUT_MS=45000
+NATLAS_RENDER_TIMEOUT_MS=12000
+NATLAS_IDENTIFY_TIMEOUT_MS=4000
+NATLAS_TRANSLATE_TIMEOUT_MS=10000
 
 # Vernacular ASR — hosted NCAIR1 whisper fine-tunes, one HF Inference Endpoint
 # per language (T4, scale-to-zero, ~3 min cold boot). The endpoints are
@@ -731,8 +840,10 @@ ssh -p 2222 deploy@YOUR_VPS_IP
 bash /opt/natlas/deploy/vps-frontend-same-origin.sh      # as deploy, never root
 ```
 
-It pauses (exit 0) at the one step no script can do — pasting the public key it just
-minted into GitHub as a read-only Deploy Key — and carries on from there when re-run.
+On today's repo it never pauses: `Brobot64/soulnurture-frontend` is **public**, so step 2 probes
+anonymous HTTPS (`GIT_TERMINAL_PROMPT=0`) and clones with no credential — nothing is minted and
+nothing is pasted into GitHub. The pause exists only for the private-repo fallback, where the
+installer mints a read-only keypair and exits 0 for you to paste the public half; re-run it after.
 Pass `--skip-api-env` to leave `/opt/natlas/.env` alone, `-y` to skip the restart
 prompt. The sections below stay as the manual reference for what it changes and why.
 
@@ -831,8 +942,9 @@ disagree about it, and refuses to start if something that is not `node` already 
 ssh -p 2222 deploy@YOUR_VPS_IP /usr/local/bin/natlas-frontend-deploy   # as deploy — it refuses root
 ```
 
-The `vite build` is the heaviest thing this server does after Ollama — if it dies with
-exit 137, that is the OOM killer and swap (§1) is what makes the retry succeed.
+The `vite build` is the heaviest thing this server does — nothing holds a model here any more (§5),
+so the build is the peak. If it dies with exit 137, that is the OOM killer and swap (§1) is what
+makes the retry succeed.
 
 ### 3. Backend `.env` for the new origin
 
@@ -1095,6 +1207,8 @@ scrape_configs:
       - targets:
           - "https://api.YOUR_VPS_IP.sslip.io/api/health/auth"   # public door, through nginx
           - "http://127.0.0.1:3000/api/health/auth"              # native API directly
+          - "https://app.YOUR_VPS_IP.sslip.io/"                  # the page itself (§6A): a dead SSR
+                                                                  # box leaves the API green
     relabel_configs:
       - { source_labels: [__address__], target_label: __param_target }
       - { source_labels: [__param_target], target_label: instance }
@@ -1107,6 +1221,12 @@ scrape_configs:
     relabel_configs:
       - { source_labels: [__address__], target_label: __param_target }
       - { target_label: __address__, replacement: "host.docker.internal:9115" }
+  # Optional, and currently the only thing that answers on :11434 is the retired Ollama
+  # install (§5 fallback A). Keep this job while you may still bring that lane back; delete
+  # it together with the unit when you do not. It proves nothing about the vernacular lane
+  # that actually serves: the hosted endpoint needs a Bearer token, which does not belong in
+  # a monitoring container. Alert on the queue instead (see the rules below) — a silently
+  # falling-back lane shows up as failed AI jobs, not as a dead port on this box.
   - job_name: blackbox-ollama
     metrics_path: /probe
     params: { module: [http_2xx] }
@@ -1149,11 +1269,11 @@ datasources:
   - { name: Loki, type: loki, url: http://loki:3100 }
 ```
 
-Import dashboards: **Node Exporter Full (ID 1860)**, **PostgreSQL Database (9628)**, **cAdvisor (14282)** — plus a small custom panel row fed by the `natlas_custom` metrics above (e.g. `natlas_custom_ai_jobs_pending`, `natlas_custom_support_flags_open`). The full operator's guide — dashboards, the seven alert rules with exact setup steps, log queries, incident triage — is **`docs/MONITORING.md`**.
+Import dashboards: **Node Exporter Full (ID 1860)**, **PostgreSQL Database (9628)**, **cAdvisor (14282)** — plus a small custom panel row fed by the `natlas_custom` metrics above (e.g. `natlas_custom_ai_jobs_pending`, `natlas_custom_support_flags_open`). The full operator's guide — dashboards, the alert rules with exact setup steps, log queries, incident triage — is **`docs/MONITORING.md`**.
 
 ### Logs (Loki + Promtail)
 
-`/opt/infra/promtail/promtail.yaml` — ships journald (NestJS + nginx + ollama) into Loki:
+`/opt/infra/promtail/promtail.yaml` — ships all of journald (NestJS, the frontend SSR server, nginx, ollama) into Loki:
 
 ```yaml
 server: { http_listen_port: 9080 }
@@ -1167,7 +1287,7 @@ scrape_configs:
       - { source_labels: ["__journal_syslog_identifier"], target_label: syslog_id }
 ```
 
-Grafana → Explore → Loki → `{unit="natlas.service"}` gives you the API logs; `{syslog_id="ollama"}` for model traffic.
+Grafana → Explore → Loki → `{unit="natlas.service"}` gives you the API logs, `{unit="natlas-frontend.service"}` the SSR server, and `{syslog_id="ollama"}` the retired local model lane (§5) — still collected, still harmless, only interesting if you bring that fallback back.
 
 ### Alerting (Grafana → Alerting → Alert rules)
 
@@ -1178,14 +1298,15 @@ Minimum viable rules (evaluate every 1m, notify via the SMTP contact point):
 | Alert | Condition |
 |---|---|
 | API down | `probe_success{job="blackbox-api"} == 0 for 2m` |
+| Web app page down (the SSR lane, §6A) | `probe_success{instance=~"app\\..*"} == 0 for 2m` — the API stays green when `natlas-frontend` dies, so this needs its own rule **and** the app target above in the live `prometheus.yml` (as of 2026-10-28 the box probes `api.` public + native only, so this row is a to-do, not a description) |
 | RustFS (S3) down | `probe_success{job="blackbox-s3"} == 0 for 2m` |
-| Ollama down | `probe_success{job="blackbox-ollama"} == 0 for 5m` |
 | Disk filling | `node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes < 0.15` |
 | Memory pressure | `node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10` |
 | AI queue stuck | `natlas_custom_ai_jobs_pending > 10 for 15m` |
+| AI jobs failing | `delta(natlas_custom_ai_jobs_failed[15m]) > 0` — a GAUGE of FAILED rows, so ask whether it moved (`increase()` is meaningless here; `> 0` on the gauge would page forever) |
 | Safeguarding backlog | `natlas_custom_support_flags_open > 5 for 30m` |
 
-That last pair turns the model pipeline and the safeguarding flow into operational first-class citizens.
+The two AI rows are what tells you the **hosted vernacular lane** is degraded: the models are off-box (§5), so no port on this server goes red when an endpoint sleeps, pauses for billing, or starts answering 503 — the jobs land in `FAILED` instead. `Ollama down` (`probe_success{job="blackbox-ollama"} == 0 for 5m`) is deliberately **not** in the minimum set: that port belongs to the retired local lane, and paging for it would page for a service nothing calls.
 
 ---
 
@@ -1214,7 +1335,7 @@ Also keep copies of `/opt/infra/.env` and `/opt/natlas/.env` in a password manag
 
 ```bash
 # system
-systemctl status ollama natlas docker --no-pager
+systemctl status natlas natlas-frontend nginx docker --no-pager
 docker compose -f /opt/infra/docker-compose.yml ps
 
 # endpoints (from the internet)
@@ -1222,8 +1343,18 @@ curl -s https://api.YOUR_VPS_IP.sslip.io/api/health/auth
 curl -s https://s3.YOUR_VPS_IP.sslip.io/health
 # grafana login: https://monitor.YOUR_VPS_IP.sslip.io
 
-# model
-ollama list && ollama run natlas "Say hello in Hausa" --verbose
+# model lane — there is nothing to run locally: N-ATLaS and the three vernacular
+# ASR models are hosted off-box (§5). The honest go-live checks are therefore
+# (a) that the app is configured to reach them, and (b) that a real turn records it.
+ssh -p 2222 deploy@YOUR_VPS_IP 'for k in NATLAS_LLM_BASE_URL NATLAS_LLM_API_KEY AI_VERNACULAR_REPLY_MODE NATLAS_ASR_URL_YO NATLAS_ASR_URL_HA NATLAS_ASR_URL_IG NATLAS_ASR_API_KEY; do printf "%s=%s\n" "$k" "$(grep -cE "^$k=." /opt/natlas/.env)"; done'   # every line 1
+# (a) is counts, never values. Then (b): warm the endpoint FIRST — a sleeping one
+# takes 10–16 min to wake and every app timeout is in seconds, so an un-warmed run
+# "proves" the fallback works and nothing else.
+test/yoruba-live-probe.mjs          # writes prod data: owner's call, not an agent's
+test/conversation-inspector.mjs     # read-back of aiPayload.understanding.via / render
+# Old check, retired with the Ollama lane — it cannot pass any more because the box
+# deliberately holds no model: `ollama list && ollama run natlas "Say hello in Hausa"`.
+# If you see it in a runbook or a CI step, delete it; it measured topology, not quality.
 
 # full-system E2E (run against a STAGING database first — the journeys
 # clean only their own synthetic users, but keep them out of the prod DB)
@@ -1259,16 +1390,16 @@ Final checks: Grafana shows all scrape targets UP · alert test notification arr
 | Task | Command |
 |---|---|
 | API logs | `sudo journalctl -u natlas -f` |
-| Ollama status / loaded models | `ollama ps` · `curl -s localhost:11434/api/tags` |
+| Vernacular lane health | **Not on this box** (§5): endpoint state via the Hugging Face Endpoints MCP (`get_endpoint`, `get_endpoint_replicas`). `ollama ps` · `curl -s localhost:127.0.0.1:11434/api/tags` only if you revived fallback A |
 | Restart API | `sudo systemctl restart natlas` |
 | Restart infra | `cd /opt/infra && docker compose restart` |
 | Upgrade all containers | `docker compose pull && docker compose up -d` |
 | Disk usage triage | `docker system df` · `df -h /` · journal size: `journalctl --disk-usage` |
-| Update N-ATLaS model | re-run `hf download` → `ollama create natlas -f Modelfile` (zero-downtime: the worker retries while Ollama reloads) |
+| Change the N-ATLaS model | hosted: update the endpoint through the MCP (`update_endpoint`) and keep `--max-model-len 16384` plus the pinned revision — the box holds no weights. Fallback A only: re-run `hf download` → `ollama create natlas -f Modelfile` (zero-downtime: the worker retries while Ollama reloads) |
 | DB backup restore | see §3 restore drill |
 | New release | merge to `main` — CI/CD deploys automatically (§12); manual: §6 |
-| Frontend release (same-origin lane) | automatic on push to the frontend's `main` (`.github/workflows/deploy-vps.yml`, §6A/§12 — live once that workflow is merged); manual: `ssh -p 2222 deploy@YOUR_VPS_IP /usr/local/bin/natlas-frontend-deploy` |
-| Frontend lane install/repair | `bash /opt/natlas/deploy/vps-frontend-same-origin.sh` (§6A) — idempotent; re-run it after any box rebuild, and again after pasting the Deploy Key if it paused |
+| Frontend release (same-origin lane) | manual + verified: `ssh -p 2222 deploy@YOUR_VPS_IP /usr/local/bin/natlas-frontend-deploy`, then confirm `cat /home/deploy/.natlas-frontend-last-deploy` moved (§12 explains why the marker, not the workflow, is the proof). The `.github/workflows/deploy-vps.yml` automation is on the frontend's `main` but has not yet completed a run |
+| Frontend lane install/repair | `bash /opt/natlas/deploy/vps-frontend-same-origin.sh` (§6A) — idempotent; re-run it after any box rebuild. The Deploy Key path only matters if `Brobot64/soulnurture-frontend` goes private; it is public, so the installer clones over anonymous HTTPS and mints no credential |
 | Frontend logs / status | `sudo journalctl -u natlas-frontend -f`, `systemctl status natlas-frontend` |
 
 ---
@@ -1288,18 +1419,28 @@ The deploy job checks out nothing and holds no server password — the GitHub se
 one key to one script, so the frontend CI uses a *second* keypair — private half in the frontend
 repo's Actions secrets as `FRONTEND_VPS_SSH_KEY`, public half installed for `deploy` as
 `restrict,command="/usr/local/bin/natlas-frontend-deploy" … github-actions-frontend-vps-deploy`.
-The API's key must never gain the ability to restart the app host, and it has not: the two entries
-in `~deploy/.ssh/authorized_keys` force different scripts. Verified by asking that key for
-`cat /etc/shadow` and receiving the deploy script's output instead — a forced command replaces
-whatever the client asks for, so the key's whole reach is "rebuild `main` and restart
-`natlas-frontend`". The workflow is `.github/workflows/deploy-vps.yml` in
-`Brobot64/soulnurture-frontend` (branch `FRONTEND_VPS_CI_001`, live on `main` once merged); it runs
-no build on the runner because the release is only real once the artifact the box serves passes
-`natlas-frontend-deploy`'s health gate, and it needs no repo credential because this repo is public
-and the box pulls over anonymous HTTPS. A failed build or a failed gate exits non-zero, which fails
-the Actions run, which is what GitHub's own "Failures" notification emails — the workflow sends
-nothing, so nothing here can silently stop sending it. Until that branch merges, a frontend release
-is still one `ssh` as `deploy`, and the script is idempotent, so re-running it is never a hazard.
+The API's key must never gain the ability to restart the app host, and it has not: `~deploy/.ssh/authorized_keys`
+holds three entries (laptop, API deploy, frontend deploy) and each of the two deploy keys forces a
+different script. Verified by asking that key for `echo ATTEMPTED_SHELL` and for `cat /etc/shadow`
+and receiving the deploy script's output both times — a forced command replaces whatever the client
+asks for, so the key's whole reach is "rebuild `main` and restart `natlas-frontend`". The workflow is
+`.github/workflows/deploy-vps.yml` in `Brobot64/soulnurture-frontend` (merged to its `main` as
+`73f3391`); it runs no build on the runner because the release is only real once the artifact the box
+serves passes `natlas-frontend-deploy`'s health gate, and it needs no repo credential because that
+repo is public and the box pulls over anonymous HTTPS. A failed build or a failed gate exits
+non-zero, which fails the Actions run, which is what GitHub's own "Failures" notification emails —
+the workflow sends nothing, so nothing here can silently stop sending it.
+
+**Merged is not the same as proven.** Checked on the box 2026-10-28: `~deploy/.natlas-frontend-last-deploy`
+still reads `3e641ce` and `natlas-frontend` has not restarted since the 2026-10-25 install, while the
+frontend's `main` is at `73f3391`. So the automation has never completed a *successful* run (any run
+that got as far as the health gate would have moved that marker) — the marker is the
+evidence, and "the workflow file is on `main`" is not. The likeliest cause is the repo secret
+`FRONTEND_VPS_SSH_KEY` (the workflow refuses to run and says so when it is absent), then Notifications
+→ Actions → Failures never being enabled, which means nobody was mailed about the failure. Read the run
+at `github.com/Brobot64/soulnurture-frontend/actions` before believing the lane is live; until it has
+written a marker, a frontend release is still `ssh -p 2222 deploy@YOUR_VPS_IP /usr/local/bin/natlas-frontend-deploy`,
+and the script is idempotent, so re-running it is never a hazard.
 
 ### One-time server setup
 

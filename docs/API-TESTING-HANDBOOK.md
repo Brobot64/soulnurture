@@ -512,7 +512,7 @@ Each message gets a synchronous AI reply (`content` is 1–4000 chars;
   scripted safe copy — severe matches rewrite the whole reply, soft matches
   strip only the violating sentence.
 - **Rate**: AI chat turns are capped per student — `AI_RATE_LIMIT_PER_MINUTE`
-  (default 6/minute) and `AI_RATE_LIMIT_DAILY` (default 20/day). A turn past
+  (default 6/minute) and `AI_RATE_LIMIT_DAILY` (default 120/day). A turn past
   the cap returns **429** with a body of `{ "message", "retryAfterSeconds" }`;
   a rejected turn consumes no budget. The gate guards **AI messages only** —
   the Support (human) pathway is never rate-limited and stays reachable.
@@ -660,8 +660,11 @@ every sentence, fallback copy is stored instead.
 > present, never from the untranslated raw text.
 
 > Idle close: any `ACTIVE` conversation with at least one message, untouched
-> for `AI_SESSION_IDLE_MINUTES` (default 120 min), is closed automatically by
-> the worker with a SUMMARY job — no endpoint call needed.
+> for `AI_SESSION_IDLE_MINUTES` (default 3 min = 180 s), is closed
+> automatically by the worker with a SUMMARY job — no endpoint call needed.
+> The close also goes out over realtime as `conversation.closed`
+> (`{ conversationId, checkInId, reason: 'IDLE' }`), which is what removes the
+> student's composer mid-session: a check-in has no turn cap of its own.
 
 ---
 
@@ -908,6 +911,43 @@ contains "10am". Professionals may only set `ACCEPTED | SCHEDULED |
 IN_PROGRESS | COMPLETED | CANCELLED` — `PENDING` and `ESCALATED` are
 system-managed (creation / `URGENT_UNSAFE` urgency) and a PATCH attempting
 them fails validation (`400`). `reviewNote` ≤ 500 chars.
+
+`SCHEDULED` additionally requires the arrangement the student will see:
+`scheduledAt` (ISO-8601) and `locationLabel` (≤ 200 chars, not whitespace).
+Omit either one and the PATCH is `400`; send either on a non-`SCHEDULED`
+status and it is accepted, but only `SCHEDULED` makes them mandatory.
+
+**Request** `GET /api/v1/notifications` (as Jude) — assert a row with
+`type === "SUPPORT_REQUEST_STATUS"` whose `data.status === "ACCEPTED"`, and
+that neither its `title` nor its `body` contains any part of the `reviewNote`:
+the student is told the status changed, never what the reviewer wrote. A
+re-save that changes only the note must not add a second row.
+
+### 8.3 The staff review queue (`GET /api/v1/support-requests/queue`)
+
+As a staff role (`COUNSELLOR | PSYCHOLOGIST | SUPPORT_STAFF`). Optional
+`?status=NEW|REVIEWED|FOLLOW_UP_REQUIRED|FOLLOW_UP_COMPLETED` and `?q=`
+(student code, student ref or email).
+
+**Expected** `200` with `data.items` and `data.counts`. Each row carries the
+four facts separately — `requestStatus` (the stored lifecycle), `queueStatus`
+(`NEW`/`REVIEWED` derived from it), `followUpState`
+(`NONE`/`REQUIRED`/`COMPLETED`), `urgency` (`URGENT` when the student said
+`URGENT_UNSAFE` or the row is `ESCALATED`) — plus `prompt`, `scheduledAt` and
+`locationLabel`. Assert:
+
+- `data.items[0].urgency === "URGENT"` whenever any row is urgent: urgency
+  orders the queue before recency does.
+- `counts.all === items.length` with no `status`, and for each chip value the
+  count equals the number of rows that `?status=` returns — one predicate
+  (`matchesQueueFilter`) backs both.
+- The chips overlap: a `PENDING` row with a booked follow-up is counted under
+  both `new` and `followUpRequired`, so the chip numbers do not sum to `all`.
+- `counts.completedThisWeek` is a rolling 7-day window and may read lower than
+  `followUpCompleted`, which counts every completed follow-up.
+- A `q=` that matches narrows the counts too — `counts.all` is the size of the
+  searched set, never the whole school.
+- `CANCELLED` requests appear in neither items nor counts.
 
 ---
 
@@ -1487,6 +1527,8 @@ same per-account: sessions cut, sign-in and next requests `403`
 | `chat.message.new` | both participants' `user:<id>` rooms | `{threadId, message: {id, role, content, viaVoice, createdAt}}` | a message is sent (the sender is echoed too) |
 | `chat.thread.closed` | both participants | `{threadId}` | either side closes |
 | `chat.unread.updated` | the user whose badge changed | `{total, byThread}` | on send (recipient) and on read (self) |
+| `conversation.message.updated` | the student's `user:<id>` | `{conversationId, messageId, asyncState}` | an async AI reply landed or failed (the row was rewritten in place) |
+| `conversation.closed` | the student's `user:<id>` | `{conversationId, checkInId, reason: 'MANUAL' \| 'IDLE'}` | the student completed the check-in, or idle expiry closed it |
 | `notification.new` | the recipient | `{id, type, title, body, data}` | any notification row is created |
 | `notification.unread.updated` | the recipient | `{count}` | their unread count changes |
 

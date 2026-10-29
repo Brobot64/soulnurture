@@ -248,10 +248,15 @@ describe('AiWorkerService', () => {
     expect(aiService.generateAndApply).not.toHaveBeenCalled();
   });
 
-  it('closes idle ACTIVE conversations and queues a SUMMARY job', async () => {
+  it('closes idle ACTIVE conversations, queues a SUMMARY job and pushes the close', async () => {
     prisma.$queryRaw
       .mockResolvedValueOnce([
-        { id: 'conv-1', studentId: 'student-1' },
+        {
+          id: 'conv-1',
+          studentId: 'student-1',
+          checkInId: 'check-1',
+          userId: 'student-user-1',
+        },
       ]) // idle scan finds one
       .mockResolvedValue([]); // due scan empty
     prisma.$executeRaw.mockResolvedValueOnce(0).mockResolvedValueOnce(1); // reclaim, then close
@@ -273,6 +278,13 @@ describe('AiWorkerService', () => {
     expect(auditService.log).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'conversation.closed' }),
     );
+    // The student's open tab has no turn cap of its own: this push is what
+    // takes the composer away when expiry ends the check-in.
+    expect(realtime.emitToUser).toHaveBeenCalledWith('student-user-1', 'conversation.closed', {
+      conversationId: 'conv-1',
+      checkInId: 'check-1',
+      reason: 'IDLE',
+    });
   });
 
   it('runs SUMMARY jobs through summarizeConversation and completes them', async () => {

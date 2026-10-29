@@ -90,13 +90,6 @@ export interface AiOrchestrationInput {
   classLabel: string | null;
   /** Guided-reply marker from the DTO; drives the directive selection. */
   quickReply?: QuickReplyValue | null;
-  /** Free-text USER turns so far in this conversation. */
-  freeTextTurns?: number;
-  /** Free-text turn budget (base or extended). */
-  turnBudget?: number;
-  /** True when freeTextTurns reached the budget OR total turns (free text +
-   * quick replies) hit the maxExtendedTurns cap — wrap-up directive applies. */
-  finalTurn?: boolean;
 }
 
 export interface AiOrchestrationOutcome {
@@ -233,27 +226,11 @@ export class AiService {
     const guidedLines: string[] = [];
     if (openFlag) {
       guidedLines.push(this.aiConfig.guided.flagDirective);
-    } else {
-      // On the final turn the TELL_MORE directive is skipped — its "invite
-      // them to share / ask one gentle question" would contradict the
-      // wrap-up. SHOW_IDEA / TALK_TO_SOMEONE still apply: their reply can
-      // deliver the idea or hand-off while closing warmly.
-      if (
-        input.quickReply &&
-        !(input.finalTurn && input.quickReply === this.aiConfig.guided.extension)
-      ) {
-        const directive = this.aiConfig.guided.directives[input.quickReply];
-        if (directive) guidedLines.push(directive);
-      }
-      if (input.turnBudget != null && input.freeTextTurns != null) {
-        guidedLines.push(
-          `Guided check-in budget: ${input.freeTextTurns}/${input.turnBudget} free-text turns used` +
-            (input.finalTurn ? ' — this is the final turn.' : '.'),
-        );
-      }
-      if (input.finalTurn) {
-        guidedLines.push(this.aiConfig.guided.wrapUpDirective);
-      }
+    } else if (input.quickReply) {
+      // The student's tap decides what this reply does. There is no turn
+      // budget any more, so no tap is ever suppressed in favour of a wrap-up.
+      const directive = this.aiConfig.guided.directives[input.quickReply];
+      if (directive) guidedLines.push(directive);
     }
 
     // Reply language for this turn: the language detected in THIS message's

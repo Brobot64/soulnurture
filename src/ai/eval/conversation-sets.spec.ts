@@ -143,11 +143,7 @@ const aiConfigStub = {
     },
   },
   guided: {
-    maxBaseTurns: 3,
-    maxExtendedTurns: 5,
-    extension: 'TELL_MORE',
     directives: { TELL_MORE: 'T', SHOW_IDEA: 'S', TALK_TO_SOMEONE: 'K' },
-    wrapUpDirective: 'W',
     flagDirective: 'F',
   },
   language: {
