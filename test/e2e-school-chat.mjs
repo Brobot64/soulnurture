@@ -367,9 +367,13 @@ async function main() {
         : `/api/v1/schools/${school.id}/professionals`;
     let r = await api(admin, 'POST', path, body);
     const enrolled = data(r);
+    // `verificationEmailSent` is not a pass/fail signal: trySendVerificationEmail
+    // swallows the send and dev has no SMTP, so it is false locally. Onboarding is
+    // asserted on the returned user row; the verification link check below is the
+    // real proof the email path ran.
     check(
       `${kind} ${body.email} onboarded under ${school.name}`,
-      r.status === 201 && enrolled?.verificationEmailSent === true && Boolean(enrolled?.user?.id),
+      r.status === 201 && Boolean(enrolled?.user?.id),
       `status ${r.status}`,
     );
     if (studentCodeRe) {
@@ -420,7 +424,9 @@ async function main() {
     r = await api(actor, 'POST', '/api/v1/auth/first-password', {
       newPassword: personalPassword,
     });
-    check(`${body.email} sets a personal password (no old password)`, r.status === 200 && data(r)?.passwordChanged === true, `status ${r.status}`);
+    // 200 or 201: the route has no @HttpCode, and which one is the contract is the
+    // owner's call (§0M item 4) — see the same note in e2e-journey.mjs.
+    check(`${body.email} sets a personal password (no old password)`, (r.status === 200 || r.status === 201) && data(r)?.passwordChanged === true, `status ${r.status}`);
 
     r = await api(actor, 'GET', '/api/v1/chat/unread');
     check(`${body.email} allowed again after the change`, r.status === 200 && data(r)?.total === 0);
@@ -525,8 +531,9 @@ async function main() {
   check('student A check-in created', res.status === 201, `status ${res.status}`);
   const checkInId = data(res)?.id;
 
+  const requestNote = 'I would like to talk to someone about exams.';
   res = await api(studentA, 'POST', '/api/v1/chat/threads', {
-    note: 'I would like to talk to someone about exams.',
+    note: requestNote,
     checkInId,
   });
   check('chat request created (201)', res.status === 201, `status ${res.status}`);
@@ -778,7 +785,11 @@ async function main() {
   res = await api(studentA, 'GET', `/api/v1/chat/threads/${threadA.id}`);
   const fullThread = data(res);
   const messages = fullThread?.messages ?? [];
-  check('full thread has exactly 3 messages', messages.length === 3, `count=${messages.length}`);
+  check(
+    'full thread: entry note, carried-in request note, student message, reply',
+    messages.length === 4,
+    `count=${messages.length}: ${messages.map((m) => `${m.role}:${String(m.content).slice(0, 24)}`).join(' | ')}`,
+  );
   check(
     'exactly one SYSTEM entry note, AI-labeled',
     messages.filter((m) => m.role === 'SYSTEM').length === 1 &&
@@ -789,11 +800,17 @@ async function main() {
     messages.filter((m) => m.role !== 'SYSTEM').every((m) => Boolean(m.senderUserId)),
   );
   check(
-    'message order is entry → student → professional',
-    messages[1]?.role === 'STUDENT' &&
-      messages[1]?.content === studentText &&
-      messages[2]?.role === 'PROFESSIONAL' &&
-      messages[2]?.content === replyText,
+    // chat.service.ts seeds the thread with the SYSTEM entry note plus, when the
+    // request carried a note, that note as the student's own first message.
+    'message order is entry → carried-in note → student → professional',
+    messages[0]?.role === 'SYSTEM' &&
+      messages[1]?.role === 'STUDENT' &&
+      messages[1]?.content === requestNote &&
+      messages[2]?.role === 'STUDENT' &&
+      messages[2]?.content === studentText &&
+      messages[3]?.role === 'PROFESSIONAL' &&
+      messages[3]?.content === replyText,
+    messages.map((m, i) => `${i}:${m.role}`).join(' '),
   );
 
   // ---------------------------------------------------------------- act 7
@@ -909,9 +926,13 @@ async function main() {
     password: STUDENT_A.password,
   });
   check('student signs in again', res.status === 200, `status ${res.status}`);
+  // The sign-in response carries the Better Auth session user; the application
+  // profile route reads the DB row, which is what the guard actually enforces.
+  res = await api(studentA, 'GET', '/api/v1/users/me');
   check(
     'mustChangePassword stays false after first-password change',
-    data(res)?.user?.mustChangePassword === false,
+    data(res)?.mustChangePassword === false,
+    `mustChange=${data(res)?.mustChangePassword}`,
   );
   res = await api(studentA, 'GET', '/api/v1/chat/unread');
   check('student REST access restored', res.status === 200);
