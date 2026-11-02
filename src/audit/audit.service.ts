@@ -13,6 +13,11 @@ export class AuditService {
     entityId?: string | null;
     meta?: Prisma.InputJsonValue;
     schoolId?: string | null;
+    /** US-D03: the transition is recorded as two named states, not implied. */
+    priorStatus?: string | null;
+    newStatus?: string | null;
+    ruleId?: string | null;
+    ruleVersion?: string | null;
   }) {
     return this.prisma.auditLog.create({
       data: {
@@ -22,6 +27,10 @@ export class AuditService {
         entityId: input.entityId ?? null,
         meta: input.meta ?? undefined,
         schoolId: input.schoolId ?? null,
+        priorStatus: input.priorStatus ?? null,
+        newStatus: input.newStatus ?? null,
+        ruleId: input.ruleId ?? null,
+        ruleVersion: input.ruleVersion ?? null,
       },
     });
   }

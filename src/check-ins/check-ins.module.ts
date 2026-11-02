@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ContentModule } from '../content/content.module.js';
 import { PrismaModule } from '../prisma/prisma.module.js';
 import { StudentsModule } from '../students/students.module.js';
 import { CheckInFeedbackController } from './check-in-feedback.controller.js';
@@ -8,7 +9,7 @@ import { CheckInsController } from './check-ins.controller.js';
 import { CheckInsService } from './check-ins.service.js';
 
 @Module({
-  imports: [PrismaModule, StudentsModule],
+  imports: [PrismaModule, StudentsModule, ContentModule],
   controllers: [
     CheckInsController,
     CheckInFeedbackController,

@@ -35,13 +35,14 @@ import type { FollowUp } from '@prisma/client';
 
 export type QueueStatus = 'NEW' | 'REVIEWED';
 
-/** The four chip values accepted by `GET /v1/support-requests/queue?status=`. */
+/** The chip values accepted by `GET /v1/support-requests/queue?status=`. */
 export type QueueFilter =
-  QueueStatus | 'FOLLOW_UP_REQUIRED' | 'FOLLOW_UP_COMPLETED';
+  QueueStatus | 'UNREAD' | 'FOLLOW_UP_REQUIRED' | 'FOLLOW_UP_COMPLETED';
 
 export const QUEUE_STATUSES: readonly QueueFilter[] = [
   'NEW',
   'REVIEWED',
+  'UNREAD',
   'FOLLOW_UP_REQUIRED',
   'FOLLOW_UP_COMPLETED',
 ];
@@ -113,9 +114,12 @@ export function deriveFollowUpState(request: QueueRow): FollowUpState {
  * disagree again.
  */
 export function matchesQueueFilter(
-  request: QueueRow,
+  request: QueueRow & { readAt: Date | null },
   filter: QueueFilter,
 ): boolean {
+  if (filter === 'UNREAD') {
+    return request.readAt === null && request.status !== SupportRequestStatus.CANCELLED;
+  }
   if (filter === 'FOLLOW_UP_REQUIRED') {
     return deriveFollowUpState(request) === 'REQUIRED';
   }

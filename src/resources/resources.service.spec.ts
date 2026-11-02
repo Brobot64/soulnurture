@@ -10,6 +10,8 @@ describe('ResourcesService', () => {
     wellbeingResource: Record<string, ReturnType<typeof vi.fn>>;
     toolboxItem: Record<string, ReturnType<typeof vi.fn>>;
     emotionalCheckIn: Record<string, ReturnType<typeof vi.fn>>;
+    resourceFeedback: Record<string, ReturnType<typeof vi.fn>>;
+    supportFlag: Record<string, ReturnType<typeof vi.fn>>;
   };
 
   const student = {
@@ -27,7 +29,9 @@ describe('ResourcesService', () => {
         findMany: vi.fn(),
         upsert: vi.fn(),
       },
-      emotionalCheckIn: { findUnique: vi.fn() },
+      emotionalCheckIn: { findFirst: vi.fn() },
+      resourceFeedback: { create: vi.fn() },
+      supportFlag: { create: vi.fn(), update: vi.fn() },
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -75,8 +79,8 @@ describe('ResourcesService', () => {
     expect(where.toolboxItems).toEqual({ some: { studentId: student.id } });
   });
 
-  it('returns tailored stress resources for a high-stress check-in', async () => {
-    prisma.emotionalCheckIn.findUnique.mockResolvedValue({
+  it('personalises only from the students own high-stress check-in and says so', async () => {
+    prisma.emotionalCheckIn.findFirst.mockResolvedValue({
       id: 'checkin-1',
       feeling: 'OVERWHELMED',
     });
@@ -86,14 +90,53 @@ describe('ResourcesService', () => {
 
     const result = await service.tailored('user-1', 'checkin-1');
 
+    expect(prisma.emotionalCheckIn.findFirst).toHaveBeenCalledWith({
+      where: { id: 'checkin-1', studentId: student.id },
+    });
     const where = prisma.wellbeingResource.findMany.mock.calls[0][0].where;
     expect(where.OR).toEqual([
       { category: 'EXAM_STRESS' },
       { category: 'GROUNDING' },
       { category: 'ANXIETY' },
     ]);
-    expect(result.rationale).toContain('check-in');
+    expect(result.title).toBe('Picked for you');
+    expect(result.rationale).toContain('overwhelmed');
+    expect(result.rationale).not.toContain('reflection signals');
     expect(result.items).toHaveLength(1);
+  });
+
+  it('labels the list as featured when no check-in is supplied', async () => {
+    prisma.wellbeingResource.findMany.mockResolvedValue([]);
+
+    const result = await service.tailored('user-1');
+
+    expect(prisma.emotionalCheckIn.findFirst).not.toHaveBeenCalled();
+    expect(prisma.wellbeingResource.findMany.mock.calls[0][0].where.OR).toBeUndefined();
+    expect(result.title).toBe('Featured resources');
+    expect(result.rationale).not.toContain('You said');
+  });
+
+  it('does not personalise from a check-in belonging to another student', async () => {
+    prisma.emotionalCheckIn.findFirst.mockResolvedValue(null);
+    prisma.wellbeingResource.findMany.mockResolvedValue([]);
+
+    const result = await service.tailored('user-1', 'someone-elses-checkin');
+
+    expect(result.title).toBe('Featured resources');
+    expect(prisma.wellbeingResource.findMany.mock.calls[0][0].where.OR).toBeUndefined();
+  });
+
+  it('does not claim a feeling-specific grouping for a calm check-in', async () => {
+    prisma.emotionalCheckIn.findFirst.mockResolvedValue({
+      id: 'checkin-1',
+      feeling: 'CALM',
+    });
+    prisma.wellbeingResource.findMany.mockResolvedValue([]);
+
+    const result = await service.tailored('user-1', 'checkin-1');
+
+    expect(result.title).toBe('Featured resources');
+    expect(prisma.wellbeingResource.findMany.mock.calls[0][0].where.OR).toBeUndefined();
   });
 
   it('throws NotFound when saving an unapproved/inactive resource', async () => {
@@ -117,5 +160,39 @@ describe('ResourcesService', () => {
       create: { studentId: student.id, resourceId: 'r1' },
       update: {},
     });
+  });
+
+  it('records a what-next answer as one feedback row and no safeguarding write', async () => {
+    prisma.wellbeingResource.findFirst.mockResolvedValue({ id: 'r1' });
+    prisma.resourceFeedback.create.mockResolvedValue({});
+
+    const result = await service.recordFeedback('user-1', {
+      resourceId: 'r1',
+      choice: 'WANT_TO_TALK',
+    });
+
+    expect(prisma.resourceFeedback.create).toHaveBeenCalledWith({
+      data: {
+        studentId: student.id,
+        resourceId: 'r1',
+        choice: 'WANT_TO_TALK',
+      },
+    });
+    expect(prisma.supportFlag.create).not.toHaveBeenCalled();
+    expect(prisma.supportFlag.update).not.toHaveBeenCalled();
+    expect(result).toEqual({ recorded: true });
+  });
+
+  it('throws NotFound for feedback on an unapproved resource and writes nothing', async () => {
+    prisma.wellbeingResource.findFirst.mockResolvedValue(null);
+
+    await expect(
+      service.recordFeedback('user-1', {
+        resourceId: 'missing',
+        choice: 'NOT_HELPFUL',
+      }),
+    ).rejects.toThrow(NotFoundException);
+
+    expect(prisma.resourceFeedback.create).not.toHaveBeenCalled();
   });
 });

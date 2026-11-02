@@ -1,8 +1,26 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { FeelingLabel, Prisma, ResourceCategory } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
+import type { ResourceFeedbackDto } from './dto/resource-feedback.dto.js';
 import type { ResourceQueryDto } from './dto/resource-query.dto.js';
+
+/**
+ * The only check-in feelings with an approved resource grouping (Doc B / G13).
+ * Anything outside this map gets the neutral "featured" surface instead of a
+ * personalisation claim, because no mapping has been reviewed for it.
+ */
+const STATED_NEED_CATEGORIES: ResourceCategory[] = [
+  ResourceCategory.EXAM_STRESS,
+  ResourceCategory.GROUNDING,
+  ResourceCategory.ANXIETY,
+];
+
+const STATED_NEED_LABELS: Partial<Record<FeelingLabel, string>> = {
+  OVERWHELMED: 'overwhelmed',
+  ANXIOUS: 'anxious',
+  STRESSED: 'stressed',
+};
 
 @Injectable()
 export class ResourcesService {
@@ -41,29 +59,22 @@ export class ResourcesService {
   }
 
   async tailored(userId: string, checkInId?: string) {
-    await this.studentsService.ensureProfile(userId);
+    const student = await this.studentsService.ensureProfile(userId);
     let where: Prisma.WellbeingResourceWhereInput = {
       active: true,
       approved: true,
     };
+    let title = 'Featured resources';
+    let rationale = 'The newest approved resources, in case you want something to try.';
     if (checkInId) {
-      const checkIn = await this.prisma.emotionalCheckIn.findUnique({
-        where: { id: checkInId },
+      const checkIn = await this.prisma.emotionalCheckIn.findFirst({
+        where: { id: checkInId, studentId: student.id },
       });
-      if (
-        checkIn &&
-        (checkIn.feeling === 'OVERWHELMED' ||
-          checkIn.feeling === 'ANXIOUS' ||
-          checkIn.feeling === 'STRESSED')
-      ) {
-        where = {
-          ...where,
-          OR: [
-            { category: 'EXAM_STRESS' },
-            { category: 'GROUNDING' },
-            { category: 'ANXIETY' },
-          ],
-        };
+      const statedNeed = checkIn ? STATED_NEED_LABELS[checkIn.feeling] : undefined;
+      if (statedNeed) {
+        where = { ...where, OR: STATED_NEED_CATEGORIES.map((category) => ({ category })) };
+        title = 'Picked for you';
+        rationale = `You said you feel ${statedNeed}, so these are the exam-stress, anxiety and grounding resources.`;
       }
     }
     const items = await this.prisma.wellbeingResource.findMany({
@@ -71,10 +82,7 @@ export class ResourcesService {
       take: 3,
       orderBy: { updatedAt: 'desc' },
     });
-    return {
-      rationale: 'Based on your recent check-in and reflection signals.',
-      items,
-    };
+    return { title, rationale, items };
   }
 
   async toolbox(userId: string) {
@@ -101,5 +109,26 @@ export class ResourcesService {
       update: {},
     });
     return this.toolbox(userId);
+  }
+
+  /**
+   * US-WR-D06. Writes one feedback row and nothing else: Doc C §5.1 forbids a
+   * resource click, a "not helpful" or a refusal from becoming risk signal.
+   */
+  async recordFeedback(userId: string, body: ResourceFeedbackDto) {
+    const student = await this.studentsService.ensureProfile(userId);
+    const resource = await this.prisma.wellbeingResource.findFirst({
+      where: { id: body.resourceId, active: true, approved: true },
+      select: { id: true },
+    });
+    if (!resource) throw new NotFoundException('Resource not found');
+    await this.prisma.resourceFeedback.create({
+      data: {
+        studentId: student.id,
+        resourceId: resource.id,
+        choice: body.choice,
+      },
+    });
+    return { recorded: true };
   }
 }

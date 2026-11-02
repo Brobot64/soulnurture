@@ -122,10 +122,11 @@ Email verification is required before full access. Use `credentials: "include"` 
 | Check-ins | `POST /check-ins`, `GET /check-ins`, `GET /check-ins/:id` |
 | Conversations | `POST /conversations`, `GET /conversations`, `GET /conversations/:id`, `POST /conversations/:id/messages` |
 | AI | `POST /ai/transcribe` (multipart, field `audio`), `GET /ai/config` (professionals), `GET /ai/disclosure` (public), `POST /ai/disclosure/acknowledge` (student) |
-| Resources | `GET /resources`, `GET /resources/tailored`, `GET /resources/toolbox`, `POST /resources/toolbox` |
+| Resources | `GET /resources`, `GET /resources/tailored`, `GET /resources/toolbox`, `POST /resources/toolbox`, `POST /resources/feedback` |
+| Content register | `GET /content` (platform admin; kinds, statuses, versions of every reviewed item) |
 | Journal | `GET /journal`, `POST /journal`, `GET/PATCH/DELETE /journal/:id` |
 | Support | `GET /support-requests/people`, `POST /support-requests`, `GET /support-requests`, `GET /support-requests/:id`, `PATCH /support-requests/:id` (professional review: status + review note) |
-| Flags | `GET /support-flags`, `POST /support-flags/:id/acknowledge`, `POST /support-flags/:id/in-review` |
+| Flags | `GET /support-flags` (`?severity=&status=&level=`), `GET /support-flags/:id`, `POST /support-flags/:id/review-decision`, `POST /support-flags/:id/acknowledge`, `POST /support-flags/:id/in-review` |
 | Dashboard | `GET /dashboard/counsellor` |
 | Follow-ups | `GET /follow-ups`, `POST /follow-ups` (professional), `PATCH /follow-ups/:id` (owner: status + notes) |
 | Consent | `GET /consent/me`, `POST /consent/accept` |

@@ -53,6 +53,16 @@ enum FeelingIntensity {
   A_LOT
 }
 
+/// US-D04: an unanswered check-in field is a recorded state, never an absence a
+/// rule can read as calm. NOT_PRESENTED means the prompt was not shown (the
+/// library gates it), which is not the same as the student declining it.
+enum CheckInAnswerState {
+  ANSWERED
+  SKIPPED
+  PREFER_NOT_TO_SAY
+  NOT_PRESENTED
+}
+
 enum ConversationStatus {
   ACTIVE
   CLOSED
@@ -73,6 +83,15 @@ enum ResourceType {
   SOUNDSCAPE
   AFFIRMATION
   TOOLKIT_ITEM
+}
+
+/// The Doc B §5 four-way "what next?" answer after a resource. Never an
+/// indicator: Doc C §5.1 forbids a click or refusal becoming risk signal.
+enum ResourceFeedbackChoice {
+  NOT_HELPFUL
+  TRY_SOMETHING_ELSE
+  WANT_TO_TALK
+  DECLINED
 }
 
 enum ResourceCategory {
@@ -134,6 +153,21 @@ enum SupportFlagSource {
   SELF_REPORT
 }
 
+/// Doc A indicator levels. U means the evidence is unclear or conflicting, not
+/// low-risk, and must never be rendered as a milder shade of A.
+enum IndicatorLevel {
+  A
+  B
+  C
+  U
+}
+
+enum SupportFlagReviewDecision {
+  NO_FURTHER_ACTION
+  FOLLOW_UP_WITH_STUDENT
+  FOLLOW_SAFEGUARDING_PROCEDURE
+}
+
 enum AiJobStatus {
   PENDING
   PROCESSING
@@ -162,54 +196,117 @@ enum AiReportReviewOutcome {
   CANNOT_ASSESS
 }
 
+// --- Content registry (Doc C §6/§7) -----------------------------------------------------
+// Every reviewer-editable string (emotion term, check-in prompt, response option, resource,
+// category) is a versioned row here, NOT hard-coded, so nothing reaches a student until an
+// authorised reviewer approves THAT exact version. Three namespaces carry different approval
+// controls (education/wellbeing/safeguarding); `status` is the gate and `resolve()` only ever
+// returns APPROVED_ACTIVE rows whose effective window contains "now".
+
+enum ContentKind {
+  EMOTION_TERM
+  CHECKIN_PROMPT
+  RESPONSE_OPTION
+  WELLBEING_RESOURCE
+  WELLBEING_ACTIVITY
+  SAFEGUARDING_PROMPT
+  AGE_BAND_RULE
+  CATEGORY
+}
+
+enum ContentStatus {
+  DRAFT
+  CONTENT_REVIEW_REQUIRED
+  APPROVED_ACTIVE
+  BLOCKED
+  SUPERSEDED
+  RETIRED
+}
+
+enum ApprovalNamespace {
+  EDUCATION
+  WELLBEING
+  SAFEGUARDING
+}
+
+/// A versioned content item. Meaning or safety change ⇒ bump major; a new item or age
+/// variant ⇒ minor; a non-meaningful fix ⇒ patch. Rollback = flip status/effectiveTo on the
+/// live row and re-activate the parent it supersedes — no deploy. `payload` holds wording,
+/// response options, steps, safety note; never copied student text.
+model ContentItem {
+  id            String            @id @default(uuid()) @db.Uuid
+  code          String // EMO-003 / CP-05 / WN-07 / AGE-13-15
+  kind          ContentKind
+  namespace     ApprovalNamespace
+  status        ContentStatus     @default(DRAFT)
+  majorVersion  Int               @default(1)
+  minorVersion  Int               @default(0)
+  patchVersion  Int               @default(0)
+  payload       Json
+  ageBand       String? // null = all bands
+  locale        String            @default("en")
+  approvedBy    String? // reviewer identity, not a bare boolean
+  approvedAt    DateTime?
+  effectiveFrom DateTime?
+  effectiveTo   DateTime?
+  supersedesId  String?           @db.Uuid
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@unique([code, majorVersion, minorVersion, patchVersion, locale])
+  @@index([kind, status, locale, ageBand])
+  @@map("content_item")
+}
+
 /// A tenant school. Soft delete = status SUSPENDED: sign-in is blocked and all
 /// school users are cut off (see tenant.guard.ts + the school-status-guard
 /// Better Auth plugin in auth.config.ts).
 model School {
-  id        String       @id @default(uuid()) @db.Uuid
-  name      String
-  shortCode String       @unique
-  status    SchoolStatus @default(ACTIVE)
+  id                  String       @id @default(uuid()) @db.Uuid
+  name                String
+  shortCode           String       @unique
+  status              SchoolStatus @default(ACTIVE)
   /// Precomputed scrypt hash (better-auth/crypto) of the school's default
   /// password. Reused as the credential for every onboarded account until the
   /// user's forced first change; never returned by any endpoint.
   defaultPasswordHash String?
-  settings  Json?
-  createdAt DateTime     @default(now())
-  updatedAt DateTime     @updatedAt
+  settings            Json?
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
 
-  users         User[]
-  chatThreads   ChatThread[]
-  auditLogs     AuditLog[]
+  users       User[]
+  chatThreads ChatThread[]
+  auditLogs   AuditLog[]
 
   @@map("school")
 }
 
 model User {
-  id                  String    @id @default(uuid()) @db.Uuid
-  name                String
-  phone               String?   @unique
-  email               String    @unique
-  emailVerified       Boolean   @default(false)
-  image               String?
-  role                UserRole  @default(STUDENT)
-  schoolId            String?   @db.Uuid
+  id                 String    @id @default(uuid()) @db.Uuid
+  name               String
+  phone              String?   @unique
+  email              String    @unique
+  emailVerified      Boolean   @default(false)
+  image              String?
+  role               UserRole  @default(STUDENT)
+  schoolId           String?   @db.Uuid
   /// Set when onboarded with the school default password; cleared by
   /// POST /api/v1/auth/first-password. Blocks all other routes (tenant.guard).
-  mustChangePassword  Boolean   @default(false)
-  deactivatedAt       DateTime?
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
+  mustChangePassword Boolean   @default(false)
+  deactivatedAt      DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
   sessions            Session[]
   accounts            Account[]
   studentProfile      StudentProfile?
   professionalProfile ProfessionalProfile?
   auditLogs           AuditLog[]
-  school              School?         @relation(fields: [schoolId], references: [id], onDelete: SetNull)
+  school              School?              @relation(fields: [schoolId], references: [id], onDelete: SetNull)
   notifications       Notification[]
   sentChatMessages    ChatMessage[]
-  reviewedAiReports   AiResponseReport[]  @relation("AiReportReview")
+  reviewedAiReports   AiResponseReport[]   @relation("AiReportReview")
+  supportRequestReads SupportRequestRead[]
 
   @@index([schoolId])
   @@map("user")
@@ -283,6 +380,7 @@ model StudentProfile {
   followUps         FollowUp[]
   journalEntries    JournalEntry[]
   toolboxItems      ToolboxItem[]
+  resourceFeedbacks ResourceFeedback[]
   consentRecords    ConsentRecord[]
   privacyPreference PrivacyPreference?
   sessionSummaries  SessionSummary[]
@@ -312,15 +410,15 @@ model ProfessionalProfile {
 }
 
 model ConsentRecord {
-  id         String    @id @default(uuid()) @db.Uuid
-  studentId  String    @db.Uuid
+  id         String         @id @default(uuid()) @db.Uuid
+  studentId  String         @db.Uuid
   version    String
-  accepted   Boolean   @default(false)
+  accepted   Boolean        @default(false)
   acceptedAt DateTime?
   metadata   Json?
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-student      StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+  student    StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
 
   @@unique([studentId, version])
   @@index([studentId])
@@ -328,13 +426,13 @@ student      StudentProfile @relation(fields: [studentId], references: [id], onD
 }
 
 model PrivacyPreference {
-  id                              String   @id @default(uuid()) @db.Uuid
-  studentId                       String   @unique @db.Uuid
-  shareAiCopingHubNotes           Boolean  @default(false)
-  allowParentGuardianNotification Boolean  @default(false)
-  requestPeerSupportCompanion     Boolean  @default(false)
-  createdAt                       DateTime @default(now())
-  updatedAt                       DateTime @updatedAt
+  id                              String         @id @default(uuid()) @db.Uuid
+  studentId                       String         @unique @db.Uuid
+  shareAiCopingHubNotes           Boolean        @default(false)
+  allowParentGuardianNotification Boolean        @default(false)
+  requestPeerSupportCompanion     Boolean        @default(false)
+  createdAt                       DateTime       @default(now())
+  updatedAt                       DateTime       @updatedAt
   student                         StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
 
   @@map("privacy_preference")
@@ -350,13 +448,52 @@ model EmotionalCheckIn {
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
 
-  student         StudentProfile   @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  conversations   Conversation[]
-  supportRequests SupportRequest[]
-  feedback        CheckInFeedback?
+  student           StudentProfile            @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  conversations     Conversation[]
+  supportRequests   SupportRequest[]
+  feedback          CheckInFeedback?
+  feelingSelections CheckInFeelingSelection[]
+  answers           CheckInAnswer[]
 
   @@index([studentId, createdAt])
   @@map("emotional_check_in")
+}
+
+/// Doc C multi-select feelings. The label is snapshotted because the register
+/// version can change or retire later; `feeling` above keeps carrying the single
+/// primary label so existing dashboards and CheckInFeedback read one release
+/// behind the change.
+model CheckInFeelingSelection {
+  id                String   @id @default(uuid()) @db.Uuid
+  checkInId         String   @db.Uuid
+  termCode          String?
+  termLabelSnapshot String
+  isStudentFreeText Boolean  @default(false)
+  createdAt         DateTime @default(now())
+
+  checkIn EmotionalCheckIn @relation(fields: [checkInId], references: [id], onDelete: Cascade)
+
+  @@index([checkInId])
+  @@map("check_in_feeling_selection")
+}
+
+/// One row per check-in prompt that was part of the flow, answered or not, so a
+/// skip stays visible as a skip (US-D04). `promptCode` / `valueCode` are register
+/// codes; free text is the student's own words, never a risk signal by itself.
+model CheckInAnswer {
+  id         String             @id @default(uuid()) @db.Uuid
+  checkInId  String             @db.Uuid
+  promptCode String
+  state      CheckInAnswerState
+  valueCode  String?
+  freeText   String?
+  createdAt  DateTime           @default(now())
+
+  checkIn EmotionalCheckIn @relation(fields: [checkInId], references: [id], onDelete: Cascade)
+
+  @@unique([checkInId, promptCode])
+  @@index([promptCode, state])
+  @@map("check_in_answer")
 }
 
 /// Post-check-in mood feedback: asked after every check-in ("how do you feel
@@ -364,12 +501,12 @@ model EmotionalCheckIn {
 /// report can measure the check-in's effect on a student's mood. One row per
 /// check-in (unique checkInId).
 model CheckInFeedback {
-  id         String           @id @default(uuid()) @db.Uuid
-  checkInId  String           @unique @db.Uuid
-  studentId  String           @db.Uuid
-  feeling    FeelingLabel
-  intensity  FeelingIntensity
-  createdAt  DateTime         @default(now())
+  id        String           @id @default(uuid()) @db.Uuid
+  checkInId String           @unique @db.Uuid
+  studentId String           @db.Uuid
+  feeling   FeelingLabel
+  intensity FeelingIntensity
+  createdAt DateTime         @default(now())
 
   checkIn EmotionalCheckIn @relation(fields: [checkInId], references: [id], onDelete: Cascade)
   student StudentProfile   @relation(fields: [studentId], references: [id], onDelete: Cascade)
@@ -391,8 +528,8 @@ model Conversation {
   createdAt DateTime           @default(now())
   updatedAt DateTime           @updatedAt
 
-  student         StudentProfile        @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  checkIn         EmotionalCheckIn?     @relation(fields: [checkInId], references: [id], onDelete: SetNull)
+  student          StudentProfile        @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  checkIn          EmotionalCheckIn?     @relation(fields: [checkInId], references: [id], onDelete: SetNull)
   messages         ConversationMessage[]
   supportRequests  SupportRequest[]
   supportFlags     SupportFlag[]
@@ -404,8 +541,8 @@ model Conversation {
 }
 
 model ConversationMessage {
-  id                  String      @id @default(uuid()) @db.Uuid
-  conversationId      String      @db.Uuid
+  id                  String            @id @default(uuid()) @db.Uuid
+  conversationId      String            @db.Uuid
   role                MessageRole
   content             String
   /// Guided-reply marker when the student tapped a quick reply instead of
@@ -416,15 +553,15 @@ model ConversationMessage {
   /// True when the student sent this turn from a voice transcription (the
   /// transcript is posted as plain content; this flag keeps the two lanes
   /// distinguishable server-side). Pilot-analytics signal only.
-  viaVoice            Boolean     @default(false)
+  viaVoice            Boolean           @default(false)
   /// Language this turn was in (student's message: detected language; reply:
   /// the language it was written in). Lets history show the model each
   /// turn's language. null on messages written before this column existed.
   language            String?
   aiPayload           Json?
   activeExerciseLabel String?
-  createdAt           DateTime @default(now())
-  conversation        Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  createdAt           DateTime          @default(now())
+  conversation        Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   aiGenerationJob     AiGenerationJob?
   report              AiResponseReport?
 
@@ -433,44 +570,71 @@ model ConversationMessage {
 }
 
 model AiResponseReport {
-  id               String   @id @default(uuid()) @db.Uuid
-  messageId        String   @unique @db.Uuid
+  id               String                 @id @default(uuid()) @db.Uuid
+  messageId        String                 @unique @db.Uuid
   responseContent  String
   responseLanguage String?
-  note             String?  @db.VarChar(2000)
+  note             String?                @db.VarChar(2000)
   /// Reviewer decision recorded in the school's review queue. Nullable = not
   /// reviewed yet; the last decision by any same-school reviewer wins.
   reviewOutcome    AiReportReviewOutcome?
-  reviewedById     String?  @db.Uuid
+  reviewedById     String?                @db.Uuid
   reviewedAt       DateTime?
-  createdAt        DateTime @default(now())
-  message          ConversationMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  reviewedBy       User?              @relation("AiReportReview", fields: [reviewedById], references: [id], onDelete: SetNull)
+  createdAt        DateTime               @default(now())
+  message          ConversationMessage    @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  reviewedBy       User?                  @relation("AiReportReview", fields: [reviewedById], references: [id], onDelete: SetNull)
 
   @@index([createdAt, id])
   @@map("ai_response_report")
 }
 
 model WellbeingResource {
-  id              String           @id @default(uuid()) @db.Uuid
-  title           String
-  description     String
-  type            ResourceType
-  category        ResourceCategory @default(GENERAL)
-  badge           String?
-  durationMinutes Int?
-  durationLabel   String?
-  ctaLabel        String?
-  mediaUrl        String?
-  tags            String[]         @default([])
-  active          Boolean          @default(true)
-  approved        Boolean          @default(false)
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
-  toolboxItems    ToolboxItem[]
+  id                String             @id @default(uuid()) @db.Uuid
+  title             String
+  description       String
+  type              ResourceType
+  category          ResourceCategory   @default(GENERAL)
+  badge             String?
+  durationMinutes   Int?
+  durationLabel     String?
+  ctaLabel          String?
+  mediaUrl          String?
+  tags              String[]           @default([])
+  /// Register code (WN-*) this row implements; approval state lives on the
+  /// ContentItem, never here. Nullable so every pre-Epic-D row stays valid.
+  contentCode       String?            @unique
+  /// Doc B §2 detail template. All nullable: a row may be published on the
+  /// legacy description-only surface until its approved copy is imported.
+  intendedSituation String?
+  instructions      String[]           @default([])
+  reflectionPrompt  String?
+  safetyNote        String?
+  active            Boolean            @default(true)
+  approved          Boolean            @default(false)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  toolboxItems      ToolboxItem[]
+  feedback          ResourceFeedback[]
 
   @@index([active, approved, category])
   @@map("wellbeing_resource")
+}
+
+/// One answer per "what next?" prompt. Read only in aggregate reports; the
+/// writer never touches SupportFlag, and no consumer may treat it as one.
+model ResourceFeedback {
+  id         String                 @id @default(uuid()) @db.Uuid
+  studentId  String                 @db.Uuid
+  resourceId String                 @db.Uuid
+  choice     ResourceFeedbackChoice
+  createdAt  DateTime               @default(now())
+
+  student  StudentProfile    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  resource WellbeingResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+
+  @@index([resourceId, createdAt])
+  @@index([studentId, createdAt])
+  @@map("resource_feedback")
 }
 
 model ToolboxItem {
@@ -501,79 +665,104 @@ model JournalEntry {
 }
 
 model SupportPerson {
-  id                String            @id @default(uuid()) @db.Uuid
-  professionalId    String?           @db.Uuid
+  id                String               @id @default(uuid()) @db.Uuid
+  professionalId    String?              @db.Uuid
   name              String
   type              SupportPersonType
   title             String?
   availabilityLabel String?
-  availableToday    Boolean           @default(false)
+  availableToday    Boolean              @default(false)
   imageUrl          String?
-  active            Boolean           @default(true)
-  createdAt         DateTime          @default(now())
-  updatedAt         DateTime          @updatedAt
+  active            Boolean              @default(true)
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
   professional      ProfessionalProfile? @relation(fields: [professionalId], references: [id], onDelete: SetNull)
   supportRequests   SupportRequest[]
 
-  @@map("support_person")
   @@index([professionalId, type])
+  @@map("support_person")
 }
 
 model SupportRequest {
-  id              String               @id @default(uuid()) @db.Uuid
-  studentId       String               @db.Uuid
-  supportPersonId String               @db.Uuid
-  personType      SupportPersonType
-  timing          SupportTiming
-  note            String?
+  id               String               @id @default(uuid()) @db.Uuid
+  studentId        String               @db.Uuid
+  supportPersonId  String               @db.Uuid
+  personType       SupportPersonType
+  timing           SupportTiming
+  note             String?
   /// Verbatim snapshot of the student's own message that prompted the request
   /// (latest USER turn of `conversationId` at creation). Frozen on purpose:
   /// later edits or deletions of the AI conversation never change what the
   /// school professional was shown. null on requests created before this
   /// column existed, and on requests with no conversation.
-  initialMessage     String?
-  initialMessageAt   DateTime?
-  reviewNote      String?
-  status          SupportRequestStatus @default(PENDING)
-  checkInId       String?              @db.Uuid
-  conversationId  String?              @db.Uuid
-  scheduledAt     DateTime?
-  locationLabel   String?
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @updatedAt
+  initialMessage   String?
+  initialMessageAt DateTime?
+  reviewNote       String?
+  status           SupportRequestStatus @default(PENDING)
+  checkInId        String?              @db.Uuid
+  conversationId   String?              @db.Uuid
+  scheduledAt      DateTime?
+  locationLabel    String?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
 
-  student       StudentProfile    @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  supportPerson SupportPerson     @relation(fields: [supportPersonId], references: [id], onDelete: Restrict)
-  checkIn       EmotionalCheckIn? @relation(fields: [checkInId], references: [id], onDelete: SetNull)
-  conversation  Conversation?     @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  student       StudentProfile       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  supportPerson SupportPerson        @relation(fields: [supportPersonId], references: [id], onDelete: Restrict)
+  checkIn       EmotionalCheckIn?    @relation(fields: [checkInId], references: [id], onDelete: SetNull)
+  conversation  Conversation?        @relation(fields: [conversationId], references: [id], onDelete: SetNull)
   followUps     FollowUp[]
+  reads         SupportRequestRead[]
 
   @@index([studentId, createdAt])
   @@map("support_request")
 }
 
-model SupportFlag {
-  id               String              @id @default(uuid()) @db.Uuid
-  studentId        String              @db.Uuid
-  conversationId   String?             @db.Uuid
-  assigneeId       String?             @db.Uuid
-  studentRef       String
-  classLabel       String?
-  triggerLabel     String
-  category         String?
-  intentId         String?
-  severity         SupportFlagSeverity
-  status           SupportFlagStatus   @default(OPEN)
-  source           SupportFlagSource
-  aiContextSummary String?
-  autoActions      String[]            @default([])
-  createdAt        DateTime            @default(now())
-  resolvedAt       DateTime?
-  updatedAt        DateTime            @updatedAt
+model SupportRequestRead {
+  requestId String   @db.Uuid
+  userId    String   @db.Uuid
+  readAt    DateTime @default(now())
 
-  student      StudentProfile        @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  conversation Conversation?         @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  assignee     ProfessionalProfile?  @relation("FlagAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  request SupportRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  user    User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([requestId, userId])
+  @@map("support_request_read")
+}
+
+model SupportFlag {
+  id                       String                     @id @default(uuid()) @db.Uuid
+  studentId                String                     @db.Uuid
+  conversationId           String?                    @db.Uuid
+  assigneeId               String?                    @db.Uuid
+  studentRef               String
+  classLabel               String?
+  triggerLabel             String
+  category                 String?
+  intentId                 String?
+  severity                 SupportFlagSeverity
+  /// Doc A G1: how serious an indicator is sits on its own axis, never derived
+  /// from `severity` (which the alert path still uses) and never guessed: a flag
+  /// from a rule with no approved level reads as unclassified.
+  level                    IndicatorLevel?
+  ruleId                   String?
+  ruleVersion              String?
+  /// G4: the human decision is a fact apart from the workflow status, so
+  /// "acknowledged" and "safeguarding procedure opened" stay distinguishable.
+  reviewDecision           SupportFlagReviewDecision?
+  /// Verbatim student line frozen at creation (US-D02), reusing the
+  /// SupportRequest.initialMessage pattern instead of re-reading live chat.
+  studentStatementSnapshot String?
+  status                   SupportFlagStatus          @default(OPEN)
+  source                   SupportFlagSource
+  aiContextSummary         String?
+  autoActions              String[]                   @default([])
+  createdAt                DateTime                   @default(now())
+  resolvedAt               DateTime?
+  updatedAt                DateTime                   @updatedAt
+
+  student      StudentProfile       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  conversation Conversation?        @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  assignee     ProfessionalProfile? @relation("FlagAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
 
   @@index([status, severity, createdAt])
   @@map("support_flag")
@@ -591,25 +780,32 @@ model FollowUp {
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
 
-  student        StudentProfile        @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  professional   ProfessionalProfile?  @relation(fields: [professionalId], references: [id], onDelete: SetNull)
-  supportRequest SupportRequest?       @relation(fields: [supportRequestId], references: [id], onDelete: SetNull)
+  student        StudentProfile       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  professional   ProfessionalProfile? @relation(fields: [professionalId], references: [id], onDelete: SetNull)
+  supportRequest SupportRequest?      @relation(fields: [supportRequestId], references: [id], onDelete: SetNull)
 
   @@index([studentId, status])
   @@map("follow_up")
 }
 
 model AuditLog {
-  id        String   @id @default(uuid()) @db.Uuid
-  actorId   String?  @db.Uuid
-  action    String
-  entity    String
-  entityId  String?
-  meta      Json?
-  schoolId  String?  @db.Uuid
-  createdAt DateTime @default(now())
-  actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
-  school    School?  @relation(fields: [schoolId], references: [id], onDelete: SetNull)
+  id          String   @id @default(uuid()) @db.Uuid
+  actorId     String?  @db.Uuid
+  action      String
+  entity      String
+  entityId    String?
+  meta        Json?
+  schoolId    String?  @db.Uuid
+  // Optional provenance carried by reviewed record transitions (US-D03/D10): the prior and
+  // new lifecycle state and the indicator rule that produced them. Nullable and additive so
+  // every existing audit row and caller keeps working untouched.
+  priorStatus String?
+  newStatus   String?
+  ruleId      String?
+  ruleVersion String?
+  createdAt   DateTime @default(now())
+  actor       User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  school      School?  @relation(fields: [schoolId], references: [id], onDelete: SetNull)
 
   @@index([entity, entityId])
   @@index([createdAt])
@@ -621,16 +817,16 @@ model AuditLog {
 /// synchronous attempt. The worker (src/ai/ai-worker.service.ts) re-runs the
 /// orchestration and updates the placeholder message in place.
 model AiGenerationJob {
-  id                    String      @id @default(uuid()) @db.Uuid
-  conversationMessageId String?     @unique @db.Uuid
-  kind                  AiJobKind   @default(REPLY)
+  id                    String               @id @default(uuid()) @db.Uuid
+  conversationMessageId String?              @unique @db.Uuid
+  kind                  AiJobKind            @default(REPLY)
   input                 Json
-  attempts              Int         @default(0)
+  attempts              Int                  @default(0)
   lastError             String?
   nextRetryAt           DateTime?
-  status                AiJobStatus @default(PENDING)
-  createdAt             DateTime    @default(now())
-  updatedAt             DateTime    @updatedAt
+  status                AiJobStatus          @default(PENDING)
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
   message               ConversationMessage? @relation(fields: [conversationMessageId], references: [id], onDelete: Cascade)
 
   @@index([status, nextRetryAt])
@@ -661,17 +857,17 @@ model AiUsageDaily {
 /// `embedding` is pgvector-owned raw SQL (see src/ai/memory/memory.repository.ts);
 /// the schema marks it for typing only.
 model SessionSummary {
-  id                    String   @id @default(uuid()) @db.Uuid
-  studentId             String   @db.Uuid
-  conversationId        String   @unique @db.Uuid
-  summary               String   @db.VarChar(400)
+  id                    String                       @id @default(uuid()) @db.Uuid
+  studentId             String                       @db.Uuid
+  conversationId        String                       @unique @db.Uuid
+  summary               String                       @db.VarChar(400)
   topics                String[]
-  followUpHook          String?  @db.VarChar(140)
+  followUpHook          String?                      @db.VarChar(140)
   emotionalTrend        String?
   summaryLocalized      String?
   followUpHookLocalized String?
   embedding             Unsupported("vector(1536)")?
-  createdAt             DateTime @default(now())
+  createdAt             DateTime                     @default(now())
 
   student      StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
   conversation Conversation   @relation(fields: [conversationId], references: [id], onDelete: Cascade)
@@ -695,6 +891,7 @@ model WellbeingActivity {
   active          Boolean          @default(true)
   approved        Boolean          @default(false)
   tags            String[]         @default([])
+  contentCode     String?          @unique
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
 
@@ -731,22 +928,22 @@ model ActivitySession {
 /// professional claimed it) → CLOSED. Deliberately separate from Conversation
 /// (the AI Reflect lane) — no AI runs inside the thread after the entry note.
 model ChatThread {
-  id             String           @id @default(uuid()) @db.Uuid
-  schoolId       String           @db.Uuid
-  studentId      String           @db.Uuid
-  professionalId String?          @db.Uuid
-  status         ChatThreadStatus @default(PENDING)
-  entryCheckInId String?          @db.Uuid
+  id                 String           @id @default(uuid()) @db.Uuid
+  schoolId           String           @db.Uuid
+  studentId          String           @db.Uuid
+  professionalId     String?          @db.Uuid
+  status             ChatThreadStatus @default(PENDING)
+  entryCheckInId     String?          @db.Uuid
   /// AI-composed opening note shown to professionals in the request pool.
-  aiEntrySummary String?
+  aiEntrySummary     String?
   /// Per-participant read markers backing the unread badge.
-  studentReadAt       DateTime?
-  professionalReadAt  DateTime?
+  studentReadAt      DateTime?
+  professionalReadAt DateTime?
   /// Lifecycle stamps for the admin chat-thread register.
-  claimedAt      DateTime?
-  closedAt       DateTime?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  claimedAt          DateTime?
+  closedAt           DateTime?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
 
   school       School               @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   student      StudentProfile       @relation(fields: [studentId], references: [id], onDelete: Cascade)
