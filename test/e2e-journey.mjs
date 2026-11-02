@@ -306,8 +306,10 @@ async function main() {
   );
   await db(
     `INSERT INTO account (id, "userId", "accountId", "providerId", password, "createdAt", "updatedAt")
-     VALUES ($1, $2, $2, 'credential', $3, now(), now())`,
-    [randomUUID(), ownerId, await hashPassword(OWNER.password)],
+     VALUES ($1, $2, $3, 'credential', $4, now(), now())`,
+    // "userId" is uuid and "accountId" is text: one placeholder for both makes Postgres
+    // fail with "inconsistent types deduced for parameter". Do not collapse $2/$3.
+    [randomUUID(), ownerId, ownerId, await hashPassword(OWNER.password)],
   );
   res = await api(owner, 'POST', '/api/auth/sign-in/email', { email: OWNER.email, password: OWNER.password });
   check('platform owner signs in', res.status === 200 && res.body?.user?.role === 'PLATFORM_ADMIN', `status ${res.status}`);
