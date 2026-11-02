@@ -214,12 +214,20 @@ The alert recipient currently resolves school-agnostically
 schema.prisma:504) → an escalation can land on another school's staff. This is a real tenancy
 defect (tracked in project memory), fixable without inventing contacts.
 
-- Add `schoolId String? @db.Uuid` to `SupportPerson` (relation to `School`); index it.
-- Scope the TIER_3 recipient selection to the student's school. No school staff / school-less
-  student → audit `recipients:0`, alert failure never fails the flag (existing pattern).
+- **Corrected as built (2026-11-02):** no `schoolId` column was added to `SupportPerson`, and
+  none should be. Tenancy already has one source of truth — `supportPeopleInSchool(schoolId)`
+  in `src/common/tenant/school-scope.ts` reads the school through `professional.user.schoolId`,
+  so a staff account that moves schools moves its directory entry with it and the two cannot
+  disagree. A second, denormalised copy would have been a drift bug with a migration attached.
+- Scope the TIER_3 recipient selection to the student's school through that predicate. No
+  school staff / school-less student → audit `recipients:0`, alert failure never fails the flag
+  (existing pattern).
 - Spec: SEC-01 — a cross-school escalation never leaves the school.
-- **UI keeps the honest "not available yet" framing** — the route itself is still unconfirmed
-  until D8.
+- **Corrected as built:** the "not available yet" framing is obsolete. Slice 4 replaced the
+  `/school/indicators` placeholder with the real queue, so the honest statement is the one now
+  in the page's own caption and in `indicators.guide.tsx`: the workspace is live, every rule in
+  the catalogue is still switched off, and what reaches a reviewer arrives through the keyword
+  floor. The route configuration D8 withholds is the *notification pathway*, not the screen.
 
 **Deferred to D8 (not implementable):** per-school urgent routes, coverage hours, backup
 route, delivery + acknowledgement states, retry/failure recording, SLA. No placeholder
@@ -238,9 +246,29 @@ AI-cannot-close, tenancy matrix). Manual `:5050` journeys (student home→catego
 next-step→support request; staff list→filter→detail→decision→status); explicitly record what
 was **not** exercised (`tailored`, Level U with no data, an unconfigured route).
 
+**§8 as actually encoded (2026-11-02).** Nine of the fourteen rows are single-message
+classification and are in the corpus: A-01, A-02, B-01, B-02, B-03, C-01, C-02, C-03 and P-01,
+each written so its content genuinely contains the keyword it claims to fire on. The other five
+were not forced into that shape, because doing so would have produced a passing test that
+asserts nothing: U-01 and U-02 live in `src/ai/intents/indicator-uncertainty.spec.ts` (level U
+is a refusal to conclude, not an escalation expectation, and a skipped prompt is a check-in
+field rather than a message); SEC-01 lives in the cross-school tests of
+`support-flags.service.spec.ts` and `support-requests.service.spec.ts`; WF-01 lives in
+`support-requests.service.spec.ts`; and **R-01 is not written at all** — there is no school
+escalation route to make fail until D8 configures one, so any "fallback activated" assertion
+today would be fiction. `P-01` is the calm-framing precedence row; `U-02` is pinned as the
+vocabulary guard it can be: `CheckInAnswerState` has no member that reads as an all-clear, and
+no indicator rule fires on an absent answer.
+
+**Still outstanding:** `npm run test:e2e:journey` ×2 and both manual `:5050` journeys — all of
+them blocked on applying the five Epic D migrations, since the new code reads columns no
+database has yet.
+
 ## Ordering & state
 
 Ship in order 1 → 2 → 3 → 4 → 5a; each is its own migration + spec set on its own branch.
+**Executed as 5a → 1 → 2 → 3 → 4** instead, on the owner's instruction to take the simplest and
+most bug-like slice first; 5a is a tenancy defect and had no dependency on the register.
 Slices 1/2/3/5a change **nothing student-facing** in behaviour (register + structure + honest
 labels only); Slice 2's three fixes and Slice 4's surfaces are the student/staff-visible
 parts. The blocked pieces (D1–D9, D6 copy) are recorded in each slice's "Does NOT do", so a

@@ -302,7 +302,14 @@ describe('SupportRequestsService', () => {
       supportRequestRead: { upsert: vi.fn() },
       user: { findUnique: vi.fn() },
       studentProfile: { findUnique: vi.fn() },
-      supportFlag: { findMany: vi.fn() },
+      supportFlag: {
+        findMany: vi.fn(),
+        // Present only so WF-01 can prove they are never called: a request
+        // cancellation must not reach into the indicator record.
+        update: vi.fn(),
+        updateMany: vi.fn(),
+        deleteMany: vi.fn(),
+      },
       conversation: { findFirst: vi.fn() },
       conversationMessage: { findFirst: vi.fn() },
     };
@@ -825,6 +832,42 @@ describe('SupportRequestsService', () => {
 
     expect(prisma.supportRequest.findFirst).not.toHaveBeenCalled();
     expect(prisma.supportRequest.update).not.toHaveBeenCalled();
+  });
+
+  // Doc A §8 WF-01: a request and the indicator that prompted it are two
+  // records with two lifecycles. Closing the conversation must not close the
+  // safeguarding concern — only the request moves, and the audit row names the
+  // request so no reader can infer the indicator was resolved alongside it.
+  it('cancels only the request and never reaches the linked indicator', async () => {
+    prisma.supportRequest.findFirst.mockResolvedValue({
+      id: 'req-1',
+      studentId: 'student-1',
+      status: SupportRequestStatus.PENDING,
+      reviewNote: null,
+      note: 'I need to talk to someone',
+    });
+    prisma.supportRequest.update.mockResolvedValue({
+      id: 'req-1',
+      status: SupportRequestStatus.CANCELLED,
+      supportPerson: null,
+    });
+
+    await service.review('staff-1', 'req-1', {
+      status: SupportRequestStatus.CANCELLED,
+      reviewNote: 'Student asked to stop',
+    });
+
+    expect(prisma.supportRequest.update).toHaveBeenCalledTimes(1);
+    expect(prisma.supportFlag.update).not.toHaveBeenCalled();
+    expect(prisma.supportFlag.updateMany).not.toHaveBeenCalled();
+    expect(prisma.supportFlag.deleteMany).not.toHaveBeenCalled();
+    expect(audit.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'support_request.status_changed',
+        entity: 'SupportRequest',
+        entityId: 'req-1',
+      }),
+    );
   });
 
   describe('listQueue (staff review queue)', () => {
