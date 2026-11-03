@@ -212,4 +212,64 @@ describe('ContentService — the register gate (Doc C §6/§7)', () => {
       ).rejects.toThrow('CP-03, CP-04');
     });
   });
+
+  describe('liveCodes — what a catalogue may show right now', () => {
+    it('asks the register for one kind, in one read', async () => {
+      await service.liveCodes({ kind: ContentKind.WELLBEING_RESOURCE });
+
+      expect(prisma.contentItem.findMany).toHaveBeenCalledWith({
+        where: { kind: ContentKind.WELLBEING_RESOURCE, locale: 'en' },
+        select: {
+          code: true,
+          status: true,
+          effectiveFrom: true,
+          effectiveTo: true,
+        },
+      });
+    });
+
+    it('keeps only approved rows inside the effective window', async () => {
+      prisma.contentItem.findMany.mockResolvedValue([
+        item({ code: 'WN-01' }),
+        item({ code: 'WN-02', status: ContentStatus.CONTENT_REVIEW_REQUIRED }),
+        item({ code: 'WN-03', status: ContentStatus.DRAFT }),
+        item({ code: 'WN-04', status: ContentStatus.SUPERSEDED }),
+        item({ code: 'WN-05', status: ContentStatus.RETIRED }),
+        item({ code: 'WN-06', effectiveFrom: new Date('2026-12-01T00:00:00.000Z') }),
+        item({ code: 'WN-07', effectiveTo: new Date('2026-01-01T00:00:00.000Z') }),
+      ]);
+
+      const live = await service.liveCodes({
+        kind: ContentKind.WELLBEING_RESOURCE,
+        now: new Date('2026-06-01T00:00:00.000Z'),
+      });
+
+      expect([...live]).toEqual(['WN-01']);
+    });
+
+    it('lets a BLOCKED row veto a code that also has an approved version', async () => {
+      prisma.contentItem.findMany.mockResolvedValue([
+        item({ code: 'WN-08' }),
+        item({ code: 'WN-08', status: ContentStatus.BLOCKED, id: 'row-2' }),
+      ]);
+
+      const live = await service.liveCodes({
+        kind: ContentKind.WELLBEING_RESOURCE,
+      });
+
+      expect(live.has('WN-08')).toBe(false);
+    });
+
+    it('does not let age band gate a code — bands change wording, not meaning', async () => {
+      prisma.contentItem.findMany.mockResolvedValue([
+        item({ code: 'WN-09', ageBand: '13-15' }),
+      ]);
+
+      const live = await service.liveCodes({
+        kind: ContentKind.WELLBEING_RESOURCE,
+      });
+
+      expect([...live]).toEqual(['WN-09']);
+    });
+  });
 });

@@ -567,16 +567,86 @@ async function main() {
 
   // ---------------------------------------------------------------- act 6
   act('Act 6 — resources, toolbox, journal, support request');
+  // The content register — not the row booleans — decides what a student sees
+  // (Doc B §5, Doc C §1). This local DB still carries the five invented seed
+  // placeholder rows with approved: true and no contentCode, so Act 6 is the
+  // proof that they are now invisible, and that a register-approved row is not.
+  const CODED_TITLE = '[e2e] register-approved breathing';
+  const UNCODED_TITLE = '[e2e] approved on the table only';
+  await db(`DELETE FROM wellbeing_resource WHERE title IN ($1, $2)`, [CODED_TITLE, UNCODED_TITLE]);
+  res = await api(jude, 'GET', '/api/v1/resources');
+  const unapproved = (data(res)?.items ?? []).filter((r) => !r.contentCode);
+  check('no row without a register code reaches the catalogue', unapproved.length === 0, `${unapproved.length} leaked: ${unapproved.map((r) => r.title).join(', ')}`);
+  check('the invented seed placeholders are gone', !(data(res)?.items ?? []).some((r) => /Navigating Exam Stress|Not All On You|Chill Breath|Palm-Wine|Without the Fear/.test(r.title ?? '')), (data(res)?.items ?? []).map((r) => r.title).join(', '));
+
+  await db(
+    `INSERT INTO content_item (id, code, kind, namespace, status, payload, "createdAt", "updatedAt")
+     VALUES ($1, 'WN-01', 'WELLBEING_RESOURCE', 'WELLBEING', 'CONTENT_REVIEW_REQUIRED', '{}'::jsonb, now(), now())
+     ON CONFLICT DO NOTHING`,
+    [randomUUID()],
+  );
+  await db(
+    `UPDATE content_item SET status = 'APPROVED_ACTIVE', "approvedBy" = 'e2e-journey'
+     WHERE code = 'WN-01' AND kind = 'WELLBEING_RESOURCE'`,
+  );
+  await db(
+    `INSERT INTO wellbeing_resource (id, title, description, type, category, "contentCode", instructions, active, approved, "createdAt", "updatedAt")
+     VALUES ($1, $2, 'One breathing step the register has approved.', 'SOMATIC_EXERCISE', 'GROUNDING', 'WN-01', ARRAY['Breathe in for four, out for six.'], true, true, now(), now())`,
+    [randomUUID(), CODED_TITLE],
+  );
+  await db(
+    `INSERT INTO wellbeing_resource (id, title, description, type, category, active, approved, "createdAt", "updatedAt")
+     VALUES ($1, $2, 'Approved by the boolean alone — never registered, never reviewed.', 'ARTICLE', 'GROUNDING', true, true, now(), now())`,
+    [randomUUID(), UNCODED_TITLE],
+  );
+
   res = await api(jude, 'GET', '/api/v1/resources');
   const resources = data(res)?.items ?? [];
-  check('resource catalogue present (seed ≥5)', resources.length >= 5, String(resources.length));
+  const codedResource = resources.find((r) => r.title === CODED_TITLE);
+  check('the register-approved row appears', !!codedResource, `${resources.length} rows`);
+  check('and the boolean-approved row still does not', !resources.some((r) => r.title === UNCODED_TITLE));
+
   res = await api(jude, 'GET', '/api/v1/resources/tailored', undefined);
-  check('tailored resources exist', ((data(res)?.items ?? []).length >= 1));
-  const groundingResource = resources.find((r) => r.category === 'GROUNDING');
-  res = await api(jude, 'POST', '/api/v1/resources/toolbox', { resourceId: groundingResource?.id ?? resources[0].id });
+  const tailored = data(res);
+  check('tailored offers a resource', (tailored?.items ?? []).length >= 1, `${tailored?.items?.length}`);
+  check('the title only claims personalisation when the basis earned it', (tailored?.title === 'Picked for you') === (tailored?.basis === 'STATED_NEED'), `title ${tailored?.title} · basis ${tailored?.basis}`);
+  check("a SAD_LOW check-in gets the neutral surface, not 'Picked for you'", tailored?.basis === 'NEWEST_APPROVED', `basis ${tailored?.basis}`);
+
+  // The client names no check-in id: the service must resolve the newest one
+  // itself, or "from your check-in" would be a claim the frontend invented.
+  res = await api(jude, 'POST', '/api/v1/check-ins', {
+    feeling: 'STRESSED',
+    intensity: 'A_LOT',
+    description: 'Act 6 personalisation probe.',
+    triggers: ['exam pressure'],
+  });
+  const stressedCheckIn = data(res);
+  check('second check-in created', stressedCheckIn?.feeling === 'STRESSED', `status ${res.status}`);
+  res = await api(jude, 'GET', '/api/v1/resources/tailored', undefined);
+  const personalised = data(res);
+  check('the newest check-in drives the claim without the client naming it', personalised?.basis === 'STATED_NEED' && personalised?.title === 'Picked for you', `title ${personalised?.title} · basis ${personalised?.basis}`);
+  check('and it only ever offers the three reviewed groupings', (personalised?.items ?? []).every((r) => ['EXAM_STRESS', 'GROUNDING', 'ANXIETY'].includes(r.category)), (personalised?.items ?? []).map((r) => r.category).join(', '));
+
+  res = await api(jude, 'POST', '/api/v1/resources/toolbox', { resourceId: codedResource.id });
   check('toolbox save', res.status === 201 || res.status === 200, `status ${res.status}`);
+  const uncodedRow = await db(`SELECT id FROM wellbeing_resource WHERE title = $1`, [UNCODED_TITLE]);
+  res = await api(jude, 'POST', '/api/v1/resources/toolbox', { resourceId: uncodedRow.rows[0].id });
+  check('saving an unreviewed resource is refused, not quietly stored', res.status === 404, `status ${res.status}`);
   res = await api(jude, 'GET', '/api/v1/resources/toolbox');
   check('toolbox lists saved resource', data(res)?.count === 1);
+
+  // Put the register back, so a run leaves the local DB as honest as it found
+  // it. E2E_KEEP_RESOURCES=1 skips the restore — that is how a browser pass
+  // gets one real approved resource to look at, without anyone hand-editing SQL.
+  if (process.env.E2E_KEEP_RESOURCES === '1') {
+    console.log('  E2E_KEEP_RESOURCES=1 — the [e2e] resource and the WN-01 approval stay put.');
+  } else {
+    await db(`DELETE FROM wellbeing_resource WHERE title IN ($1, $2)`, [CODED_TITLE, UNCODED_TITLE]);
+    await db(
+      `UPDATE content_item SET status = 'CONTENT_REVIEW_REQUIRED', "approvedBy" = NULL
+       WHERE code = 'WN-01' AND kind = 'WELLBEING_RESOURCE'`,
+    );
+  }
 
   res = await api(jude, 'POST', '/api/v1/journal', { title: 'Rough day', content: 'Long notes about the exam-week haze and the loud hostel.', prompt: 'good news' });
   const jEntry = data(res);

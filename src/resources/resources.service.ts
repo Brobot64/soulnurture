@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { FeelingLabel, Prisma, ResourceCategory } from '@prisma/client';
+import { ContentKind, FeelingLabel, Prisma, ResourceCategory } from '@prisma/client';
+import { ContentService } from '../content/content.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
 import type { ResourceFeedbackDto } from './dto/resource-feedback.dto.js';
@@ -27,13 +28,34 @@ export class ResourcesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly studentsService: StudentsService,
+    private readonly contentService: ContentService,
   ) {}
+
+  /**
+   * The one definition of "a student may see this" (Doc B §5, Doc C §1).
+   *
+   * `approved` on the row is a publisher's intention; the content register is
+   * the review record, and a resource needs both. A row with no `contentCode`
+   * can therefore never appear: nothing has reviewed a string that was never
+   * registered, which is precisely the promise "reviewed and approved before
+   * students see it" makes to a student — and precisely what the five seeded
+   * placeholder rows used to break while they carried `approved: true`.
+   *
+   * An empty set is a real answer, not a bug to guard: `contentCode: { in: [] }`
+   * matches nothing, so an unapproved register empties the catalogue rather
+   * than falling back to the boolean.
+   */
+  private async visibleWhere(): Promise<Prisma.WellbeingResourceWhereInput> {
+    const codes = await this.contentService.liveCodes({
+      kind: ContentKind.WELLBEING_RESOURCE,
+    });
+    return { active: true, approved: true, contentCode: { in: [...codes] } };
+  }
 
   async list(userId: string, query: ResourceQueryDto) {
     const student = await this.studentsService.ensureProfile(userId);
     const where: Prisma.WellbeingResourceWhereInput = {
-      active: true,
-      approved: true,
+      ...(await this.visibleWhere()),
       ...(query.category ? { category: query.category } : {}),
       ...(query.type ? { type: query.type } : {}),
       ...(query.search
@@ -58,47 +80,75 @@ export class ResourcesService {
     return { items, savedCount };
   }
 
+  /**
+   * Doc B §2 allows the words "Picked for you" only when a stated need or a
+   * chosen category drove the selection, so the response says which of the two
+   * rules actually fired. Without that flag a surface would have to read its
+   * own title to know whether it is allowed to claim personalisation.
+   *
+   * The newest check-in is resolved here rather than passed in: a student does
+   * not know their check-in ids, and a client that had to supply one would
+   * quietly turn "from your check-in" into a claim it invented.
+   */
   async tailored(userId: string, checkInId?: string) {
     const student = await this.studentsService.ensureProfile(userId);
-    let where: Prisma.WellbeingResourceWhereInput = {
-      active: true,
-      approved: true,
-    };
+    let where: Prisma.WellbeingResourceWhereInput = await this.visibleWhere();
     let title = 'Featured resources';
     let rationale = 'The newest approved resources, in case you want something to try.';
-    if (checkInId) {
-      const checkIn = await this.prisma.emotionalCheckIn.findFirst({
-        where: { id: checkInId, studentId: student.id },
-      });
-      const statedNeed = checkIn ? STATED_NEED_LABELS[checkIn.feeling] : undefined;
-      if (statedNeed) {
-        where = { ...where, OR: STATED_NEED_CATEGORIES.map((category) => ({ category })) };
-        title = 'Picked for you';
-        rationale = `You said you feel ${statedNeed}, so these are the exam-stress, anxiety and grounding resources.`;
-      }
+    let basis: 'STATED_NEED' | 'NEWEST_APPROVED' = 'NEWEST_APPROVED';
+
+    const checkIn = checkInId
+      ? await this.prisma.emotionalCheckIn.findFirst({
+          where: { id: checkInId, studentId: student.id },
+        })
+      : await this.prisma.emotionalCheckIn.findFirst({
+          where: { studentId: student.id },
+          orderBy: { createdAt: 'desc' },
+        });
+    const statedNeed = checkIn ? STATED_NEED_LABELS[checkIn.feeling] : undefined;
+    if (statedNeed) {
+      where = { ...where, OR: STATED_NEED_CATEGORIES.map((category) => ({ category })) };
+      title = 'Picked for you';
+      rationale = `You said you feel ${statedNeed}, so these are the exam-stress, anxiety and grounding resources.`;
+      basis = 'STATED_NEED';
     }
+
     const items = await this.prisma.wellbeingResource.findMany({
       where,
       take: 3,
       orderBy: { updatedAt: 'desc' },
     });
-    return { title, rationale, items };
+    return { title, rationale, basis, items };
   }
 
   async toolbox(userId: string) {
     const student = await this.studentsService.ensureProfile(userId);
+    const codes = await this.contentService.liveCodes({
+      kind: ContentKind.WELLBEING_RESOURCE,
+    });
     const rows = await this.prisma.toolboxItem.findMany({
       where: { studentId: student.id },
       include: { resource: true },
       orderBy: { createdAt: 'desc' },
     });
-    return { items: rows.map((r) => r.resource), count: rows.length };
+    // A save outlives the review that allowed it. The student keeps the row
+    // only while the register still approves the resource inside it.
+    const items = rows
+      .map((r) => r.resource)
+      .filter(
+        (resource) =>
+          resource.active &&
+          resource.approved &&
+          resource.contentCode !== null &&
+          codes.has(resource.contentCode),
+      );
+    return { items, count: items.length };
   }
 
   async saveToolbox(userId: string, resourceId: string) {
     const student = await this.studentsService.ensureProfile(userId);
     const resource = await this.prisma.wellbeingResource.findFirst({
-      where: { id: resourceId, active: true, approved: true },
+      where: { id: resourceId, ...(await this.visibleWhere()) },
     });
     if (!resource) throw new NotFoundException('Resource not found');
     await this.prisma.toolboxItem.upsert({
@@ -118,7 +168,7 @@ export class ResourcesService {
   async recordFeedback(userId: string, body: ResourceFeedbackDto) {
     const student = await this.studentsService.ensureProfile(userId);
     const resource = await this.prisma.wellbeingResource.findFirst({
-      where: { id: body.resourceId, active: true, approved: true },
+      where: { id: body.resourceId, ...(await this.visibleWhere()) },
       select: { id: true },
     });
     if (!resource) throw new NotFoundException('Resource not found');

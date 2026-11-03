@@ -95,6 +95,53 @@ export class ContentService {
     }
   }
 
+  /**
+   * The codes of a whole kind that may be shown right now.
+   *
+   * `resolve` answers "give me THESE codes", which needs a caller that already
+   * knows them. A catalogue does not: it must ask the register what is live and
+   * then read only those rows, so the SQL filter and the returned count are
+   * built from one predicate instead of filtering after the fact.
+   *
+   * A BLOCKED row vetoes its code even when an approved version exists —
+   * safeguarding withdrawal outranks the version trail. SUPERSEDED and RETIRED
+   * rows do not veto, because every live version carries a history of them; a
+   * code that is merely retired has no APPROVED_ACTIVE row and drops out on its
+   * own. Age band does not gate a code: bands change wording only (Doc C §2).
+   */
+  async liveCodes(input: {
+    kind: ContentKind;
+    locale?: string;
+    now?: Date;
+  }): Promise<Set<string>> {
+    const locale = input.locale ?? 'en';
+    const now = input.now ?? new Date();
+
+    const rows = await this.prisma.contentItem.findMany({
+      where: { kind: input.kind, locale },
+      select: {
+        code: true,
+        status: true,
+        effectiveFrom: true,
+        effectiveTo: true,
+      },
+    });
+
+    const vetoed = new Set(
+      rows.filter((r) => r.status === ContentStatus.BLOCKED).map((r) => r.code),
+    );
+
+    const live = new Set<string>();
+    for (const row of rows) {
+      if (vetoed.has(row.code)) continue;
+      if (row.status !== ContentStatus.APPROVED_ACTIVE) continue;
+      if (row.effectiveFrom && row.effectiveFrom.getTime() > now.getTime()) continue;
+      if (row.effectiveTo && row.effectiveTo.getTime() <= now.getTime()) continue;
+      live.add(row.code);
+    }
+    return live;
+  }
+
   /** The register as a table, for the PLATFORM_ADMIN view and the rollback drill. */
   list(filter: {
     kind?: ContentKind;
