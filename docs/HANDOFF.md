@@ -449,6 +449,10 @@ The uncertainty spec guards a *direction of inference*, which is what §8's two 
 
 **Still not seen in a browser:** everything staff-side, including ab08's new column — the local staff password is still dead (above), and creating or repairing an account was not authorised. Ask the owner for creds or have him open `/school/requests` himself.
 
+**Committed and pushed:** `natlas EPIC_D_QA_GUARDS_001` @ `5b52d18`, `frontend EPIC_D_SURFACES_002` @ `7bcbd3b` (both to `origin`/Brobot64; nothing merged to `main`, nothing deployed).
+
+**Where Epic D now stands.** Re-checking Stage 4 against the code, the surfaces the plan names are all built: level chips counted on the same scope they filter (`levelCounts` in `support-flags.service.ts`), the dashboard's indicator tile kept deliberately apart from the request tiles (`CounsellorDashboard.tsx:310`), the linked-record references in both directions, the role-denied view, and the review-recorded confirmation. What is left is **not code**: ab04 waits on a Doc A amendment plus a `reviewNote` migration; Stage 5's escalation waits on D8's per-school routes; and the rules all remain `configured:false` pending D5/D9. So the corrected open list for the next session is: (1) working staff creds → browser-pass ab05/ab06/ab07/ab08; (2) ab04's spec decision; (3) the five Epic D migrations still local-only on prod; (4) the nine untracked `test/*.mjs` probes, still the owner's call; (5) Epics F/G/H, specced and unbuilt.
+
 ---
 
 ## 1. Who we are building (30-second orientation)
