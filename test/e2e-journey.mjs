@@ -629,6 +629,27 @@ async function main() {
   res = await api(eric, 'POST', `/api/v1/support-flags/${flagId}/in-review`);
   check('flag in-review', res.status === 201 || res.status === 200, `status ${res.status}`);
 
+  // ab01 shipped two reads on this queue, and both need a real Postgres behind
+  // them: a relation filter inside the `where` that `groupBy` counts on is not
+  // something a mocked unit test can prove, and a "Linked request" cell is only
+  // honest if the request it names really exists.
+  res = await api(eric, 'GET', '/api/v1/support-flags?level=U&q=jude.okonkwo');
+  check('student search on the indicator queue answers 200 with the level filter applied', res.status === 200, `status ${res.status}`);
+  res = await api(eric, 'GET', '/api/v1/support-flags?q=jude.okonkwo');
+  const searched = data(res)?.items ?? [];
+  check('indicator search finds Jude by his account email', searched.length === flags.length && searched.length >= 1, `${searched.length} of ${flags.length}`);
+  res = await api(eric, 'GET', '/api/v1/support-flags?q=no-such-student-anywhere');
+  const unmatched = data(res);
+  check('a search with no match empties the rows and the chip counts together', (unmatched?.items ?? []).length === 0 && Object.values(unmatched?.levelCounts ?? {}).every((n) => n === 0), JSON.stringify(unmatched?.levelCounts));
+  check('the indicator names the request that shares its conversation', flags.some((f) => f.conversationId === conversation.id && f.linkedRequest?.id === supportRequest.id), flags.map((f) => `${f.conversationId}/${f.linkedRequest?.id ?? 'none'}`).join(','));
+  check('a flag on no conversation links no request', flags.every((f) => (f.conversationId ? true : f.linkedRequest === null)));
+
+  res = await api(eric, 'GET', `/api/v1/support-flags/${flagId}`);
+  check('flag detail names the linked request as a reference, not a merged status', data(res)?.systemMetadata?.linkedRequest?.status !== undefined && data(res)?.systemMetadata?.status === 'IN_REVIEW', `${data(res)?.systemMetadata?.status}/${data(res)?.systemMetadata?.linkedRequest?.id ?? 'none'}`);
+  res = await api(eric, 'POST', `/api/v1/support-flags/${flagId}/review-decision`, { decision: 'FOLLOW_UP_WITH_STUDENT' });
+  const recorded = data(res);
+  check('recording a decision answers with the server time and the status it left alone', recorded?.decision === 'FOLLOW_UP_WITH_STUDENT' && recorded?.status === 'IN_REVIEW' && typeof recorded?.recordedAt === 'string', `${recorded?.status}/${recorded?.recordedAt}`);
+
   res = await api(eric, 'PATCH', `/api/v1/support-requests/${supportRequest.id}`, {
     status: 'ACCEPTED',
     reviewNote: 'Jude, come by my office at 10am.',

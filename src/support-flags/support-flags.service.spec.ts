@@ -34,6 +34,7 @@ function flagRow(overrides: Record<string, unknown> = {}) {
     aiContextSummary: 'Student describes physical anxiety before exams.',
     studentRef: 'SS-1042',
     classLabel: 'SS2 B',
+    studentId: 'stu-1',
     ...overrides,
   };
 }
@@ -43,6 +44,10 @@ describe('SupportFlagsService', () => {
   let prisma: {
     user: { findUnique: ReturnType<typeof vi.fn> };
     conversation: { findMany: ReturnType<typeof vi.fn> };
+    supportRequest: {
+      findMany: ReturnType<typeof vi.fn>;
+      findFirst: ReturnType<typeof vi.fn>;
+    };
     supportFlag: Record<string, ReturnType<typeof vi.fn>>;
   };
   let audit: { log: ReturnType<typeof vi.fn> };
@@ -51,6 +56,10 @@ describe('SupportFlagsService', () => {
     prisma = {
       user: { findUnique: vi.fn().mockResolvedValue({ schoolId: 'school-1' }) },
       conversation: { findMany: vi.fn() },
+      supportRequest: {
+        findMany: vi.fn().mockResolvedValue([]),
+        findFirst: vi.fn().mockResolvedValue(null),
+      },
       supportFlag: {
         findMany: vi.fn().mockResolvedValue([]),
         findFirst: vi.fn(),
@@ -104,6 +113,42 @@ describe('SupportFlagsService', () => {
     );
   });
 
+  it('names the newest request that shares a conversation, as a reference only', async () => {
+    // ab01: a "Linked request" cell is only honest if another record was
+    // actually found. Two requests on one conversation resolve to the newest,
+    // and the flag keeps its own status untouched by any of it (US-D05).
+    prisma.supportFlag.findMany.mockResolvedValue([
+      flagRow({ id: 'f1', conversationId: 'conv-1' }),
+      flagRow({ id: 'f2', conversationId: null }),
+    ]);
+    prisma.supportRequest.findMany.mockResolvedValue([
+      { id: 'r-new', conversationId: 'conv-1', status: 'IN_PROGRESS' },
+      { id: 'r-old', conversationId: 'conv-1', status: 'PENDING' },
+    ]);
+
+    const result = await service.list('user-1', {});
+
+    expect(prisma.supportRequest.findMany).toHaveBeenCalledWith({
+      where: { conversationId: { in: ['conv-1'] }, ...SCHOOL },
+      select: { id: true, conversationId: true, status: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(result.items[0].linkedRequest).toEqual({
+      id: 'r-new',
+      status: 'IN_PROGRESS',
+    });
+    expect(result.items[1].linkedRequest).toBeNull();
+  });
+
+  it('reads no request table at all when no flag has a conversation', async () => {
+    prisma.supportFlag.findMany.mockResolvedValue([flagRow({ conversationId: null })]);
+
+    const result = await service.list('user-1', {});
+
+    expect(prisma.supportRequest.findMany).not.toHaveBeenCalled();
+    expect(result.items[0].linkedRequest).toBeNull();
+  });
+
   it('makes each level chip count the exact set that chip filters', async () => {
     // The queue rule: a Level B chip saying 3 must return those same 3 rows, so
     // the count is taken over the scope *without* the level the chip selects.
@@ -134,6 +179,54 @@ describe('SupportFlagsService', () => {
       U: 1,
       UNCLASSIFIED: 4,
     });
+  });
+
+  it('narrows a student search into the counted scope, not only the rows', async () => {
+    // ab01: the search box must not leave a chip claiming 6 while the table
+    // shows 1, which is the same lie the support queue already refuses.
+    prisma.supportFlag.groupBy.mockResolvedValue([
+      { level: 'B', _count: { _all: 1 } },
+    ]);
+
+    await service.list('user-1', { q: ' GSS/2026/0142 ' });
+
+    const expected = {
+      ...SCHOOL,
+      OR: [
+        { studentRef: { contains: 'GSS/2026/0142', mode: 'insensitive' } },
+        {
+          student: {
+            studentCode: { contains: 'GSS/2026/0142', mode: 'insensitive' },
+          },
+        },
+        {
+          student: {
+            studentRef: { contains: 'GSS/2026/0142', mode: 'insensitive' },
+          },
+        },
+        {
+          student: {
+            user: {
+              email: { contains: 'GSS/2026/0142', mode: 'insensitive' },
+            },
+          },
+        },
+      ],
+    };
+    expect(prisma.supportFlag.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expected }),
+    );
+    expect(prisma.supportFlag.groupBy).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expected }),
+    );
+  });
+
+  it('adds no search predicate for a blank term', async () => {
+    await service.list('user-1', { q: '   ' });
+
+    expect(prisma.supportFlag.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { ...SCHOOL } }),
+    );
   });
 
   it('reads UNCLASSIFIED as a real bucket, not as an absent level filter', async () => {
@@ -262,6 +355,29 @@ describe('SupportFlagsService', () => {
       expect(result.systemMetadata.status).toBe(SupportFlagStatus.OPEN);
     });
 
+    it('links a request as a reference, and takes nothing from it', async () => {
+      // ab03/ab06: the reviewer is offered a route to the other record, never a
+      // merged status. The flag stays Open while its request is In progress.
+      prisma.supportFlag.findFirst.mockResolvedValue(flagRow());
+      prisma.supportRequest.findFirst.mockResolvedValue({
+        id: 'r-1',
+        status: 'IN_PROGRESS',
+      });
+
+      const result = await service.detail('user-1', 'f1');
+
+      expect(prisma.supportRequest.findFirst).toHaveBeenCalledWith({
+        where: { conversationId: 'conv-1', studentId: 'stu-1' },
+        select: { id: true, status: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      expect(result.systemMetadata.linkedRequest).toEqual({
+        id: 'r-1',
+        status: 'IN_PROGRESS',
+      });
+      expect(result.systemMetadata.status).toBe(SupportFlagStatus.OPEN);
+    });
+
     it('keeps level and severity as two axes and names the rule behind them', async () => {
       prisma.supportFlag.findFirst.mockResolvedValue(
         flagRow({ level: 'U', severity: 'TIER_3_ACUTE', ruleId: 'IND-U01' }),
@@ -337,6 +453,10 @@ describe('SupportFlagsService', () => {
         }),
       );
       expect(result.message).toBe('Review decision recorded');
+      // ab06 repeats two server facts the reviewer cannot make up locally: the
+      // write time, and the status that write left untouched.
+      expect(result.status).toBe(SupportFlagStatus.OPEN);
+      expect(result.recordedAt).toBeInstanceOf(Date);
     });
 
     it("refuses another school's flag and writes nothing", async () => {

@@ -21,6 +21,25 @@ function emptyLevelCounts(): Record<IndicatorLevel | 'UNCLASSIFIED', number> {
   return { A: 0, B: 0, C: 0, U: 0, UNCLASSIFIED: 0 };
 }
 
+/**
+ * ab01's "Search by Student ID/email". It matches the identifiers a reviewer
+ * actually has in front of them: the code printed under a student's name, and
+ * the address their account was made with. An empty term adds no predicate, so
+ * an unfiltered list reads exactly as it did before.
+ */
+function studentSearch(q?: string): Prisma.SupportFlagWhereInput {
+  const term = q?.trim();
+  if (!term) return {};
+  return {
+    OR: [
+      { studentRef: { contains: term, mode: 'insensitive' } },
+      { student: { studentCode: { contains: term, mode: 'insensitive' } } },
+      { student: { studentRef: { contains: term, mode: 'insensitive' } } },
+      { student: { user: { email: { contains: term, mode: 'insensitive' } } } },
+    ],
+  };
+}
+
 @Injectable()
 export class SupportFlagsService {
   constructor(
@@ -30,7 +49,7 @@ export class SupportFlagsService {
 
   async list(
     userId: string,
-    filters: { severity?: string; status?: string; level?: string },
+    filters: { severity?: string; status?: string; level?: string; q?: string },
   ) {
     const schoolId = await schoolOf(this.prisma, userId);
     if (!schoolId) {
@@ -39,10 +58,13 @@ export class SupportFlagsService {
 
     // Everything except `level` is part of the set a level chip counts, so the
     // number on a chip is the rows that chip then returns (the queue rule).
+    // A search term joins that scope for the same reason: a Level B chip saying
+    // 3 has to return those 3 rows for the student being searched for.
     const scope: Prisma.SupportFlagWhereInput = {
       ...inSchool(schoolId),
       ...(filters.severity ? { severity: filters.severity as never } : {}),
       ...(filters.status ? { status: filters.status as never } : {}),
+      ...studentSearch(filters.q),
     };
     const where: Prisma.SupportFlagWhereInput = filters.level
       ? filters.level === 'UNCLASSIFIED'
@@ -69,6 +91,33 @@ export class SupportFlagsService {
       levelCounts[key] = row._count._all;
     }
 
+    // A linked request is a fact about a *different* record, so it is read from
+    // that table rather than inferred from the flag's own status. Only the newest
+    // request on the same conversation is named, because a student can ask twice.
+    const conversationIds = items
+      .map((item) => item.conversationId)
+      .filter((id): id is string => Boolean(id));
+    const linkedRequests =
+      conversationIds.length > 0
+        ? await this.prisma.supportRequest.findMany({
+            where: {
+              conversationId: { in: conversationIds },
+              ...inSchool(schoolId),
+            },
+            select: { id: true, conversationId: true, status: true },
+            orderBy: { createdAt: 'desc' },
+          })
+        : [];
+    const byConversation = new Map<string, { id: string; status: string }>();
+    for (const request of linkedRequests) {
+      if (request.conversationId && !byConversation.has(request.conversationId)) {
+        byConversation.set(request.conversationId, {
+          id: request.id,
+          status: request.status,
+        });
+      }
+    }
+
     // A separate fact from the chip counts: open work in the whole school,
     // whichever filters are currently applied to the list.
     const openCount = await this.prisma.supportFlag.count({
@@ -79,13 +128,32 @@ export class SupportFlagsService {
         },
       },
     });
-    return { items, openCount, levelCounts };
+    return {
+      items: items.map((item) => ({
+        ...item,
+        linkedRequest: item.conversationId
+          ? (byConversation.get(item.conversationId) ?? null)
+          : null,
+      })),
+      openCount,
+      levelCounts,
+    };
   }
 
   /** US-D02: the four kinds of content on a flag are labelled, not merged. */
   async detail(userId: string, id: string) {
     const flag = await this.scopedFlag(userId, id);
     const rule = flag.ruleId ? indicatorRuleById(flag.ruleId) : undefined;
+    // Whether a student-initiated request shares this conversation is a fact
+    // about that record, read from its own table and never inferred from the
+    // flag. Same student, newest request, because a student can ask twice.
+    const linkedRequest = flag.conversationId
+      ? await this.prisma.supportRequest.findFirst({
+          where: { conversationId: flag.conversationId, studentId: flag.studentId },
+          select: { id: true, status: true },
+          orderBy: { createdAt: 'desc' },
+        })
+      : null;
     return {
       studentReported: {
         statement: flag.studentStatementSnapshot,
@@ -106,6 +174,7 @@ export class SupportFlagsService {
         // Referenced, never inlined: a request, an indicator and a case stay
         // three records with three histories (US-D05).
         conversationId: flag.conversationId,
+        linkedRequest,
         ruleId: flag.ruleId,
         ruleVersion: flag.ruleVersion,
         ruleLabel: rule?.label ?? null,
@@ -172,6 +241,7 @@ export class SupportFlagsService {
     decision: SupportFlagReviewDecision,
   ) {
     const flag = await this.scopedFlag(userId, id);
+    const recordedAt = new Date();
     await this.prisma.supportFlag.update({
       where: { id },
       data: { reviewDecision: decision },
@@ -187,7 +257,9 @@ export class SupportFlagsService {
       ruleVersion: flag.ruleVersion,
       meta: { decision },
     });
-    return { message: 'Review decision recorded', decision };
+    // ab06's confirmation needs two facts the reviewer cannot invent locally:
+    // when the server wrote this, and which status it is still sitting on.
+    return { message: 'Review decision recorded', decision, recordedAt, status: flag.status };
   }
 
   private levelOrThrow(level: string): IndicatorLevel {
@@ -212,6 +284,7 @@ export class SupportFlagsService {
           select: {
             id: true,
             status: true,
+            studentId: true,
             ruleId: true,
             ruleVersion: true,
             studentStatementSnapshot: true,

@@ -33,17 +33,20 @@ export class SupportFlagsController {
   @ApiQuery({ name: 'severity', required: false })
   @ApiQuery({ name: 'status', required: false })
   @ApiQuery({ name: 'level', required: false })
+  @ApiQuery({ name: 'q', required: false })
   @ApiEnvelopeOk(Object)
   list(
     @Session() session: UserSession,
     @Query('severity') severity?: string,
     @Query('status') status?: string,
     @Query('level') level?: string,
+    @Query('q') q?: string,
   ) {
     return this.supportFlagsService.list(session.user.id, {
       severity,
       status,
       level,
+      q,
     });
   }
 

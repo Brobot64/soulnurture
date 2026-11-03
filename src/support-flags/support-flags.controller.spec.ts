@@ -84,10 +84,10 @@ describe('SupportFlagsController (Doc A reviewer surface)', () => {
   });
 
   describe('the list read', () => {
-    it('passes all three filters through, including the Doc A level', async () => {
+    it('passes all four filters through, including the Doc A level', async () => {
       const response = await app.inject({
         method: 'GET',
-        url: `${root}?severity=TIER_2_HIGH&status=OPEN&level=B`,
+        url: `${root}?severity=TIER_2_HIGH&status=OPEN&level=B&q=GSS-0142`,
       });
 
       expect(response.statusCode).toBe(200);
@@ -95,6 +95,7 @@ describe('SupportFlagsController (Doc A reviewer surface)', () => {
         severity: 'TIER_2_HIGH',
         status: 'OPEN',
         level: 'B',
+        q: 'GSS-0142',
       });
     });
 
@@ -105,6 +106,7 @@ describe('SupportFlagsController (Doc A reviewer surface)', () => {
         severity: undefined,
         status: undefined,
         level: undefined,
+        q: undefined,
       });
     });
 
@@ -117,6 +119,7 @@ describe('SupportFlagsController (Doc A reviewer surface)', () => {
         severity: undefined,
         status: undefined,
         level: 'U',
+        q: undefined,
       });
     });
   });
