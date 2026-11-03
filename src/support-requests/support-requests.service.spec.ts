@@ -900,7 +900,13 @@ describe('SupportRequestsService', () => {
     }
 
     beforeEach(() => {
-      prisma.user.findUnique.mockResolvedValue({ schoolId: 'school-1' });
+      // A reviewer by default: the indicator reference is withheld from
+      // roles the indicators screen already refuses, and one test below
+      // checks exactly that.
+      prisma.user.findUnique.mockResolvedValue({
+        schoolId: 'school-1',
+        role: 'COUNSELLOR',
+      });
       prisma.supportFlag.findMany.mockResolvedValue([]);
     });
 
@@ -1325,6 +1331,127 @@ describe('SupportRequestsService', () => {
         'REVIEW_SUGGESTED',
       );
       expect(result.items.find((i) => i.id === 'clean')?.prompt).toBe('NONE');
+    });
+
+    it('names the newest indicator on the conversation, and takes the prompt from any active one', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({ id: 'flagged', conversationId: 'conv-1' }),
+      ]);
+      prisma.supportFlag.findMany.mockResolvedValue([
+        {
+          conversationId: 'conv-1',
+          id: 'flag-newest',
+          status: 'ACKNOWLEDGED',
+          severity: 'TIER_2_HIGH',
+          level: 'B',
+          triggerLabel: 'Repeated check-ins',
+        },
+        {
+          conversationId: 'conv-1',
+          id: 'flag-older',
+          status: 'OPEN',
+          severity: 'TIER_1_MODERATE',
+          level: null,
+          triggerLabel: 'Asked for a person',
+        },
+      ]);
+
+      const result = await service.listQueue('staff-1', {});
+      const item = result.items[0];
+
+      // One read answers both facts, and they are not the same fact: the row a
+      // reviewer has already acknowledged is still the indicator that exists,
+      // while the older OPEN one is what still warrants a prompt.
+      expect(item.linkedIndicator).toEqual({
+        id: 'flag-newest',
+        status: 'ACKNOWLEDGED',
+        severity: 'TIER_2_HIGH',
+        level: 'B',
+        triggerLabel: 'Repeated check-ins',
+      });
+      expect(item.prompt).toBe('REVIEW_SUGGESTED');
+    });
+
+    it('keeps the indicator reference when nothing is active, because a record is not a to-do', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({ conversationId: 'conv-1' }),
+      ]);
+      prisma.supportFlag.findMany.mockResolvedValue([
+        {
+          conversationId: 'conv-1',
+          id: 'flag-done',
+          status: 'RESOLVED',
+          severity: 'TIER_3_ACUTE',
+          level: 'C',
+          triggerLabel: 'Safety-related wording',
+        },
+      ]);
+
+      const result = await service.listQueue('staff-1', {});
+
+      expect(result.items[0].prompt).toBe('NONE');
+      expect(result.items[0].linkedIndicator?.id).toBe('flag-done');
+    });
+
+    it('links no indicator to a conversation that has none, or to a request with no conversation', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({ id: 'with-conv', conversationId: 'conv-1' }),
+        queueRow({ id: 'no-conv', conversationId: null }),
+      ]);
+
+      const result = await service.listQueue('staff-1', {});
+
+      expect(result.items.find((i) => i.id === 'with-conv')?.linkedIndicator)
+        .toBeNull();
+      expect(result.items.find((i) => i.id === 'no-conv')?.linkedIndicator)
+        .toBeNull();
+    });
+
+    it('reads the indicators inside the reviewer’s school and no longer by workflow status', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({ conversationId: 'conv-1' }),
+      ]);
+
+      await service.listQueue('staff-1', {});
+
+      expect(prisma.supportFlag.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            conversationId: { in: ['conv-1'] },
+            student: { user: { schoolId: 'school-1' } },
+          },
+          orderBy: { createdAt: 'desc' },
+        }),
+      );
+    });
+
+    it('withholds the indicator reference from a role the indicators screen refuses, but keeps its prompt', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        schoolId: 'school-1',
+        role: 'SUPPORT_STAFF',
+      });
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({ conversationId: 'conv-1' }),
+      ]);
+      prisma.supportFlag.findMany.mockResolvedValue([
+        {
+          conversationId: 'conv-1',
+          id: 'flag-1',
+          status: 'OPEN',
+          severity: 'TIER_2_HIGH',
+          level: 'B',
+          triggerLabel: 'Repeated check-ins',
+        },
+      ]);
+
+      const result = await service.listQueue('staff-1', {});
+
+      // The two facts are not the same kind of fact. The prompt is this queue's
+      // own workflow signal, already visible to support staff; the label, level
+      // and id belong to the indicator record, and D2 has not approved those
+      // for this role.
+      expect(result.items[0].prompt).toBe('REVIEW_SUGGESTED');
+      expect(result.items[0].linkedIndicator).toBeNull();
     });
 
     it('carries the linked conversationId on the row for the deep link', async () => {

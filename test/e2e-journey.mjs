@@ -650,6 +650,28 @@ async function main() {
   const recorded = data(res);
   check('recording a decision answers with the server time and the status it left alone', recorded?.decision === 'FOLLOW_UP_WITH_STUDENT' && recorded?.status === 'IN_REVIEW' && typeof recorded?.recordedAt === 'string', `${recorded?.status}/${recorded?.recordedAt}`);
 
+  // ab08 is the same link read from the other side, and it has a second job:
+  // proving that a support-staff account — the role Doc A has not approved
+  // indicator content for — still gets its own workflow prompt but is never
+  // handed the indicator's label, level or id through the requests queue.
+  res = await api(eric, 'GET', '/api/v1/support-requests/queue');
+  const ericRow = (data(res)?.items ?? []).find((r) => r.id === supportRequest.id);
+  check('the request names the indicator that shares its conversation', ericRow?.linkedIndicator?.id === flagId, `${ericRow?.linkedIndicator?.id}/${flagId}`);
+  check('two records keep two statuses on the same row', ericRow?.requestStatus === 'PENDING' && ericRow?.linkedIndicator?.status === 'IN_REVIEW', `${ericRow?.requestStatus}/${ericRow?.linkedIndicator?.status}`);
+  // Ngozi was provisioned by POST /api/v1/users, which assigns no school — and
+  // a school-less reviewer reads an empty queue, which is correct product
+  // behaviour but proves nothing here. Enrol her in the school Act 3 just
+  // onboarded so she is the case the indicator gate exists for: support staff
+  // inside the tenant, looking at the same rows as the counsellor beside her.
+  await db(
+    `UPDATE "user" SET "schoolId" = (SELECT s.id FROM school s WHERE s.name = $1 LIMIT 1) WHERE email = $2`,
+    [SCHOOL.name, NGOZI.email],
+  );
+  res = await api(ngozi, 'GET', '/api/v1/support-requests/queue');
+  const staffRow = (data(res)?.items ?? []).find((r) => r.id === supportRequest.id);
+  check('support staff keep the prompt their own queue is built on', staffRow?.prompt === 'REVIEW_SUGGESTED', `prompt ${staffRow?.prompt}`);
+  check('and are not handed the indicator record around the back', staffRow?.linkedIndicator === null, JSON.stringify(staffRow?.linkedIndicator));
+
   res = await api(eric, 'PATCH', `/api/v1/support-requests/${supportRequest.id}`, {
     status: 'ACCEPTED',
     reviewNote: 'Jude, come by my office at 10am.',

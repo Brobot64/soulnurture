@@ -1,6 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import {
   FollowUpStatus,
+  IndicatorLevel,
+  SupportFlagSeverity,
   SupportFlagStatus,
   SupportPersonType,
   SupportRequestStatus,
@@ -10,6 +12,7 @@ import {
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service.js';
 import { ChatService } from '../chat/chat.service.js';
+import { REVIEWER_ROLES } from '../common/guards/roles.decorator.js';
 import {
   inSchool,
   schoolOf,
@@ -180,9 +183,15 @@ export class SupportRequestsService {
   ): Promise<SupportQueueResult> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { schoolId: true },
+      select: { schoolId: true, role: true },
     });
     if (!user?.schoolId) return { items: [], counts: emptyQueueCounts() };
+    // Doc A still has D2 open on whether support staff may read indicators, and
+    // the indicators screen refuses them today — so the queue must not hand
+    // them the same content around the back. Anyone outside the reviewer roles
+    // gets `null`, which is the same answer as a conversation that raised no
+    // indicator, and no hint that a row was withheld.
+    const seesIndicators = REVIEWER_ROLES.some((role) => role === user.role);
 
     const search = filters.q?.trim().toLowerCase();
     // School scope only: a reviewer sees their own school's queue and nothing
@@ -223,23 +232,45 @@ export class SupportRequestsService {
     const conversationIds = requests
       .map((request) => request.conversationId)
       .filter((id): id is string => Boolean(id));
+    // One read, two different facts about the same conversation.
+    //
+    // `flagged` keeps the meaning it always had — an indicator that is still
+    // asking for attention — which is why the status test moved into
+    // `isActiveFlagStatus` rather than staying in SQL: the reference below has
+    // to be able to name an indicator even after a professional acknowledged it,
+    // and a queue that silently showed "None linked" for a reviewed indicator
+    // would be describing the workflow, not the record.
     const flagged = new Set<string>();
+    const indicatorsByConversation = new Map<string, LinkedIndicatorRef>();
     if (conversationIds.length > 0) {
       const flags = await this.prisma.supportFlag.findMany({
         where: {
           conversationId: { in: conversationIds },
-          status: {
-            in: [
-              SupportFlagStatus.OPEN,
-              SupportFlagStatus.IN_REVIEW,
-              SupportFlagStatus.ESCALATED,
-            ],
-          },
+          student: { user: { schoolId: user.schoolId } },
         },
-        select: { conversationId: true, status: true },
+        select: {
+          conversationId: true,
+          id: true,
+          status: true,
+          severity: true,
+          level: true,
+          triggerLabel: true,
+        },
+        orderBy: { createdAt: 'desc' },
       });
       for (const flag of flags) {
-        if (isActiveFlagStatus(flag.status)) flagged.add(flag.conversationId!);
+        if (!flag.conversationId) continue;
+        if (isActiveFlagStatus(flag.status)) flagged.add(flag.conversationId);
+        // Newest wins: the first row for a conversation is the only one kept.
+        if (!indicatorsByConversation.has(flag.conversationId)) {
+          indicatorsByConversation.set(flag.conversationId, {
+            id: flag.id,
+            status: flag.status,
+            severity: flag.severity,
+            level: flag.level,
+            triggerLabel: flag.triggerLabel,
+          });
+        }
       }
     }
 
@@ -252,6 +283,12 @@ export class SupportRequestsService {
       prompt: (request.conversationId && flagged.has(request.conversationId)
         ? 'REVIEW_SUGGESTED'
         : 'NONE') as SupportPrompt,
+      // A pointer, not a merge: the indicator keeps its own status and this
+      // request keeps its own. Nothing here moves either of them.
+      linkedIndicator:
+        !seesIndicators || request.conversationId === null
+          ? null
+          : (indicatorsByConversation.get(request.conversationId) ?? null),
     }));
 
     // The search narrows the view, and every number on the screen describes
@@ -316,15 +353,25 @@ export class SupportRequestsService {
         (row) =>
           !filters.status || matchesQueueFilter(row.request, filters.status),
       )
-      .map(({ request, queueStatus, followUpState, urgency, prompt }) =>
-        toQueueItem(
+      .map(
+        ({
           request,
           queueStatus,
           followUpState,
           urgency,
           prompt,
-          userId,
-        ),
+          linkedIndicator,
+        }) => ({
+          ...toQueueItem(
+            request,
+            queueStatus,
+            followUpState,
+            urgency,
+            prompt,
+            userId,
+          ),
+          linkedIndicator,
+        }),
       );
 
     return { items, counts };
@@ -508,6 +555,23 @@ export interface SupportQueueStudent {
   email: string;
 }
 
+/**
+ * Doc A US-D05, read from the other side: an indicator and the request that
+ * shares its conversation are two records with two statuses, and the link is an
+ * optional reference that makes neither into the other. So this carries only
+ * enough to identify and label the indicator and to open it — the request's own
+ * status never derives from `status` here, and acknowledging the indicator does
+ * not change this row.
+ */
+export interface LinkedIndicatorRef {
+  id: string;
+  status: SupportFlagStatus;
+  severity: SupportFlagSeverity;
+  /** `null` is the real "unclassified" bucket, not a missing value to hide. */
+  level: IndicatorLevel | null;
+  triggerLabel: string;
+}
+
 export interface SupportQueueItem {
   id: string;
   requestedAt: Date;
@@ -526,6 +590,9 @@ export interface SupportQueueItem {
   /** Independent of both: did the student say they do not feel safe. */
   urgency: Urgency;
   prompt: SupportPrompt;
+  /** The newest indicator raised on this request's conversation, when one
+   * exists. A reference across two separate records — see `LinkedIndicatorRef`. */
+  linkedIndicator: LinkedIndicatorRef | null;
   /** The arrangement the student can already see, so the review dialog can
    * prefill instead of silently blanking it on the next save. */
   scheduledAt: Date | null;
@@ -615,7 +682,7 @@ function toQueueItem(
   urgency: Urgency,
   prompt: SupportPrompt,
   userId: string,
-): SupportQueueItem {
+): Omit<SupportQueueItem, 'linkedIndicator'> {
   const openFollowUps = request.followUps
     .filter(
       (followUp) =>
