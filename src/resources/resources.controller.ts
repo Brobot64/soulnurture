@@ -7,6 +7,7 @@ import {
   ApiSessionAuth,
   ApiStandardErrors,
 } from '../docs/openapi.helpers.js';
+import { ResourceFeedbackDto } from './dto/resource-feedback.dto.js';
 import { ResourceQueryDto } from './dto/resource-query.dto.js';
 import { SaveToolboxDto } from './dto/save-toolbox.dto.js';
 import { ResourcesService } from './resources.service.js';
@@ -55,5 +56,15 @@ export class ResourcesController {
   @ApiEnvelopeOk(Object)
   save(@Session() session: UserSession, @Body() body: SaveToolboxDto) {
     return this.resourcesService.saveToolbox(session.user.id, body.resourceId);
+  }
+
+  @Post('feedback')
+  @ApiSessionAuth()
+  @ApiStandardErrors()
+  @ApiOperation({ summary: 'Record the "what next?" answer for a resource' })
+  @ApiBody({ type: ResourceFeedbackDto })
+  @ApiEnvelopeOk(Object)
+  feedback(@Session() session: UserSession, @Body() body: ResourceFeedbackDto) {
+    return this.resourcesService.recordFeedback(session.user.id, body);
   }
 }

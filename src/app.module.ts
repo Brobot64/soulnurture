@@ -15,6 +15,7 @@ import { TenantGuard } from './common/guards/tenant.guard.js';
 import { ChatModule } from './chat/chat.module.js';
 import { CheckInsModule } from './check-ins/check-ins.module.js';
 import { ConsentModule } from './consent/consent.module.js';
+import { ContentModule } from './content/content.module.js';
 import { ConversationsModule } from './conversations/conversations.module.js';
 import { validateEnv } from './config/env.config.js';
 import { DashboardModule } from './dashboard/dashboard.module.js';
@@ -78,6 +79,7 @@ import { UsersModule } from './users/users.module.js';
     ProfessionalsModule,
     SchoolsModule,
     ConsentModule,
+    ContentModule,
     CheckInsModule,
     ConversationsModule,
     ChatModule,

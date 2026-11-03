@@ -101,6 +101,12 @@ const SUPPORT_FLAG_EXECUTOR: IntentExecutor = {
         aiContextSummary: summary,
         autoActions: verdict.actions.map((a) => a.type),
         intentId: verdict.intentId,
+        // `ruleId` stays empty: it names an Doc A indicator rule, and no rule in
+        // `indicators.config.ts` is switched on. Storing the intent id here would
+        // make a keyword-floor flag read as if a graded rule produced it.
+        // Frozen here rather than re-read from the live thread (US-D02), so the
+        // sentence a reviewer decides on is the sentence that raised the flag.
+        studentStatementSnapshot: ctx.userContent,
       },
     });
     await ctx.auditService.log({

@@ -273,10 +273,11 @@ async function main() {
 
   act('Act 2 — admin seeds Dr. Eric Moore as a support person');
   const ericProf = await db(
-    `SELECT p.id FROM professional_profile p JOIN "user" u ON u.id = p."userId" WHERE u.email = $1`,
+    `SELECT p.id, p."userId" FROM professional_profile p JOIN "user" u ON u.id = p."userId" WHERE u.email = $1`,
     [ERIC.email],
   );
   const ericProfileId = ericProf.rows[0]?.id;
+  const ericUserId = ericProf.rows[0]?.userId;
   check('Eric professional profile id found', !!ericProfileId);
   await db(
     `WITH updated AS (
@@ -306,8 +307,10 @@ async function main() {
   );
   await db(
     `INSERT INTO account (id, "userId", "accountId", "providerId", password, "createdAt", "updatedAt")
-     VALUES ($1, $2, $2, 'credential', $3, now(), now())`,
-    [randomUUID(), ownerId, await hashPassword(OWNER.password)],
+     VALUES ($1, $2, $3, 'credential', $4, now(), now())`,
+    // "userId" is uuid and "accountId" is text: one placeholder for both makes Postgres
+    // fail with "inconsistent types deduced for parameter". Do not collapse $2/$3.
+    [randomUUID(), ownerId, ownerId, await hashPassword(OWNER.password)],
   );
   res = await api(owner, 'POST', '/api/auth/sign-in/email', { email: OWNER.email, password: OWNER.password });
   check('platform owner signs in', res.status === 200 && res.body?.user?.role === 'PLATFORM_ADMIN', `status ${res.status}`);
@@ -318,10 +321,19 @@ async function main() {
   check('school created ACTIVE with an acronym short code', res.status === 201 && school?.status === 'ACTIVE' && shortCodeRe('MU').test(school?.shortCode ?? ''), `status ${res.status} code ${school?.shortCode}`);
   const schoolId = school?.id;
 
+  // Tenancy (the §0B P0) scopes both the staff flag queue and a student's
+  // support-person list to one school, so the professional who reviews Jude in
+  // Act 7 and receives his request in Act 6 has to belong to Miva — Eric signs
+  // up in Act 1, before this school exists, so his schoolId lands here.
+  await db(`UPDATE "user" SET "schoolId" = $2 WHERE id = $1`, [ericUserId, schoolId]);
+
   act('Act 3 — school admin provisioned, forced onto a personal password');
   console.log('  POST /api/v1/schools/:id/admins', JSON.stringify({ name: SCHOOL_ADMIN.name, email: SCHOOL_ADMIN.email }));
   res = await api(owner, 'POST', `/api/v1/schools/${schoolId}/admins`, { name: SCHOOL_ADMIN.name, email: SCHOOL_ADMIN.email });
-  check('owner provisions the school admin (owner-only route)', res.status === 201 && data(res)?.verificationEmailSent === true, `status ${res.status}`);
+  // `verificationEmailSent` is not a pass/fail signal here: trySendVerificationEmail
+  // swallows the send and dev has no SMTP, so it is false locally while the link
+  // still lands in the dev-log route the very next check reads.
+  check('owner provisions the school admin (owner-only route)', res.status === 201 && data(res)?.user?.role === 'SCHOOL_ADMIN', `status ${res.status} role ${data(res)?.user?.role}`);
 
   verifyUrl = await devVerificationUrl(anon, SCHOOL_ADMIN.email);
   check('verification link visible for the school admin', !!verifyUrl);
@@ -339,7 +351,7 @@ async function main() {
   check('admin locked out of onboarding until the change (403 PASSWORD_CHANGE_REQUIRED)', res.status === 403 && JSON.stringify(res.body ?? {}).includes('PASSWORD_CHANGE_REQUIRED'), `status ${res.status}`);
 
   res = await api(schoolAdmin, 'POST', '/api/v1/auth/first-password', { newPassword: SCHOOL_ADMIN.password });
-  check('admin sets a personal password (no old password)', res.status === 200 && data(res)?.passwordChanged === true, `status ${res.status}`);
+  check('admin sets a personal password (no old password)', (res.status === 200 || res.status === 201) && data(res)?.passwordChanged === true, `status ${res.status}`);
   res = await api(schoolAdmin, 'GET', `/api/v1/schools/${schoolId}/users`);
   check('admin allowed again after the change', res.status === 200, `status ${res.status}`);
   res = await api(schoolAdmin, 'POST', `/api/v1/schools/${schoolId}/admins`, { name: 'Peer Admin', email: 'peer.admin@miva.edu.ng' });
@@ -355,7 +367,7 @@ async function main() {
     phone: JUDE.phone,
   });
   const enrolled = data(res);
-  check('school onboards Jude (201 + verification email)', res.status === 201 && enrolled?.verificationEmailSent === true, `status ${res.status}`);
+  check('school onboards Jude (201 + student row)', res.status === 201 && enrolled?.user?.role === 'STUDENT', `status ${res.status} role ${enrolled?.user?.role}`);
   check(`student code follows the school short code (${school?.shortCode}-####)`, new RegExp(`^${school?.shortCode}-\\d{4}$`).test(enrolled?.studentCode ?? ''), enrolled?.studentCode);
 
   verifyUrl = await devVerificationUrl(anon, JUDE.email);
@@ -368,11 +380,16 @@ async function main() {
   }
   res = await api(jude, 'POST', '/api/auth/sign-in/email', { email: JUDE.email, password: SCHOOL.defaultPassword });
   check('Jude signs in with the school default password', res.status === 200, `status ${res.status}`);
-  res = await api(jude, 'GET', '/api/users/me');
+  // /api/users/me is the raw Better Auth session user (no relations); the school
+  // is only on the application profile route.
+  res = await api(jude, 'GET', '/api/v1/users/me');
   check('Jude role STUDENT, school attached, forced change pending', data(res)?.role === 'STUDENT' && data(res)?.school?.name === SCHOOL.name && data(res)?.mustChangePassword === true, `role=${data(res)?.role} school=${data(res)?.school?.name} mustChange=${data(res)?.mustChangePassword}`);
 
   res = await api(jude, 'POST', '/api/v1/auth/first-password', { newPassword: JUDE.password });
-  check('Jude sets a personal password', res.status === 200 && data(res)?.passwordChanged === true, `status ${res.status}`);
+  // The route has no @HttpCode, so Nest's POST default (201) wins. Whether the
+  // contract is 200 or 201 is the owner's call — §0M item 4 — so the journey
+  // accepts either rather than silently redefining it.
+  check('Jude sets a personal password', (res.status === 200 || res.status === 201) && data(res)?.passwordChanged === true, `status ${res.status}`);
   const throwaway = makeActor('throwaway-Jude');
   res = await api(throwaway, 'POST', '/api/auth/sign-in/email', { email: JUDE.email, password: SCHOOL.defaultPassword });
   check('school default dead for Jude after the change', res.status === 401, `status ${res.status}`);
@@ -404,7 +421,17 @@ async function main() {
   act('Act 3 — AI capabilities & limits disclosure (MUST-protected)');
   res = await api(anon, 'GET', '/api/v1/ai/disclosure');
   check('disclosure GET (anonymous, pre-login)', res.status === 200 && data(res)?.text?.includes('cannot'), `status ${res.status}`);
-  res = await api(jude, 'POST', '/api/v1/ai/disclosure/acknowledge');
+  // CONSENT_GATE_001 turned the ack into an affirmative action: the student ticks
+  // every statement, and the ids come from the disclosure itself so the journey
+  // follows the content instead of hardcoding a list that can drift from it.
+  const agreementIds = (data(res)?.agreements ?? []).map((a) => a.id);
+  check('disclosure publishes the statements that must be ticked', agreementIds.length >= 1, JSON.stringify(agreementIds));
+  const partial = agreementIds.slice(0, -1);
+  res = await api(jude, 'POST', '/api/v1/ai/disclosure/acknowledge', { agreements: partial });
+  check('a partial tick list is refused (400) and records nothing', res.status === 400, `status ${res.status} ids ${JSON.stringify(partial)}`);
+  res = await api(jude, 'GET', '/api/v1/ai/disclosure/status');
+  check('Jude is still un-acknowledged after the refusal', data(res)?.accepted === false, JSON.stringify(data(res)));
+  res = await api(jude, 'POST', '/api/v1/ai/disclosure/acknowledge', { agreements: agreementIds });
   check('Jude acknowledges the AI explanation', data(res)?.acknowledged === true, `status ${res.status}`);
 
   // ---------------------------------------------------------------- act 4
@@ -427,7 +454,11 @@ async function main() {
 
   const say = async (content) => {
     console.log('  POST /api/v1/conversations/:id/messages', JSON.stringify({ content: content.slice(0, 70) + (content.length > 70 ? '…' : '') }));
-    return api(jude, 'POST', `/api/v1/conversations/${conversation.id}/messages`, { content, language: 'en' });
+    // LANG_ID_016: the student no longer tells the server what language to answer
+    // in — the reply language comes from the student's preferredLanguage. The pipe
+    // runs forbidNonWhitelisted, so sending `language` here is a 400, not an
+    // ignored field.
+    return api(jude, 'POST', `/api/v1/conversations/${conversation.id}/messages`, { content });
   };
 
   res = await say(
@@ -559,7 +590,7 @@ async function main() {
   res = await api(jude, 'GET', '/api/v1/support-requests/people');
   const people = data(res) ?? [];
   const ericPerson = people.find((p) => p.name === 'Dr. Eric Moore');
-  check('Dr. Eric Moore visible to Jude', !!ericPerson);
+  check('Dr. Eric Moore visible to Jude (same school after the tenancy move)', !!ericPerson, `list: ${people.map((p) => p.name).join(', ')}`);
   res = await api(jude, 'POST', '/api/v1/support-requests', {
     supportPersonId: ericPerson.id,
     personType: 'PSYCHOLOGIST',
@@ -571,7 +602,14 @@ async function main() {
   const supportRequest = data(res);
   check('support request created for Dr. Eric Moore', !!supportRequest?.id && supportRequest.status === 'PENDING', supportRequest?.status);
   res = await api(jude, 'GET', '/api/v1/support-requests');
-  check('student sees own requests', (data(res)?.items ?? []).length === 1);
+  const mine = data(res)?.items ?? [];
+  const asked = mine.filter((r) => r.status === 'PENDING');
+  const openedBySafety = mine.filter((r) => r.status === 'ESCALATED');
+  // Two rows, and they mean different things: the student's own request, and the one
+  // the TIER_3 alert route opened for him in Act 4 (support-flag-alerts.service).
+  // Asserting `length === 1` predated that pathway and would now hide it.
+  check('student sees the request he made', asked.length === 1 && asked[0]?.supportPerson?.name === 'Dr. Eric Moore', `${asked.length} PENDING: ${asked.map((r) => r.supportPerson?.name).join(', ')}`);
+  check('the Act 4 safety alert opened its own request to a same-school professional', openedBySafety.length === 1 && openedBySafety[0]?.supportPerson?.name === 'Dr. Eric Moore', `${openedBySafety.length} ESCALATED: ${openedBySafety.map((r) => r.supportPerson?.name).join(', ')}`);
 
   // ---------------------------------------------------------------- act 7
   act("Act 7 — ERIC's professional review of Jude");

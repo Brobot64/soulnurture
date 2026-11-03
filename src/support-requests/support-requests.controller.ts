@@ -97,6 +97,22 @@ export class SupportRequestsController {
     });
   }
 
+  /**
+   * Counts only — the sidebar badge. Declared beside `queue` and ahead of `:id`
+   * for the same reason: the literal segment must win over the UUID param.
+   */
+  @Get('queue/counts')
+  @Roles('COUNSELLOR', 'PSYCHOLOGIST', 'SUPPORT_STAFF')
+  @ApiSessionAuth()
+  @ApiStandardErrors()
+  @ApiOperation({
+    summary: 'Staff queue counts without rows (sidebar badge)',
+  })
+  @ApiEnvelopeOk(Object)
+  queueCounts(@Session() session: UserSession) {
+    return this.supportRequestsService.queueCounts(session.user.id);
+  }
+
   @Get(':id')
   @ApiSessionAuth()
   @ApiStandardErrors()
@@ -108,6 +124,20 @@ export class SupportRequestsController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.supportRequestsService.getOne(session.user.id, id);
+  }
+
+  @Post(':id/read')
+  @Roles('COUNSELLOR', 'PSYCHOLOGIST', 'SUPPORT_STAFF')
+  @ApiSessionAuth()
+  @ApiStandardErrors()
+  @ApiOperation({ summary: 'Mark a support request read for the current staff user' })
+  @ApiParam({ name: 'id' })
+  @ApiEnvelopeOk(Object)
+  markRead(
+    @Session() session: UserSession,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.supportRequestsService.markRead(session.user.id, id);
   }
 
   @Patch(':id')

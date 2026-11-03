@@ -193,6 +193,7 @@ export class SupportRequestsService {
         student: { user: { schoolId: user.schoolId } },
       },
       include: {
+        reads: { where: { userId }, select: { readAt: true } },
         followUps: {
           select: {
             id: true,
@@ -244,7 +245,7 @@ export class SupportRequestsService {
 
     const now = new Date();
     const derived = requests.map((request) => ({
-      request,
+      request: { ...request, readAt: request.reads[0]?.readAt ?? null },
       queueStatus: deriveQueueStatus(request),
       followUpState: deriveFollowUpState(request),
       urgency: deriveUrgency(request),
@@ -272,14 +273,19 @@ export class SupportRequestsService {
     // Every chip's count is the exact set `matchesQueueFilter` returns below —
     // counts and rows are computed from one predicate, so they cannot drift.
     const counts: SupportQueueCounts = {
+      ...emptyQueueCounts(),
       all: visible.length,
-      new: 0,
-      reviewed: 0,
-      followUpRequired: 0,
-      followUpCompleted: 0,
-      completedThisWeek: 0,
     };
     for (const row of visible) {
+      if (matchesQueueFilter(row.request, 'UNREAD')) {
+        counts.unread += 1;
+        if (
+          row.request.status === SupportRequestStatus.PENDING ||
+          row.request.status === SupportRequestStatus.ESCALATED
+        ) {
+          counts.awaitingUnread += 1;
+        }
+      }
       if (matchesQueueFilter(row.request, 'NEW')) counts.new += 1;
       if (matchesQueueFilter(row.request, 'REVIEWED')) counts.reviewed += 1;
       if (matchesQueueFilter(row.request, 'FOLLOW_UP_REQUIRED')) {
@@ -322,6 +328,38 @@ export class SupportRequestsService {
       );
 
     return { items, counts };
+  }
+
+  /**
+   * The same counts the staff queue returns, without the rows — for the
+   * sidebar's "Support requests" badge. Delegating to `listQueue` is the point:
+   * a badge that said 4 while the screen it leads to said `New (3)` would be
+   * the exact drift the queue's single-predicate rule exists to prevent.
+   */
+  async queueCounts(userId: string): Promise<SupportQueueCounts> {
+    const { counts } = await this.listQueue(userId, {});
+    return counts;
+  }
+
+  async markRead(userId: string, id: string): Promise<{ readAt: Date }> {
+    const schoolId = await schoolOf(this.prisma, userId);
+    if (!schoolId) throw new NotFoundException('Support request not found');
+    const request = await this.prisma.supportRequest.findFirst({
+      where: {
+        id,
+        ...inSchool(schoolId),
+        status: { not: SupportRequestStatus.CANCELLED },
+      },
+      select: { id: true },
+    });
+    if (!request) throw new NotFoundException('Support request not found');
+
+    return this.prisma.supportRequestRead.upsert({
+      where: { requestId_userId: { requestId: id, userId } },
+      create: { requestId: id, userId },
+      update: {},
+      select: { readAt: true },
+    });
   }
 
   /**
@@ -473,6 +511,7 @@ export interface SupportQueueStudent {
 export interface SupportQueueItem {
   id: string;
   requestedAt: Date;
+  readAt: Date | null;
   timing: SupportTiming;
   note: string | null;
   initialMessage: string | null;
@@ -503,6 +542,8 @@ export interface SupportQueueItem {
 
 export interface SupportQueueCounts {
   all: number;
+  unread: number;
+  awaitingUnread: number;
   new: number;
   reviewed: number;
   followUpRequired: number;
@@ -520,6 +561,7 @@ export interface SupportQueueResult {
 type QueueRequestRow = {
   id: string;
   createdAt: Date;
+  readAt: Date | null;
   timing: SupportTiming;
   note: string | null;
   initialMessage: string | null;
@@ -556,6 +598,8 @@ type QueueRequestRow = {
 function emptyQueueCounts(): SupportQueueCounts {
   return {
     all: 0,
+    unread: 0,
+    awaitingUnread: 0,
     new: 0,
     reviewed: 0,
     followUpRequired: 0,
@@ -598,6 +642,7 @@ function toQueueItem(
   return {
     id: request.id,
     requestedAt: request.createdAt,
+    readAt: request.readAt,
     timing: request.timing,
     note: request.note,
     initialMessage: request.initialMessage,

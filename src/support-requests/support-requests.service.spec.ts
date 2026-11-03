@@ -24,11 +24,12 @@ import { SupportRequestsService } from './support-requests.service.js';
 
 const OPEN = [FollowUpStatus.PENDING, FollowUpStatus.SCHEDULED] as const;
 
-function row(overrides: Partial<QueueRow> = {}): QueueRow {
+function row(overrides: Partial<QueueRow & { readAt: Date | null }> = {}) {
   return {
     status: SupportRequestStatus.PENDING,
     timing: SupportTiming.GENTLE_1_2_DAYS,
     followUps: [],
+    readAt: null,
     ...overrides,
   };
 }
@@ -165,6 +166,10 @@ describe('matchesQueueFilter', () => {
     ];
     for (const request of cases) {
       for (const filter of QUEUE_STATUSES) {
+        // UNREAD is orthogonal to the NEW/REVIEWED/FollowUp partition — it
+        // comes from the per-staff read receipt, not deriveQueueStatus, so the
+        // identity below cannot hold for it. It gets its own assertion.
+        if (filter === 'UNREAD') continue;
         const viaPredicate = matchesQueueFilter(request, filter);
         const viaParts =
           filter === 'FOLLOW_UP_REQUIRED'
@@ -175,6 +180,19 @@ describe('matchesQueueFilter', () => {
         expect(viaPredicate).toBe(viaParts);
       }
     }
+  });
+
+  it('treats UNREAD as "no read receipt yet", cancelled excepted', () => {
+    expect(matchesQueueFilter(row({ readAt: null }), 'UNREAD')).toBe(true);
+    expect(
+      matchesQueueFilter(row({ readAt: new Date('2026-10-10T10:00:00Z') }), 'UNREAD'),
+    ).toBe(false);
+    expect(
+      matchesQueueFilter(
+        row({ status: SupportRequestStatus.CANCELLED, readAt: null }),
+        'UNREAD',
+      ),
+    ).toBe(false);
   });
 
   it('lets one row match two chips — the chips are filters, not a partition', () => {
@@ -239,6 +257,7 @@ describe('SupportRequestsService', () => {
   let prisma: {
     supportPerson: Record<string, ReturnType<typeof vi.fn>>;
     supportRequest: Record<string, ReturnType<typeof vi.fn>>;
+    supportRequestRead: Record<string, ReturnType<typeof vi.fn>>;
     studentProfile: Record<string, ReturnType<typeof vi.fn>>;
     user: Record<string, ReturnType<typeof vi.fn>>;
     supportFlag: Record<string, ReturnType<typeof vi.fn>>;
@@ -280,9 +299,17 @@ describe('SupportRequestsService', () => {
         findFirst: vi.fn(),
         update: vi.fn(),
       },
+      supportRequestRead: { upsert: vi.fn() },
       user: { findUnique: vi.fn() },
       studentProfile: { findUnique: vi.fn() },
-      supportFlag: { findMany: vi.fn() },
+      supportFlag: {
+        findMany: vi.fn(),
+        // Present only so WF-01 can prove they are never called: a request
+        // cancellation must not reach into the indicator record.
+        update: vi.fn(),
+        updateMany: vi.fn(),
+        deleteMany: vi.fn(),
+      },
       conversation: { findFirst: vi.fn() },
       conversationMessage: { findFirst: vi.fn() },
     };
@@ -807,6 +834,42 @@ describe('SupportRequestsService', () => {
     expect(prisma.supportRequest.update).not.toHaveBeenCalled();
   });
 
+  // Doc A §8 WF-01: a request and the indicator that prompted it are two
+  // records with two lifecycles. Closing the conversation must not close the
+  // safeguarding concern — only the request moves, and the audit row names the
+  // request so no reader can infer the indicator was resolved alongside it.
+  it('cancels only the request and never reaches the linked indicator', async () => {
+    prisma.supportRequest.findFirst.mockResolvedValue({
+      id: 'req-1',
+      studentId: 'student-1',
+      status: SupportRequestStatus.PENDING,
+      reviewNote: null,
+      note: 'I need to talk to someone',
+    });
+    prisma.supportRequest.update.mockResolvedValue({
+      id: 'req-1',
+      status: SupportRequestStatus.CANCELLED,
+      supportPerson: null,
+    });
+
+    await service.review('staff-1', 'req-1', {
+      status: SupportRequestStatus.CANCELLED,
+      reviewNote: 'Student asked to stop',
+    });
+
+    expect(prisma.supportRequest.update).toHaveBeenCalledTimes(1);
+    expect(prisma.supportFlag.update).not.toHaveBeenCalled();
+    expect(prisma.supportFlag.updateMany).not.toHaveBeenCalled();
+    expect(prisma.supportFlag.deleteMany).not.toHaveBeenCalled();
+    expect(audit.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'support_request.status_changed',
+        entity: 'SupportRequest',
+        entityId: 'req-1',
+      }),
+    );
+  });
+
   describe('listQueue (staff review queue)', () => {
     const DAY = 24 * 60 * 60 * 1000;
 
@@ -820,6 +883,7 @@ describe('SupportRequestsService', () => {
         status: SupportRequestStatus.PENDING,
         conversationId: null,
         followUps: [],
+        reads: [],
         supportPerson: { id: 'p1', name: 'Mrs. Adebayo', type: 'COUNSELLOR' },
         student: {
           id: 'student-1',
@@ -851,6 +915,8 @@ describe('SupportRequestsService', () => {
           all: 0,
           new: 0,
           reviewed: 0,
+          unread: 0,
+          awaitingUnread: 0,
           followUpRequired: 0,
           followUpCompleted: 0,
           completedThisWeek: 0,
@@ -871,6 +937,7 @@ describe('SupportRequestsService', () => {
             student: { user: { schoolId: 'school-1' } },
           },
           include: {
+            reads: { where: { userId: 'staff-1' }, select: { readAt: true } },
             followUps: {
               select: {
                 id: true,
@@ -1162,6 +1229,8 @@ describe('SupportRequestsService', () => {
           all: 1,
           new: 1,
           reviewed: 0,
+          unread: 1,
+          awaitingUnread: 1,
           followUpRequired: 1,
           followUpCompleted: 0,
           completedThisWeek: 1,
@@ -1366,6 +1435,85 @@ describe('SupportRequestsService', () => {
       expect(result.counts).toEqual(
         expect.objectContaining({ all: 0, new: 0, reviewed: 0 }),
       );
+    });
+
+    it('counts unread rows and narrows awaitingUnread to PENDING/ESCALATED', async () => {
+      const readAt = new Date('2026-10-10T10:00:00Z');
+      prisma.supportRequest.findMany.mockResolvedValue([
+        // never opened, awaiting a first action
+        queueRow({ id: 'u-pending', status: SupportRequestStatus.PENDING }),
+        // never opened, but already escalated
+        queueRow({ id: 'u-escalated', status: SupportRequestStatus.ESCALATED }),
+        // already opened by this reviewer — read, but still awaiting (accepted)
+        queueRow({
+          id: 'read-accepted',
+          status: SupportRequestStatus.ACCEPTED,
+          reads: [{ readAt }],
+        }),
+        // opened and still NEW (pending) — unread excludes it, awaiting too
+        queueRow({ id: 'read-pending', reads: [{ readAt }] }),
+      ]);
+
+      const result = await service.listQueue('staff-1', {});
+
+      expect(result.counts).toEqual(
+        expect.objectContaining({ unread: 2, awaitingUnread: 2 }),
+      );
+      expect(result.items.find((i) => i.id === 'u-pending')?.readAt).toBeNull();
+      expect(result.items.find((i) => i.id === 'read-accepted')?.readAt).toEqual(readAt);
+    });
+
+    it('filters the queue to UNREAD rows only', async () => {
+      prisma.supportRequest.findMany.mockResolvedValue([
+        queueRow({ id: 'still-unread' }),
+        queueRow({ id: 'opened', reads: [{ readAt: new Date() }] }),
+      ]);
+
+      const result = await service.listQueue('staff-1', { status: 'UNREAD' });
+
+      expect(result.items.map((i) => i.id)).toEqual(['still-unread']);
+      // The UNREAD chip's count equals the rows it filters, whatever the chip.
+      expect(result.counts.unread).toBe(result.items.length);
+    });
+  });
+
+  describe('markRead', () => {
+    it('refuses to mark a request read for a staff user with no school', async () => {
+      prisma.user.findUnique.mockResolvedValue({ schoolId: null });
+
+      await expect(service.markRead('orphan-1', 'req-1')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(prisma.supportRequestRead?.upsert).not.toHaveBeenCalled();
+    });
+
+    it('upserts a per-staff receipt without touching the request lifecycle', async () => {
+      prisma.user.findUnique.mockResolvedValue({ schoolId: 'school-1' });
+      prisma.supportRequest.findFirst.mockResolvedValue({ id: 'req-1' });
+      const readAt = new Date('2026-10-30T12:00:00Z');
+      prisma.supportRequestRead.upsert.mockResolvedValue({ readAt });
+
+      const result = await service.markRead('staff-1', 'req-1');
+
+      expect(result).toEqual({ readAt });
+      expect(prisma.supportRequestRead.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { requestId_userId: { requestId: 'req-1', userId: 'staff-1' } },
+          create: { requestId: 'req-1', userId: 'staff-1' },
+        }),
+      );
+      // Opening a request must not silently review it or rewrite its status.
+      expect(prisma.supportRequest.update).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFound for a request outside the reviewer school', async () => {
+      prisma.user.findUnique.mockResolvedValue({ schoolId: 'school-1' });
+      prisma.supportRequest.findFirst.mockResolvedValue(null);
+
+      await expect(service.markRead('staff-1', 'other-1')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(prisma.supportRequestRead.upsert).not.toHaveBeenCalled();
     });
   });
 });

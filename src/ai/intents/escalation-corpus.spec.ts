@@ -193,6 +193,24 @@ describe('Escalation corpus (dataset + rules guard)', () => {
       expect(new Set(ids).size).toBe(ids.length);
     });
 
+    it('carries the nine Doc A §8 scenarios the message contract can express', () => {
+      const docA = [
+        'A-01',
+        'A-02',
+        'B-01',
+        'B-02',
+        'B-03',
+        'C-01',
+        'C-02',
+        'C-03',
+        'P-01',
+      ];
+      const ids = ESCALATION_CORPUS.map((r) => r.exampleId);
+      for (const id of docA) {
+        expect(ids, id).toContain(id);
+      }
+    });
+
     it('escalation expectation always matches the support level', () => {
       for (const row of ESCALATION_CORPUS) {
         const expected =

@@ -33,6 +33,40 @@ describe('AuditService', () => {
         entityId: 'req-1',
         meta: { timing: 'ASAP' },
         schoolId: null,
+        priorStatus: null,
+        newStatus: null,
+        ruleId: null,
+        ruleVersion: null,
+      },
+    });
+  });
+
+  it('records a transition and its rule as stated facts, not implications', async () => {
+    // US-D03: an audit row has to answer "what state did it leave, what did it
+    // enter, under which rule version" without anyone re-deriving it.
+    prisma.auditLog.create.mockResolvedValue({ id: 'log-prov' });
+    await service.log({
+      actorId: 'counsellor-1',
+      action: 'support_flag.in_review',
+      entity: 'SupportFlag',
+      entityId: 'f1',
+      priorStatus: 'OPEN',
+      newStatus: 'IN_REVIEW',
+      ruleId: 'IND-B01',
+      ruleVersion: '1',
+    });
+    expect(prisma.auditLog.create).toHaveBeenCalledWith({
+      data: {
+        actorId: 'counsellor-1',
+        action: 'support_flag.in_review',
+        entity: 'SupportFlag',
+        entityId: 'f1',
+        meta: undefined,
+        schoolId: null,
+        priorStatus: 'OPEN',
+        newStatus: 'IN_REVIEW',
+        ruleId: 'IND-B01',
+        ruleVersion: '1',
       },
     });
   });
@@ -54,6 +88,10 @@ describe('AuditService', () => {
         entityId: 'user-2',
         meta: undefined,
         schoolId: 'school-1',
+        priorStatus: null,
+        newStatus: null,
+        ruleId: null,
+        ruleVersion: null,
       },
     });
   });

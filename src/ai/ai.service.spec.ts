@@ -948,6 +948,15 @@ describe('AiService.generateAndApply', () => {
           }),
         }),
       );
+      const flagData = prisma.supportFlag.create.mock.calls[0][0].data;
+      // The student's own line is frozen at creation (US-D02) rather than re-read
+      // later, and no indicator rule is credited — the keyword floor has no
+      // approved level, so a ruleId here would read as a graded rule.
+      expect(typeof flagData.studentStatementSnapshot).toBe('string');
+      expect(flagData.studentStatementSnapshot.length).toBeGreaterThan(0);
+      expect(flagData.ruleId).toBeUndefined();
+      // An automatic flag opens; nothing on the AI path resolves one (US-D09).
+      expect(flagData.status).toBe('OPEN');
       expect(auditService.log).toHaveBeenCalledWith(
         expect.objectContaining({
           action: 'safety_flag.lang_refine',
