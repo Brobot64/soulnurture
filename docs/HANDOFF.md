@@ -595,7 +595,104 @@ The uncertainty spec guards a *direction of inference*, which is what §8's two 
 **Open for the next session:** (1) **the purge job**, now that HD-01…HD-09 are ruled — a `scheduledPurgeAt`/`cancelledAt` pair on `HistoryDeletionRequest`, a worker that fires 24 h after the ask, the cascade order for every table a student touches (messages, conversations, check-ins, flags + their review rows, support requests + follow-ups, consent records, privacy preferences, notifications, sessions, `session_summary` and its pgvector embeddings, audit rows), a student-visible countdown with a cancel action, and `HISTORY_RETENTION_TRUTH` (`frontend/src/lib/history.ts:181-188`) flipped in the *same* commit as the job; (2) the backup answer (HD-07) — either prune the dumps or the copy says "from our live systems"; (3) whether the escalation note's own sentence changes now that its link is gone; (4) PE-07/PE-11 with the job, PE-08/PE-09/PE-10 whenever the owner wants them, each costing a bump; (5) PE-01/PE-02/PE-13 remain the three real subsystems; (6) `EPIC_E_INSTRUMENT_V3_001` is unmerged and stacked on `BOUNDARY_POPUP_001` → Epic H surfaces, so it inherits §0S's (4)–(11), §0T's (1)–(3) and the merge situation unchanged.
 
 
+## 0V. Session delta — 2026-11-04 (the deletion ruling is now running code: the purge engine, a student countdown you can actually press, and the last four instrument rows folded into the *same* unreleased v3 — `natlas EPIC_H_PURGE_ENGINE_001` + `frontend EPIC_H_PURGE_ENGINE_001`)
+
+**Mandate:** **"now complete the whole system"**, immediately after §0U's ruling — *"all student data can be
+deleted; all like it never exists; but this decision is made by the student; and would be on for 24 hrs; for
+the student to cancel"*. Read as it was stated to the owner at the time: build the ruled engine end to end,
+and make `v3` the *final* instrument batch so a second consent storm is never needed. Branches cut before the
+first edit per the standing rule — natlas from `EPIC_E_INSTRUMENT_V3_001` (`70fabb2`), frontend from
+`8af6497`.
+
+**The engine, in the order a reviewer should read it.**
+`prisma/migrations/20261104170000_history_deletion_purge/migration.sql` is six columns and one partial index,
+entirely additive: `scheduledPurgeAt` / `cancelledAt` / `purgedAt` / `holdReason` / `removedCheckIns` /
+`removedConversations`, all `TIMESTAMPTZ` because due-ness is compared with Postgres's own `NOW()` and a naive
+timestamp across two clocks is how timezone drift gets baked into an irreversible job.
+`history-deletion.service.ts:65-76` stamps the schedule when the ask is filed;
+`POST /v1/history/deletion-requests/:requestId/cancel` (`history.controller.ts:74-98`) is the student's undo;
+`HistoryPurgeService` polls every `HISTORY_PURGE_POLL_MS` (60 000; `<=0` disables it and says so in the log),
+takes one ask per Postgres transaction with `FOR UPDATE SKIP LOCKED`, sweeps what a row deletion cannot reach
+(`chat_thread` pointers, *other people's* notifications quoting the student), and writes exactly one
+`history_deletion.executed` audit row whose `meta` is counts only. A scoped ask leaves the account and the
+safeguarding record standing; `ALL_HISTORY` takes the user, its login, its sessions, its notifications and
+every student-owned table, and its only surviving trace is that audit row — the cascade deletes the receipt
+too, which is why `purgedAt` is meaningful only for the partial scopes.
+
+**The hold rule is a decision, not a mechanism, so it is written down twice.** An ask that falls due against a
+deactivated account or a suspended school does **not** run: it records `holdReason` and re-arms six hours later
+(`history-purge.service.ts:508-509`, `:237-238`, `HOLD_RETRY_AFTER_MINUTES`). That is HD-10's answer, and it is
+the only way the 24 hours can be true — an erasure the student had no way to stop is a different product than
+the one described to them. A hold that never clears keeps the data: where the engine cannot be certain, it errs
+toward not erasing. §4.2 of `docs/EPIC-H-DELETION-REVIEW-SPEC.md` maps every `HD-*` row to what shipped,
+including the one place the build deliberately departs from the ruling (**HD-06**: the three scopes survived
+rather than collapsing to whole-scope, because a student choosing a narrower ask is still the student deciding)
+and the one row built *without* the countersign this document asked for (**HD-03**, still a reviewer's call).
+
+**Gates, and the first time Epic H was ever seen in a browser.** `npm test` **1910/1910 (76 files, exit 0)**;
+`npx tsc --noEmit` = the known **47**-error baseline, nothing new; `npx oxlint --type-aware src/ test/` **0
+errors / 13 warnings** (the two warnings from the new spec are gone); the tracked journey harness grew
+**Act 8b** and passes **220/220 in 188s (exit 0)** against a real database — schedule → cancel → double-cancel
+→ cancel of someone else's ask → a closed window → scoped erasure → a dated ask on both sides of midnight →
+account erasure on a disposable second student → "the erased account cannot sign in". Frontend `npx vite build`
+and `npx tsc --noEmit` both **0**. Then the browser, which found the real gap: **the throwaway mock harness had
+no `/v1/history` routes at all**, so Epic H's student surfaces had been built, type-checked and branched without
+ever being rendered. It now mocks the aggregate, the receipts, the filing and the cancel, with a fixture per
+state — including one whose cancel answers `409` — so `/history`, `/history/about`, the deletion dialog and a
+check-in detail were all exercised with synthetic events: the four receipt states, a live countdown, a cancel
+that swaps its own row and prints "Stopped. Nothing was removed.", the 409 branch showing the *server's*
+sentence before re-reading the list, "Choose a date first." disabling the primary button, filing closing the
+dialog and landing a fresh cancellable receipt, and the About page's five bullets plus the limits sentence.
+**What only a browser catches: the countdown read "24 hours 1 minute"** — `clock` was captured at mount, so a
+schedule fetched a minute later was measured against a stale now. One line in `load()`
+(`frontend/src/routes/_app/history.index.tsx:62-71`) and it reads `17 hours 59 minutes`, i.e. never more than
+was promised.
+
+**HD-07's factual half was wrong, and it was my own sentence.** §0U recorded that the daily `pg_dump` has "no
+pruning interval configured". One read-only SSH check says otherwise: `crontab -l` is empty because the jobs
+live in `/etc/cron.d/natlas-backups`, whose third line is `0 3 * * * root find /opt/backups -name
+"natlas-*.sql.gz" -mtime +14 -delete` — so a purged row is recoverable for the documented ≤15-day tail, and
+"erased from our live systems" is the honest claim rather than a hedge. Two things *are* unreachable, and they
+are the half that needs a decision rather than a correction: that `find` matches the dump filename only, so the
+second cron line's `s3 sync` mirror at `/opt/backups/rustfs` is pruned by nothing; and `src/storage` cannot
+delete anything (`storage.service.ts:6` imports `PutObjectCommand`), so bytes a student uploaded through
+`POST /v1/uploads` outlive any purge. Recorded in §4.1/§4.2 rather than quietly amended.
+
+**PE-07…PE-10 joined `v3` instead of earning a `v4`, which is the entire point of batching.** Prod still serves
+`v2` (`main` @ `97d2454`), so `v3` is unreleased text and can absorb four more answers at the cost of exactly one
+re-consent. `how-we-protect` now states retention as the engine actually behaves (nothing on a timer, a
+student-scheduled erasure a day later, cancellable until it runs, irreversible after); `when-we-escalate` gains
+the artboard's own line "A person decides what happens next, not the AI"; `human-support` gains "you can see how
+your request is doing afterwards"; and `how-it-works` **lost the turn count** — a promise whose number lives in
+env config is not something a student agreed to. PE-11 stays out because it is still blocked on code, not on a
+ruling: `consent.service.ts` has only ever written `accepted: true`. **The release constraint this creates is
+real:** the instrument's retention sentence describes the purge, so the merge and `prisma migrate deploy` move
+together or the product tells students something it cannot do — the exact defect the Epic E audit exists to
+catch. `docs/EPIC-E-PRIVACY-CONSENT-GAP-ANALYSIS.md` §5.2 records the four rows and their evidence.
+
+**Traps bought with real failures.** `data ->> 'x'` is **text**, so an id list must be bound `::text[]`
+(`= ANY($1::uuid[])` throws `operator does not exist: text = uuid`) — that crash killed a run at the first
+scoped leg. `history_deletion_request` has **no `status` column**; state is derived from the four timestamps.
+The repo's `Button` has no `size` prop. A background `node` started through the Bash tool dies with its wrapper,
+so a throwaway backend needs `powershell Start-Process` to survive — and **`:3010` is now the owner's
+`gbeseid-api`** (PID 38780, not mine, not to be touched); the natlas throwaway ran on `:3011` and the mock
+harness on `:5051` (a second one, because `:5050` belongs to the parallel main session and its already-loaded
+config could not see these routes). Reading `.env` key names to work out trusted origins is credential access
+and is blocked; infer configuration from behaviour, and ask when behaviour is not enough.
+
+**Left, and not this session's call:** merge to `main` and the deploy — three migrations are now local-only
+(`ai_report_reason`, `history_deletion_request`, `history_deletion_purge`); `HISTORY_DELETION_UNDO_MINUTES` and
+`HISTORY_PURGE_POLL_MS` are unset on prod so the defaults (1440 min / 60 s) apply there, and the worker runs
+inside the same systemd service as the API; the HD-06 deviation and HD-03's countersign want a reviewer's eye;
+HD-08's age band is still unanswered; a delete path for object storage and a prune for the `rustfs` mirror are
+not invented here; PE-15 (`GET /v1/audit` is still cross-school) is unfixed by decision; PE-01/PE-02/PE-13 need
+design, not invention; and everything else §0U listed stays owner-blocked (D1–D9, `WN-*`/`CP-*` so `/resources`
+remains honestly empty, ab04, Epic G's accuracy verdict, Epic I, staff credentials, the VPS frontend lane, the
+two diverged `main`s).
+
+
 ## 1. Who we are building (30-second orientation)
+
 **Soul Nurture AI (repo: `natlas`, project codename "Natlas")** — a school-based emotional-wellbeing backend for an NGO (PN Africa context), in week 3–4 of an 8-week MVP. Students (e.g. "Jude", 300-level Sociology at Miva University, Nigeria) walk a **4-step journey**: Check-in → Reflect (AI conversation) → Resources → Human Support. Professionals (counsellors/psychologists/support staff) triage via a dashboard: safeguarding flags **with reasons**, support requests, follow-ups, audit trail.
 
 Strategic positioning:

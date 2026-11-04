@@ -167,13 +167,20 @@ Read against the rows above, that answers six of eleven and settles the shape of
 **Still open, and each one bites:**
 
 - **HD-07 — "like it never exists" is the one phrase the system cannot deliver.** Purging the database
-  reaches rows, pgvector embeddings, sessions and notifications; it does not reach the daily
-  `pg_dump` copies under `/opt/backups` (`docs/DEPLOYMENT.md:380-383`, §7 — automated, with no pruning
-  interval configured), nor what a staff member already read on screen, nor a reply the AI wrote from
-  the student's words that another student's conversation never saw but a person remembers. The build
-  can honestly claim **"erased from our live systems"**; claiming *never existed* is a promise the
-  deployment does not keep. Needs a one-line decision: what the student is told, and how long dumps
-  are kept.
+  reaches rows, pgvector embeddings, sessions and notifications; it does not reach what a staff member
+  already read on screen, nor a reply the AI wrote from the student's words that another student's
+  conversation never saw but a person remembers. The build can honestly claim **"erased from our live
+  systems"**; claiming *never existed* is a promise the deployment does not keep.
+  **Corrected on 2026-11-04 against the VPS itself:** this section first said the dumps had "no pruning
+  interval configured", which is false. `/etc/cron.d/natlas-backups` on the prod host is three lines and
+  the third is `0 3 * * * root find /opt/backups -name "natlas-*.sql.gz" -mtime +14 -delete`, so a purged
+  row is recoverable from a dump for at most ~15 days — exactly what `docs/MONITORING.md:127` and
+  `docs/DEPLOYMENT.md:1320` already claimed. The remaining true halves of the gap: that `find` matches the
+  `natlas-*.sql.gz` name only, so the second cron line's `s3 sync` mirror at `/opt/backups/rustfs` is
+  never pruned by anything, and bytes a student put to object storage through
+  `POST /v1/uploads[/presign]` have no database row pointing at them and no delete call anywhere in
+  `src/storage` (`storage.service.ts:6` imports `PutObjectCommand` only). A purge therefore cannot reach
+  an uploaded file, and the dump-prune cannot reach the upload mirror.
 - **HD-05 — what the student is shown during the 24 hours and after.** There is no reviewer to name,
   so the recommendation "never name them" is now automatic; what is missing is the receipt wording and
   the countdown.
@@ -187,9 +194,78 @@ Read against the rows above, that answers six of eleven and settles the shape of
 
 **PE-07 and PE-11, which were blocked on this table:** both are answerable now in principle — retention
 becomes "kept until you ask, then gone within 24 hours of the ask" and withdrawal becomes a real path.
-Neither goes into `ai-disclosure-v3`. An instrument sentence describing a purge that does not exist
-repeats exactly the mistake §5 of the Epic E audit was written to catch. They land together with the
-job, in the version bump that the job earns.
+Neither went into `ai-disclosure-v3`, because that batch shipped before the job existed and an instrument
+sentence describing a purge that was not built repeats exactly the mistake §5 of the Epic E audit was
+written to catch. §4.2 changes the first half of that sentence only: **the job now exists on
+`EPIC_H_PURGE_ENGINE_001`**, so PE-07 is no longer blocked on code, only on the owner's willingness to
+spend a version bump. PE-11 is still blocked on code — withdrawing *consent* is a different subsystem from
+deleting *history*, and nothing of it is built.
+
+### 4.2 Built — 2026-11-04, `natlas EPIC_H_PURGE_ENGINE_001` + `frontend EPIC_H_PURGE_ENGINE_001`
+
+The ruling is now running code, not a plan. Not merged, and the migration is applied to the **local**
+database only — prod has never seen a purge.
+
+| Row | What shipped |
+| --- | --- |
+| **HD-02** | `src/history/history-purge.service.ts` — a worker that starts with the app (`:117-130`),
+scans every `HISTORY_PURGE_POLL_MS` (default 60 000; `<=0` disables it with a warning that
+says asks will be stored and never executed), takes each due ask with `FOR UPDATE SKIP LOCKED`, and erases
+inside one transaction. `history-deletion.service.ts:65-76` is what stamps `scheduledPurgeAt` at filing. |
+| **HD-04** | `HISTORY_RETENTION_TRUTH` and `HISTORY_DELETION_NOTICE` (`frontend/src/lib/history.ts`) were
+rewritten **in this same branch**, which is what §4.1 required: the first no longer tells a student nothing
+ever expires, and the second no longer tells them a person at the school approves it. |
+| **HD-05** | The receipt has states, in this precedence: a cancel that arrives after the erasure still
+reads as an erasure (`deletionState()` checks `purgedAt` first). Countdown text comes from the server's
+`scheduledPurgeAt`, never from a client-side guess. A held ask says why in the student's words
+(`HOLD_LINES`). |
+| **HD-09** | `POST /v1/history/deletion-requests/:requestId/cancel` (`history.controller.ts:74-98`) →
+`404` for an ask that is not yours, `400` before the service for a non-uuid id, `409 ALREADY_CANCELLED`,
+`409 ALREADY_REMOVED`, `409 WINDOW_CLOSED`. It is atomic by construction: cancel and erasure race on one
+`UPDATE … WHERE "cancelledAt" IS NULL AND "purgedAt" IS NULL AND "scheduledPurgeAt" > NOW()`
+(`history-deletion.service.ts:116`), so a student cannot cancel a purge that already happened and a worker
+cannot erase an ask that was cancelled a millisecond earlier. |
+| **HD-10** | **Answered with a hold, not a bypass.** A due erasure whose account is deactivated or whose
+school is `SUSPENDED` does not run (`:508-509`); the ask records `holdReason` and re-arms 6 hours later
+(`HOLD_RETRY_AFTER_MINUTES = 360`, `:19`, `:237-238`). The reasoning is the rule §4.1 asked for: the 24
+hours are only a promise if the student can sign in inside them, and erasing someone who had no way to
+object is a different product than the one described to students. A hold that never clears keeps the data —
+the safe direction of the error. |
+| **HD-03** | Built **without** Doc A's countersign, because HD-01 and HD-03 together rule that the student
+decides and nothing is exempt. The behaviour is asymmetric on purpose and now proven: a *scoped* ask leaves
+the safeguarding rows standing (journey: flags 2→2, requests 2→2), while `ALL_HISTORY` takes them with it,
+because an account that no longer exists cannot leave a school record either. The one surviving record of
+that erasure is a `history_deletion.executed` audit row whose `meta` is counts only
+(`{"scope","erasedAccount","removedCheckIns","removedConversations","undoWindowMinutes"}`). **This stays the
+row a clinical reviewer should look at before release** — it is answered in code, not signed off. |
+| **HD-06** | **Not followed as written, and the owner should confirm the deviation.** The ruling read
+"one ask deletes everything of that student", but Epic H's dialog already ships three scopes and a student
+choosing a narrower one is still the student deciding. So the build honours all three: `BEFORE_DATE` and
+`SELECTED_CHECK_INS` erase only what they name (plus their own cascade), and only `ALL_HISTORY` erases the
+account, its login, its `session`s and its notifications. A dated ask runs the day it names, not the day
+before it (verified both sides of midnight in the journey). |
+| **HD-07** | Copy says the true thing: *what is removed is what this product holds — anything already
+copied out (a backup, a document a professional wrote elsewhere) is outside what these pages can reach, so
+ask the school* (`frontend/src/routes/_app/history.about.tsx`). The factual half is corrected above: dumps
+are pruned at 14 days; the `/opt/backups/rustfs` mirror and object-storage bytes are not reachable by
+anything. |
+| **HD-08** | Unanswered, and the build does not branch on age. |
+| **HD-11** | N/A, as recorded. |
+
+**Two things the SQL has to do that a row deletion does not, both now executed for real:** `chat_thread`
+keeps pointers at erased check-ins, so the sweep repairs the residue (`applySweep`, `:368-399`; journey leg
+"no chat thread is left pointing at an erased entry — deletion-spec §2.1 residue repair"); and *another
+person's* row can quote the student — a staff `notification` carries their first name, class and
+`conversationId` in a text column no FK reaches — so those notifications are swept by target, and the
+student's own go with the user row (`:279`). `src/` has no other delete path: `storage.service.ts:6`
+imports `PutObjectCommand` only.
+
+**Gates.** `npm test` 1910/1910 (76 files, exit 0); `npx tsc --noEmit` = the known 47-error baseline,
+nothing new; `npx oxlint --type-aware src/ test/` 0 errors; the tracked journey harness grew Act 8b and
+passes **220/220 in 188s (exit 0)** against a real database, including the account-wide leg on a
+deliberately disposable second student so the live browser fixture is untouched. Frontend `npx vite build`
+and `npx tsc --noEmit` both clean. **The frontend was not exercised in a browser** — the countdown, the
+cancel button and the new "About your history" bullets are compiled and type-checked, not seen.
 
 ---
 

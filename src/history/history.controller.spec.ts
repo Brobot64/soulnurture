@@ -1,4 +1,9 @@
-import { UnauthorizedException, ValidationPipe } from '@nestjs/common';
+import {
+  ConflictException,
+  NotFoundException,
+  UnauthorizedException,
+  ValidationPipe,
+} from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
@@ -10,6 +15,7 @@ import { HistoryDeletionService } from './history-deletion.service.js';
 import { HistoryService } from './history.service.js';
 
 const checkInId = '22d5780e-49e4-43fc-8737-743094ea9292';
+const requestId = '7a1f9c2e-5b3d-4e8f-9a01-2c3d4e5f6a7b';
 const root = '/api/v1/history';
 const roles = [
   'STUDENT',
@@ -23,7 +29,7 @@ const roles = [
 describe('HistoryController', () => {
   let app: NestFastifyApplication;
   const service = { list: vi.fn(), detail: vi.fn() };
-  const deletion = { create: vi.fn(), listMine: vi.fn() };
+  const deletion = { create: vi.fn(), listMine: vi.fn(), cancel: vi.fn() };
   const auth = { getSession: vi.fn() };
 
   beforeAll(async () => {
@@ -51,6 +57,11 @@ describe('HistoryController', () => {
     service.detail.mockResolvedValue({ checkInId, messages: [] });
     deletion.create.mockResolvedValue({ id: 'request-1', scope: 'ALL_HISTORY', alertedAt: new Date() });
     deletion.listMine.mockResolvedValue({ items: [] });
+    deletion.cancel.mockResolvedValue({
+      id: 'request-1',
+      scope: 'ALL_HISTORY',
+      cancelledAt: new Date('2026-11-04T12:00:00Z'),
+    });
     auth.getSession.mockResolvedValue({ user: { id: 'actor-1', role: 'STUDENT' } });
   });
 
@@ -137,6 +148,12 @@ describe('HistoryController', () => {
         spy: () => deletion.create,
         status: 201,
       },
+      {
+        method: 'POST' as const,
+        url: `${root}/deletion-requests/${requestId}/cancel`,
+        spy: () => deletion.cancel,
+        status: 201,
+      },
     ];
 
     it.each(asks)(
@@ -154,6 +171,12 @@ describe('HistoryController', () => {
       },
     );
 
+    it('hands the cancel to the service as the caller’s own ask, by id', async () => {
+      await app.inject({ method: 'POST', url: `${root}/deletion-requests/${requestId}/cancel` });
+
+      expect(deletion.cancel).toHaveBeenCalledWith('actor-1', requestId);
+    });
+
     it.each(roles.filter((role) => role !== 'STUDENT'))(
       'is closed to %s — a professional cannot file the ask for a student',
       async (role) => {
@@ -165,11 +188,15 @@ describe('HistoryController', () => {
           url: `${root}/deletion-requests`,
           payload: { scope: HistoryDeletionScope.ALL_HISTORY },
         });
+        const cancel = await app.inject({
+          method: 'POST',
+          url: `${root}/deletion-requests/${requestId}/cancel`,
+        });
 
-        expect(list.statusCode).toBe(403);
-        expect(post.statusCode).toBe(403);
+        expect([list.statusCode, post.statusCode, cancel.statusCode]).toEqual([403, 403, 403]);
         expect(deletion.listMine).not.toHaveBeenCalled();
         expect(deletion.create).not.toHaveBeenCalled();
+        expect(deletion.cancel).not.toHaveBeenCalled();
       },
     );
 
@@ -185,5 +212,33 @@ describe('HistoryController', () => {
       expect(response.statusCode).toBe(400);
       expect(deletion.create).not.toHaveBeenCalled();
     });
+
+    it.each(['not-a-uuid', '7a1f9c2e', 'request-1'])(
+      'rejects a cancel whose request id is not a uuid (%#)',
+      async (id) => {
+        const response = await app.inject({
+          method: 'POST',
+          url: `${root}/deletion-requests/${id}/cancel`,
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(deletion.cancel).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([404, 409])(
+      'passes the service’s answer through when the window has already closed (%i)',
+      async (status) => {
+        const failure = status === 404 ? new NotFoundException() : new ConflictException();
+        deletion.cancel.mockRejectedValue(failure);
+
+        const response = await app.inject({
+          method: 'POST',
+          url: `${root}/deletion-requests/${requestId}/cancel`,
+        });
+
+        expect(response.statusCode).toBe(status);
+      },
+    );
   });
 });

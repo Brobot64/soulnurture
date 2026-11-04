@@ -108,7 +108,7 @@ export const AI_DISCLOSURE_ABOUT: AiDisclosureGroup = {
       items: [
         'You type or speak, and a large language model writes a supportive reply in your language.',
         'Every reply is checked against our safety rules before you see it. Things it must never say — like labelling or diagnosing you — are blocked and replaced with safe guidance.',
-        'A reflection chat is short on purpose: it wraps up after a few turns so you always leave with a clear next step.',
+        'A reflection chat is short on purpose: it works toward a clear next step rather than going on indefinitely.',
         'It sees this chat, your newest check-in, and short summaries of your recent chats \u2014 the last 30 days only. It is not someone who remembers your whole life.',
       ],
     },
@@ -133,6 +133,7 @@ export const AI_DISCLOSURE_ABOUT: AiDisclosureGroup = {
         'What you write is sent to our AI provider so it can reply. It sees your first name and your message, not your whole school record.',
         'What you say is sent to a speech-to-text service to be turned into words \u2014 the N-ATLaS models for Yoruba, Hausa and Igbo, a hosted transcription service for English and Nigerian Pidgin. Only the words come back, and your school record never holds the recording.',
         'Consent, safety alerts and support requests are logged, so the school can review how you were helped.',
+        'Nothing is removed on a timer. What you wrote stays until you ask for it back: your history page schedules the removal, it runs a day after you ask, and you can cancel it until then. After it runs it cannot be undone.',
       ],
     },
     {
@@ -140,6 +141,7 @@ export const AI_DISCLOSURE_ABOUT: AiDisclosureGroup = {
       heading: 'When we may need to escalate',
       items: [
         'If a conversation suggests you may be at risk of harm, we tell your school\u2019s counselling or safeguarding team — even if you would rather we did not.',
+        'A person decides what happens next, not the AI.',
         'Your safety comes before privacy. That is true of every wellbeing service, and of every adult who cares about you.',
         'Where we can, we will tell you this is happening and help you reach that person yourself.',
       ],
@@ -150,6 +152,7 @@ export const AI_DISCLOSURE_ABOUT: AiDisclosureGroup = {
       items: [
         'Tap "I would like to talk to someone" in a chat, or open the Support page, and pick a person from your school\u2019s support list.',
         'You choose when: in the next day or two, today during a study period, or right now because you do not feel safe.',
+        'You can see how your request is doing afterwards, on the Support page.',
         'You can also speak directly with a teacher, counsellor, parent or guardian you trust — no chat needed.',
       ],
     },

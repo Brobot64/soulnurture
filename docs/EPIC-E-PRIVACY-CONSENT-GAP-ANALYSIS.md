@@ -263,6 +263,26 @@ Also corrected here, against this document's own first draft: PE-05's evidence c
 sentence was right about that half; only "your name" → "your first name" was worth tightening. The
 understatement (a snippet vs the whole thread) was real and is what the link-hiding answers.
 
+### 5.2 Second batch — PE-07…PE-10 folded into the *same* v3, 2026-11-04
+
+§5.1 left four instrument rows unbatched on purpose: PE-07 described a purge that did not exist yet, and
+this document's whole finding is that an instrument sentence ahead of the code is the defect it was written
+to catch. The purge is now built (`EPIC_H_PURGE_ENGINE_001`, deletion-spec §4.2), so these four went into
+**the same `v3`** rather than a `v4` — v3 is still unreleased, prod still serves v2, so a student is
+prompted once for all eight answers instead of twice.
+
+| ID | What changed in `ai-disclosure.ts` | Why it is true today |
+| --- | --- | --- |
+| **PE-07** | `how-we-protect` gains: *"Nothing is removed on a timer. What you wrote stays until you ask for it back: your history page schedules the removal, it runs a day after you ask, and you can cancel it until then. After it runs it cannot be undone."* | `create()` stamps `scheduledPurgeAt` = now + `DEFAULT_UNDO_WINDOW_MINUTES` (1440, `history-purge.service.ts:15`), the worker honours it, and cancel is a student action with `409` codes for a window that already closed. The first clause is the part that used to be a lie by omission: there is still no expiry job, and the sentence says so. |
+| **PE-08** | `when-we-escalate` gains: *"A person decides what happens next, not the AI."* | The alert recipient is a staff account and every downstream decision — review, follow-up, closing a flag — is written by a person. It asserts nothing about *which* conversations escalate, so it does not claim the unapproved indicator thresholds are switched on; that `configured:false` caveat in §5's PE-08 row is untouched and still stands. |
+| **PE-09** | `human-support` gains: *"You can see how your request is doing afterwards, on the Support page."* | `GET /v1/support-requests` is "List own support requests" (`support-requests.controller.ts:56-62`) and `/support/requests` renders its status today (§3). |
+| **PE-10** | `how-it-works` loses the turn count: *"it works toward a clear next step rather than going on indefinitely."* | The old line promised a number the deployment can change without re-consenting anyone (`guided.maxExtendedTurns` and the free-text budget are env configuration). The replacement states the intent, which is what the code always guarantees. |
+
+**PE-11 stays out, and stays blocked on code.** Withdrawing *consent* is not deleting *history*:
+`ConsentService.accept` is still the only write and still hard-codes `accepted: true`
+(`consent.service.ts:60-77`). Nothing to disclose until a withdrawal path exists.
+
+
 ### Also open, lower order
 
 - **PE-17** — the design's single "I understand and agree" button vs the shipped three-checkbox gate
@@ -315,11 +335,11 @@ Column D/C = decision owner / clinical-doc owner.
 | PE-04 | Does the instrument disclose cross-conversation memory? | `ai-disclosure.ts:112` vs `ai-context.service.ts:132-139` | Safeguarding + AI ethics | ☑ ANSWERED 2026-11-04 — "recent chats, the last 30 days only"; true as shipped (`recallDays: 30` bounds both buckets). Shipped in v3 (§5.1) |
 | PE-05 | Correct the escalation sentence: ref or name, snippet or full transcript, which staff roles read it? | `ai-disclosure.ts:79` vs `support-flag-alerts.service.ts:159-164` + `conversations.controller.ts:52/:66` | Psychologist + safeguarding (Doc A) | ☑ ANSWERED 2026-11-04 — "first name" + the 180-char start in the sentence; three staff thread-links hidden `display:none`. API read-access unchanged by decision. Shipped in v3 (§5.1) |
 | PE-06 | Is "your school's secure server" acceptable language for logical tenancy on shared hardware? | `ai-disclosure.ts:130`; one Postgres, `schoolId` scoping (`tenant.guard.ts:80-86`) | Legal + product | ☐ PENDING — owner: "not a writer's call". Sentence left untouched; answering it later costs another version bump |
-| PE-07 | What retention sentence goes in the instrument — the truthful "until a person agrees" or nothing? | no retention job (§2.5); `lib/history.ts:187-188`; depends on HD-01…HD-11 | Legal + safeguarding | ☐ PENDING |
-| PE-08 | Add "a person decides what happens next, not the AI", and what does the instrument say while rules are unconfigured? | `ai-disclosure.ts:137-144`; every indicator rule `configured: false` | Psychologist (Doc A) | ☐ PENDING |
-| PE-09 | Add "you can see its status" to the instrument? | ships at `/support/requests` | Psychologist | ☐ PENDING |
-| PE-10 | Is a turn-count promise allowed in a consent instrument whose cap is env-configurable? | `ai-disclosure.ts:111`; deployed caps | Product + safeguarding | ☐ PENDING |
-| PE-11 | Do students get a withdrawal path, and if so what happens to data already escalated? | `consent.service.ts:60-77` (accept is the only write); links to HD-04/HD-07 | Legal + psychologist | ☐ PENDING |
+| PE-07 | What retention sentence goes in the instrument — the truthful "until a person agrees" or nothing? | no retention job (§2.5); `lib/history.ts:187-188`; depends on HD-01…HD-11 | Legal + safeguarding | ☑ ANSWERED 2026-11-04 — the truthful one, rewritten for what the engine actually does: nothing on a timer, a student-scheduled erasure 24 h after the ask, cancellable until it runs. Shipped in v3 (§5.2) |
+| PE-08 | Add "a person decides what happens next, not the AI", and what does the instrument say while rules are unconfigured? | `ai-disclosure.ts:137-144`; every indicator rule `configured: false` | Psychologist (Doc A) | ◐ PARTLY 2026-11-04 — the sentence is in v3 (§5.2) and claims only that a person decides, not which conversations escalate. **The second half is still open:** every rule is still `configured:false`, so the instrument's "if our safety rules are triggered" describes thresholds no clinician has approved |
+| PE-09 | Add "you can see its status" to the instrument? | ships at `/support/requests` | Psychologist | ☑ ANSWERED 2026-11-04 — added; `GET /v1/support-requests` already returns the student's own statuses. Shipped in v3 (§5.2) |
+| PE-10 | Is a turn-count promise allowed in a consent instrument whose cap is env-configurable? | `ai-disclosure.ts:111`; deployed caps | Product + safeguarding | ☑ ANSWERED 2026-11-04 — no. The count is gone; the sentence states the intent. Shipped in v3 (§5.2) |
+| PE-11 | Do students get a withdrawal path, and if so what happens to data already escalated? | `consent.service.ts:60-77` (accept is the only write); links to HD-04/HD-07 | Legal + psychologist | ☐ PENDING — still blocked on code, not on the ruling: HD-04 is now built (§4.2 of the deletion spec), but withdrawing *consent* is a different subsystem from deleting *history* and no withdraw write exists |
 | PE-12 | Does a human-readable school ID exist as a product concept? | `schema.prisma:286-304` gives `id` + `shortCode` | Product | ☐ PENDING |
 | PE-13 | Do school activation links / QR codes get built, or does Epic E's copy drop them? | no token surface at all; blocks Epic B's wizard too | Product + safeguarding | ☐ PENDING |
 | PE-14 | Wire the three privacy booleans to real behaviour, delete them, or ship UI that currently would lie? | `schema.prisma:451-462` read by nothing; `/privacy` has no controls | Product + legal | ☐ PENDING |

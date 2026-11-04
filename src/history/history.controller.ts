@@ -57,29 +57,61 @@ so no entry claims a resource was shared.
   @ApiSessionAuth()
   @ApiStandardErrors()
   @ApiOperation({
-    summary: 'Own history-deletion requests, as filed',
-    description:
-      'The student’s own asks, newest first, exactly as submitted. There is no outcome field: nothing in this product has yet been decided or removed, and inventing a status column would be a promise the server cannot keep.',
+    summary: 'Own history-deletion requests, with their outcome',
+    description: `
+The student’s own asks, newest first, exactly as submitted, plus the state each
+one reached: \`scheduledPurgeAt\` is when the removal runs and can still be
+cancelled, \`cancelledAt\` that the student stopped it, \`purgedAt\` with
+\`removedCheckIns\` / \`removedConversations\` that it happened, and \`holdReason\`
+if an account that cannot sign in held the removal back rather than erased it.
+`,
   })
   @ApiEnvelopeOk(Object)
   listDeletions(@Session() session: UserSession) {
     return this.deletionService.listMine(session.user.id);
   }
 
+  @Post('deletion-requests/:requestId/cancel')
+  @ApiSessionAuth()
+  @ApiStandardErrors()
+  @ApiOperation({
+    summary: 'Cancel a deletion request inside its 24-hour window',
+    description: `
+The undo the student was promised. Works only while the window is open: once the
+removal has run there is nothing to cancel, and the answer says so instead of
+pretending the request can be reversed.
+
+Atomic by construction — the cancel and the erasure race on one UPDATE, and the
+one that reaches the row first wins.
+`,
+  })
+  @ApiParam({
+    name: 'requestId',
+    description: 'Deletion request id (uuid)',
+    example: '6f0f...',
+  })
+  @ApiEnvelopeOk(Object)
+  cancelDeletion(
+    @Session() session: UserSession,
+    @Param('requestId', ParseUUIDPipe) requestId: string,
+  ) {
+    return this.deletionService.cancel(session.user.id, requestId);
+  }
+
   @Post('deletion-requests')
   @ApiSessionAuth()
   @ApiStandardErrors()
   @ApiOperation({
-    summary: 'Ask for history to be deleted (request only)',
+    summary: 'Ask for history to be deleted (runs after a 24-hour undo window)',
     description: `
-Writes the ask and notifies the school's professionals. Deletes nothing: some of
-what a student shared may have to be kept for safeguarding or legal reasons, so
-the decision is a person's, not this endpoint's.
+Writes the ask, notifies the school's professionals, and schedules the removal 24
+hours out. Nothing is deleted by this call, and no staff member decides: the
+student owns the decision and can cancel until the window closes, after which the
+removal is carried out automatically.
 
-\`alertedAt\` in the receipt is the honest part. It is set only when a reviewer
-was actually told; null means the ask is stored but nobody at the school has
-been notified, and the student is shown that rather than a review that will not
-come.
+\`alertedAt\` in the receipt is the honest part. It is set only when someone at
+the school was actually told; null means the ask is stored and scheduled but
+nobody has been notified.
 `,
   })
   @ApiBody({ type: RequestHistoryDeletionDto })

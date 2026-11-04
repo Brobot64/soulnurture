@@ -27,6 +27,11 @@
  *      review (status+note), follow-up create/complete, the reported reply's
  *      review decision, audit trail, AI config
  *   8. RBAC negatives (+401 anon, 403 student→staff routes)
+ *   8b. EPIC H DELETION ENGINE — the 24-hour promise is a real schedule and a
+ *      real cancel; the worker then carries out a scoped erasure (named
+ *      check-ins, a dated cut-off at UTC midnight) and an account-wide one,
+ *      against a second student it is allowed to erase, and proves what is left
+ *      behind: one content-free audit row, nothing else
  *   9. Sign-out everywhere; sessions really revoked
  *
  * Every act prints ROUTE + PAYLOAD + key result fields. Non-zero exit on any
@@ -68,6 +73,14 @@ const JUDE = {
   email: 'jude.okonkwo@miva.edu.ng',
   password: 'JudeSafe123#',
   phone: '+2348098765432',
+};
+// Onboarded only so the deletion engine has an account it is allowed to erase.
+// Never Jude: wiping the account the browser pass logs into would take the
+// owner's own fixture down with it.
+const AMARA = {
+  name: 'Amara Eze',
+  email: 'amara.gone@miva.edu.ng',
+  password: 'AmaraSafe123#',
 };
 // Journey-specific owner email — never the one e2e-school-chat.mjs bootstraps,
 // so both scripts can share one dev database without deleting each other.
@@ -187,6 +200,7 @@ async function main() {
     ERIC.email,
     NGOZI.email,
     JUDE.email,
+    AMARA.email,
     OWNER.email,
     SCHOOL_ADMIN.email,
     'probe.token@x.com',
@@ -906,6 +920,267 @@ async function main() {
   check('school admin student-history route → 403', res.status === 403, `status ${res.status}`);
   res = await api(anon, 'GET', '/api/v1/history');
   check('anon student-history route → 401', res.status === 401, `status ${res.status}`);
+
+  // ---------------------------------------------------------------- act 8b
+  act('Act 8b — Epic H: the deletion engine keeps the 24-hour promise');
+
+  const DEL = '/api/v1/history';
+  const purgeAskRow = async (id) =>
+    (await db('SELECT * FROM history_deletion_request WHERE id = $1', [id])).rows[0] ?? null;
+  const purgeCount = async (sql, params = []) =>
+    Number((await db(sql, params)).rows[0]?.n ?? -1);
+
+  /**
+   * The erasure runs on the worker's own timer (HISTORY_PURGE_POLL_MS, 60s by
+   * default), so the run waits for its tick instead of pretending to cause one.
+   * Bounded on purpose: an ask that never lands is a FAIL, not a hang. A `null`
+   * row is also a result — ALL_HISTORY cascades its own receipt away.
+   */
+  const waitPurged = async (id, limitMs = 180_000) => {
+    const until = Date.now() + limitMs;
+    for (;;) {
+      const row = await purgeAskRow(id);
+      if (row === null || row?.purgedAt || row?.holdReason) return row;
+      if (Date.now() > until) return row;
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  };
+  /**
+   * The only fixture this leg needs: the window, walked forward. Everything the
+   * erasure itself does is the production code path, on the production SQL.
+   */
+  const rewindAsk = (id) =>
+    db(
+      `UPDATE history_deletion_request
+       SET "scheduledPurgeAt" = NOW() - interval '1 minute'
+       WHERE id = $1`,
+      [id],
+    );
+
+  const judeUserId = (
+    await db('SELECT "userId" FROM student_profile WHERE id = $1', [judeProfileId])
+  ).rows[0]?.userId;
+
+  // --- the promise is a schedule, and the undo is real --------------------
+  res = await api(jude, 'POST', `${DEL}/deletion-requests`, {
+    scope: 'BEFORE_DATE',
+    beforeDate: '2026-01-01',
+    note: 'The one I am going to cancel.',
+  });
+  const cancelAsk = data(res);
+  check('a dated ask is stored with its window', (res.status === 201 || res.status === 200) && !!cancelAsk?.id && !!cancelAsk?.scheduledPurgeAt, `status ${res.status}`);
+  const cancelWindowMinutes = Math.round((Date.parse(cancelAsk?.scheduledPurgeAt ?? '') - Date.now()) / 60000);
+  check('the undo window is the 24 hours the student was promised', Math.abs(cancelWindowMinutes - 1440) <= 2, `${cancelWindowMinutes} min`);
+  check('filing removes nothing and cancels nothing', cancelAsk?.purgedAt === null && cancelAsk?.cancelledAt === null);
+
+  res = await api(jude, 'POST', `${DEL}/deletion-requests/${cancelAsk.id}/cancel`);
+  const cancelledReceipt = data(res);
+  check('the student cancels inside the window', (res.status === 200 || res.status === 201) && !!cancelledReceipt?.cancelledAt && cancelledReceipt?.purgedAt === null, `status ${res.status}`);
+  const cancelRow = await purgeAskRow(cancelAsk.id);
+  check('the cancel is on the row, so the worker will never pick it up', !!cancelRow?.cancelledAt && cancelRow?.purgedAt === null);
+
+  res = await api(jude, 'POST', `${DEL}/deletion-requests/${cancelAsk.id}/cancel`);
+  check('a second cancel says so instead of pretending', res.status === 409 && res.body?.code === 'ALREADY_CANCELLED', `status ${res.status} code ${res.body?.code}`);
+  res = await api(jude, 'POST', `${DEL}/deletion-requests/${randomUUID()}/cancel`);
+  check('an ask that is not the student’s 404s', res.status === 404, `status ${res.status}`);
+  res = await api(jude, 'POST', `${DEL}/deletion-requests/not-a-uuid/cancel`);
+  check('a malformed ask id is refused before the service sees it', res.status === 400, `status ${res.status}`);
+  res = await api(eric, 'POST', `${DEL}/deletion-requests/${cancelAsk.id}/cancel`);
+  check('a professional cannot make or unmake the student’s choice (403)', res.status === 403, `status ${res.status}`);
+
+  // --- a scoped erasure erases the scope, and only the scope --------------
+  res = await api(jude, 'POST', `${DEL}/deletion-requests`, {
+    scope: 'SELECTED_CHECK_INS',
+    checkInIds: [checkIn.id, stressedCheckIn.id],
+  });
+  const scopedAsk = data(res);
+  check('the Act 6 ask and this one are both still open receipts', !!scopedAsk?.id && !!scopedAsk?.scheduledPurgeAt);
+  const scopedConvIds = (
+    await db('SELECT id FROM conversation WHERE "checkInId" = ANY($1::uuid[])', [[checkIn.id, stressedCheckIn.id]])
+  ).rows.map((r) => r.id);
+  const scopedMsgIds = (
+    await db('SELECT id FROM conversation_message WHERE "conversationId" = ANY($1::uuid[])', [scopedConvIds])
+  ).rows.map((r) => r.id);
+  const scopedFlagsBefore = await purgeCount('SELECT count(*)::int AS n FROM support_flag WHERE "studentId" = $1', [judeProfileId]);
+  const scopedRequestsBefore = await purgeCount('SELECT count(*)::int AS n FROM support_request WHERE "studentId" = $1', [judeProfileId]);
+  const scopedNoticesBefore = await purgeCount(
+    // The Act 4 escalation alert is a row in someone else's inbox that names this
+    // conversation. `data ->> …` is text, so the id list goes in as text:
+    // comparing it to uuid[] is an operator Postgres does not have.
+    `SELECT count(*)::int AS n FROM notification
+     WHERE "userId" <> $1::uuid AND "data" ->> 'conversationId' = ANY($2::text[])`,
+    [judeUserId, scopedConvIds],
+  );
+  await rewindAsk(scopedAsk.id);
+  const scopedRow = await waitPurged(scopedAsk.id);
+  check('the worker carries a closed window out', !!scopedRow?.purgedAt, `holdReason ${scopedRow?.holdReason ?? 'none'}`);
+  check('the receipt says what actually went', Number(scopedRow?.removedCheckIns) === 2 && Number(scopedRow?.removedConversations) === scopedConvIds.length, `${scopedRow?.removedCheckIns} check-in(s), ${scopedRow?.removedConversations} conversation(s) of ${scopedConvIds.length}`);
+  check('the named entries are gone', await purgeCount('SELECT count(*)::int AS n FROM emotional_check_in WHERE id = ANY($1::uuid[])', [[checkIn.id, stressedCheckIn.id]]) === 0);
+  check('the reflections that existed only as those entries went with them', await purgeCount('SELECT count(*)::int AS n FROM conversation WHERE id = ANY($1::uuid[])', [scopedConvIds]) === 0);
+  check('their messages went with the cascade', await purgeCount('SELECT count(*)::int AS n FROM conversation_message WHERE id = ANY($1::uuid[])', [scopedMsgIds]) === 0);
+  check('no chat thread is left pointing at an erased entry', await purgeCount(
+    `SELECT count(*)::int AS n FROM chat_thread t
+     WHERE t."entryCheckInId" IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM emotional_check_in e WHERE e.id = t."entryCheckInId")`,
+  ) === 0, 'deletion-spec §2.1 residue repair');
+  const scopedFlagsAfter = await purgeCount('SELECT count(*)::int AS n FROM support_flag WHERE "studentId" = $1', [judeProfileId]);
+  const scopedRequestsAfter = await purgeCount('SELECT count(*)::int AS n FROM support_request WHERE "studentId" = $1', [judeProfileId]);
+  check('a scoped erasure does not quietly take the safeguarding record with it', scopedFlagsAfter === scopedFlagsBefore && scopedRequestsAfter === scopedRequestsBefore, `flags ${scopedFlagsBefore}→${scopedFlagsAfter}, requests ${scopedRequestsBefore}→${scopedRequestsAfter}`);
+  check("someone else's inbox stops carrying the erased conversation", await purgeCount(
+    `SELECT count(*)::int AS n FROM notification
+     WHERE "userId" <> $1::uuid AND "data" ->> 'conversationId' = ANY($2::text[])`,
+    [judeUserId, scopedConvIds],
+  ) === 0, `${scopedNoticesBefore} staff notice(s) naming it, ${scopedConvIds.length} conversation(s) erased`);
+  check('the student is told what was removed', await purgeCount(
+    `SELECT count(*)::int AS n FROM notification WHERE type = 'HISTORY_DELETION_EXECUTED' AND "userId" = $1::uuid`,
+    [judeUserId],
+  ) >= 1);
+  res = await api(jude, 'POST', `${DEL}/deletion-requests/${scopedAsk.id}/cancel`);
+  check('cancel after the erasure is refused as what it is — nothing left to undo', res.status === 409 && res.body?.code === 'ALREADY_REMOVED', `status ${res.status} code ${res.body?.code}`);
+  const scopedAudit = await db(
+    `SELECT action, meta FROM audit_log WHERE action = 'history_deletion.executed' AND "entityId" = $1`,
+    [scopedAsk.id],
+  );
+  check('one audit row records the erasure and holds no content', scopedAudit.rowCount === 1 && scopedAudit.rows[0]?.action === 'history_deletion.executed' && !JSON.stringify(scopedAudit.rows[0]?.meta).includes('hostel'), JSON.stringify(scopedAudit.rows[0]?.meta ?? null));
+  res = await api(jude, 'GET', `${DEL}/deletion-requests`);
+  const receiptList = (data(res)?.items ?? []).find((r) => r.id === scopedAsk.id);
+  check('the student’s own list reads the outcome back', !!receiptList?.purgedAt && Number(receiptList?.removedCheckIns) === 2, JSON.stringify(receiptList?.purgedAt));
+
+  // --- the day boundary means UTC midnight, and the account leg ----------
+  const amara = makeActor('Amara');
+  res = await api(schoolAdmin, 'POST', `/api/v1/schools/${schoolId}/students`, {
+    email: AMARA.email,
+    firstName: 'Amara',
+    lastName: 'Eze',
+    classLabel: 'Chemistry 200 Level',
+    phone: '+2348077712345',
+  });
+  const amaraEnrolled = data(res);
+  check('a second student is onboarded, to be erased by the account leg', res.status === 201 && amaraEnrolled?.user?.role === 'STUDENT', `status ${res.status}`);
+  const amaraUserId = amaraEnrolled?.user?.id;
+  const amaraStudentId = (
+    await db('SELECT id FROM student_profile WHERE "userId" = $1::uuid', [amaraUserId])
+  ).rows[0]?.id;
+
+  const amaraVerify = await devVerificationUrl(anon, AMARA.email);
+  if (amaraVerify) {
+    const amaraTarget = new URL(amaraVerify);
+    res = await api(amara, 'GET', `${amaraTarget.pathname}${amaraTarget.search}`, undefined, { redirect: 'manual' });
+    check('Amara verifies her email', res.status === 200 || res.status === 302, `status ${res.status}`);
+  }
+  res = await api(amara, 'POST', '/api/auth/sign-in/email', { email: AMARA.email, password: SCHOOL.defaultPassword });
+  check('Amara signs in with the school default password', res.status === 200, `status ${res.status}`);
+  res = await api(amara, 'POST', '/api/v1/auth/first-password', { newPassword: AMARA.password });
+  check('Amara sets a personal password', (res.status === 200 || res.status === 201) && data(res)?.passwordChanged === true, `status ${res.status}`);
+  await api(amara, 'POST', '/api/v1/consent/accept', { version: 'v1' });
+  res = await api(amara, 'GET', '/api/v1/ai/disclosure');
+  await api(amara, 'POST', '/api/v1/ai/disclosure/acknowledge', {
+    agreements: (data(res)?.agreements ?? []).map((a) => a.id),
+  });
+  res = await api(amara, 'POST', '/api/v1/check-ins', {
+    feeling: 'ANXIOUS',
+    intensity: 'A_LITTLE',
+    description: 'Act 8b deletion fixture — the entry a dated ask names.',
+  });
+  const amaraCheckIn = data(res);
+  check('Amara has a check-in to erase', !!amaraCheckIn?.id, `status ${res.status}`);
+  res = await api(amara, 'POST', '/api/v1/journal', { title: 'Keep', content: 'A journal entry a partial erasure must not reach.', prompt: 'good news' });
+  const amaraJournal = data(res);
+  check('Amara has a journal entry too', !!amaraJournal?.id, `status ${res.status}`);
+  res = await api(amara, 'POST', '/api/v1/support-requests', {
+    supportPersonId: ericPerson.id,
+    personType: 'PSYCHOLOGIST',
+    timing: 'TODAY_STUDY_PERIOD',
+    note: 'Act 8b fixture — the safeguarding row the account leg must take.',
+  });
+  const amaraRequest = data(res);
+  check('Amara has a support request on file', !!amaraRequest?.id, `status ${res.status}`);
+
+  const todayUtc = new Date().toISOString().slice(0, 10);
+  const tomorrowUtc = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+  res = await api(amara, 'POST', `${DEL}/deletion-requests`, { scope: 'BEFORE_DATE', beforeDate: todayUtc });
+  const datedTodayAsk = data(res);
+  res = await api(amara, 'POST', `${DEL}/deletion-requests`, { scope: 'BEFORE_DATE', beforeDate: tomorrowUtc });
+  const datedTomorrowAsk = data(res);
+  await Promise.all([rewindAsk(datedTodayAsk.id), rewindAsk(datedTomorrowAsk.id)]);
+  const datedTodayRow = await waitPurged(datedTodayAsk.id);
+  const datedTomorrowRow = await waitPurged(datedTomorrowAsk.id);
+  check('a dated ask runs the day it names, not the day before it', !!datedTodayRow?.purgedAt && Number(datedTodayRow?.removedCheckIns) === 0 && Number(datedTodayRow?.removedConversations) === 0, `${datedTodayRow?.removedCheckIns} check-in(s) for ${todayUtc}`);
+  check('and the next day erases what that day created', !!datedTomorrowRow?.purgedAt && Number(datedTomorrowRow?.removedCheckIns) === 1, `${datedTomorrowRow?.removedCheckIns} check-in(s) for ${tomorrowUtc}`);
+  check('a dated erasure leaves the account and the journal standing', (await purgeCount('SELECT count(*)::int AS n FROM "user" WHERE id = $1::uuid', [amaraUserId])) === 1 && (await purgeCount('SELECT count(*)::int AS n FROM journal_entry WHERE id = $1::uuid', [amaraJournal.id])) === 1);
+
+  res = await api(amara, 'POST', `${DEL}/deletion-requests`, {
+    scope: 'ALL_HISTORY',
+    note: 'Like I never existed.',
+  });
+  const accountAsk = data(res);
+  check('ALL_HISTORY is scheduled like any other ask, and deletes nothing yet', (res.status === 201 || res.status === 200) && !!accountAsk?.scheduledPurgeAt && !!accountAsk?.alertedAt && accountAsk?.purgedAt === null, `status ${res.status}`);
+  const amaraAuditIds = (
+    await db(
+      `SELECT id::text AS id FROM emotional_check_in WHERE "studentId" = $1::uuid
+       UNION SELECT id::text FROM journal_entry WHERE "studentId" = $1::uuid
+       UNION SELECT id::text FROM support_request WHERE "studentId" = $1::uuid
+       UNION SELECT id::text FROM support_flag WHERE "studentId" = $1::uuid
+       UNION SELECT id::text FROM conversation WHERE "studentId" = $1::uuid
+       UNION SELECT id::text FROM consent_record WHERE "studentId" = $1::uuid
+       UNION SELECT id::text FROM privacy_preference WHERE "studentId" = $1::uuid
+       UNION SELECT id::text FROM history_deletion_request WHERE "studentId" = $1::uuid
+       UNION SELECT id::text FROM "user" WHERE id = $2::uuid
+       UNION SELECT id::text FROM student_profile WHERE id = $1::uuid`,
+      [amaraStudentId, amaraUserId],
+    )
+  ).rows.map((r) => r.id);
+  check('the sweep has ids to find before the rows go', amaraAuditIds.length >= 6, `${amaraAuditIds.length} id(s)`);
+
+  await rewindAsk(accountAsk.id);
+  const accountRow = await waitPurged(accountAsk.id);
+  check('the account-wide ask leaves no receipt row — the cascade took that too', accountRow === null, JSON.stringify(accountRow?.purgedAt ?? null));
+  for (const table of [
+    'emotional_check_in',
+    'journal_entry',
+    'support_request',
+    'support_flag',
+    'conversation',
+    'consent_record',
+    'privacy_preference',
+    'toolbox_item',
+    'session_summary',
+    'chat_thread',
+    'follow_up',
+  ]) {
+    const left = await purgeCount(`SELECT count(*)::int AS n FROM ${table} WHERE "studentId" = $1::uuid`, [amaraStudentId]);
+    check(`${table}: nothing of Amara’s survives`, left === 0, `${left} row(s) left`);
+  }
+  check('the login itself is gone', (await purgeCount('SELECT count(*)::int AS n FROM "user" WHERE id = $1::uuid', [amaraUserId])) === 0);
+  check('with the profile, the password hash, the sessions and the notices',
+    (await purgeCount('SELECT count(*)::int AS n FROM student_profile WHERE id = $1::uuid', [amaraStudentId])) === 0 &&
+    (await purgeCount('SELECT count(*)::int AS n FROM account WHERE "userId" = $1::uuid', [amaraUserId])) === 0 &&
+    (await purgeCount('SELECT count(*)::int AS n FROM session WHERE "userId" = $1::uuid', [amaraUserId])) === 0 &&
+    (await purgeCount('SELECT count(*)::int AS n FROM notification WHERE "userId" = $1::uuid', [amaraUserId])) === 0);
+  check('and the verification rows Better Auth keys by contact detail', await purgeCount(
+    `SELECT count(*)::int AS n FROM verification WHERE identifier = ANY($1::text[])`,
+    [[AMARA.email, '+2348077712345']],
+  ) === 0);
+  check('no staff inbox anywhere still quotes her', await purgeCount(
+    `SELECT count(*)::int AS n FROM notification
+     WHERE "body" ILIKE '%Amara%' OR "data" ->> 'studentId' = $1`,
+    [amaraStudentId],
+  ) === 0);
+  const amaraAudit = await db(
+    `SELECT action, "entityId", meta FROM audit_log WHERE "entityId" = ANY($1::text[])`,
+    [amaraAuditIds],
+  );
+  check('the audit trail naming her objects is swept, every row of it', amaraAudit.rows.every((r) => r.action === 'history_deletion.executed'), `${amaraAudit.rowCount} left: ${amaraAudit.rows.map((r) => r.action).join(', ')}`);
+  check('exactly one row survives the whole erasure — the erasure notice itself', amaraAudit.rowCount === 1 && amaraAudit.rows[0]?.entityId === accountAsk.id, `${amaraAudit.rowCount} row(s)`);
+  check('and it carries counts, not the person', !/Amara|amara\.gone|2348077712345/.test(JSON.stringify(amaraAudit.rows[0]?.meta ?? {})), JSON.stringify(amaraAudit.rows[0]?.meta ?? null));
+  const throwawayAmara = makeActor('throwaway-Amara');
+  res = await api(throwawayAmara, 'POST', '/api/auth/sign-in/email', { email: AMARA.email, password: AMARA.password });
+  check('the erased account cannot sign in', res.status === 401, `status ${res.status}`);
+
+  // The Act 6 ask is still open on Jude's 24-hour timer. Stop it: a test fixture
+  // that fires a day later would erase rows the browser pass expects to find.
+  res = await api(jude, 'POST', `${DEL}/deletion-requests/${deletionAsk.id}/cancel`);
+  check('the ask Act 6 left scheduled is cancelled, so no timer outlives the run', (res.status === 200 || res.status === 201) && !!data(res)?.cancelledAt, `status ${res.status}`);
 
   // ---------------------------------------------------------------- act 9
   act('Act 9 — sign-out really invalidates sessions');
