@@ -48,13 +48,16 @@ const context = (
 });
 
 describe('applyIntentVerdict', () => {
-  let prisma: Record<string, ReturnType<typeof vi.fn>>;
+  let prisma: Record<string, Record<string, ReturnType<typeof vi.fn>>>;
   let auditService: Record<string, ReturnType<typeof vi.fn>>;
 
   beforeEach(() => {
     prisma = {
       supportFlag: { findFirst: vi.fn(), create: vi.fn() },
       wellbeingActivity: { findMany: vi.fn() },
+      studentProfile: {
+        findUnique: vi.fn().mockResolvedValue({ user: { schoolId: 'school-1' } }),
+      },
     };
     auditService = { log: vi.fn().mockResolvedValue({ id: 'audit-1' }) };
   });
@@ -125,7 +128,12 @@ describe('applyIntentVerdict', () => {
     expect(data.aiContextSummary).toContain('no reason to live');
     expect(data.aiContextSummary).toContain('Sociology');
     expect(auditService.log).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'support_flag.auto_created' }),
+      expect.objectContaining({
+        action: 'support_flag.auto_created',
+        // The flag has no actor, so the student's own school is what makes it
+        // readable to that school's reviewer and invisible to every other.
+        schoolId: 'school-1',
+      }),
     );
     expect(notes.join(' ')).toContain('persisted');
   });

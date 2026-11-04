@@ -12,7 +12,7 @@ import { AiResponseReportsService } from './ai-response-reports.service.js';
 
 const root = '/api/v1/ai-response-reports';
 const id = 'd8f96949-85d4-4ca6-88ba-e8470e21dc18';
-const body = { messageId: id, expectedContent: 'Displayed reply', note: 'Synthetic note' };
+const body = { messageId: id, expectedContent: 'Displayed reply', reason: 'UNSAFE_OR_UNKIND', note: 'Synthetic note' };
 const routes = [
   { method: 'POST' as const, url: root, action: 'submit' as const, args: [body], payload: body, student: true },
   { method: 'GET' as const, url: `${root}/mine?conversationId=${id}`, action: 'mine' as const, args: [id], student: true },
@@ -64,7 +64,10 @@ describe('AiResponseReportsController', () => {
     { ...body, expectedContent: 1 }, { ...body, expectedContent: true }, { ...body, note: ['text'] }, { ...body, note: false },
     { ...body, expectedContent: 'a'.repeat(20001) }, { ...body, note: 3 }, { ...body, note: 'a'.repeat(2001) },
     { ...body, studentId: id }, { ...body, schoolId: id }, { ...body, status: 'RESOLVED' },
-  ])('rejects malformed or client-owned submission fields %#', async (payload) => {
+    { messageId: id, expectedContent: 'Displayed reply', note: 'Synthetic note' },
+    { ...body, reason: null }, { ...body, reason: '' }, { ...body, reason: 'It was rude' },
+    { ...body, reason: ['UNSAFE_OR_UNKIND'] }, { ...body, reason: 1 },
+  ])('rejects malformed, reason-less or client-owned submission fields %#', async (payload) => {
     expect((await app.inject({ method: 'POST', url: root, payload })).statusCode).toBe(400);
     expect(service.submit).not.toHaveBeenCalled();
   });

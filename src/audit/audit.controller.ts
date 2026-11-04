@@ -1,5 +1,7 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import { ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { Session } from '@thallesp/nestjs-better-auth';
+import type { UserSession } from '@thallesp/nestjs-better-auth';
 import {
   ApiEnvelopeOk,
   ApiSessionAuth,
@@ -17,13 +19,20 @@ export class AuditController {
   @Get()
   @ApiSessionAuth()
   @ApiStandardErrors()
-  @ApiOperation({ summary: 'List recent audit events' })
+  @ApiOperation({
+    summary: "List this school's recent audit events",
+    description:
+      'Action metadata only, never wellbeing content, and scoped to the caller’s own school: an event is visible here when the school it belongs to is the school on the reviewer’s account. A staff account with no school is refused — it is entitled to no tenant’s trail.',
+  })
   @ApiQuery({ name: 'limit', required: false })
   @ApiEnvelopeOk(Object)
-  async list(@Query('limit') limit?: string) {
+  async list(
+    @Session() session: UserSession,
+    @Query('limit') limit?: string,
+  ) {
     const take = Math.min(Number(limit ?? 50) || 50, 100);
     return {
-      items: await this.auditService.list({ take }),
+      items: await this.auditService.list(session.user.id, { take }),
     };
   }
 }

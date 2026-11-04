@@ -21,6 +21,7 @@ import { validateEnv } from './config/env.config.js';
 import { DashboardModule } from './dashboard/dashboard.module.js';
 import { DocsModule } from './docs/docs.module.js';
 import { FollowUpsModule } from './follow-ups/follow-ups.module.js';
+import { HistoryModule } from './history/history.module.js';
 import { JournalModule } from './journal/journal.module.js';
 import { MailerModule } from './mailer/mailer.module.js';
 import type { EmailOptions } from './mailer/interfaces/mail-config.interface.js';
@@ -94,6 +95,7 @@ import { UsersModule } from './users/users.module.js';
     DashboardModule,
     AuditModule,
     JournalModule,
+    HistoryModule,
     PrivacyModule,
     StorageModule,
   ],

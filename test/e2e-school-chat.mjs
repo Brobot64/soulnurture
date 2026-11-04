@@ -43,7 +43,13 @@ const DB_URL =
   process.env.E2E_DATABASE_URL ??
   process.env.DATABASE_URL ??
   'postgresql://postgres:postgres@localhost:5432/natlas';
-const ORIGIN = BASE;
+// Better Auth answers 403 for any /api/auth/* call whose Origin is outside
+// BETTER_AUTH_TRUSTED_ORIGINS, so the origin a harness presents is its own
+// setting — not a side effect of which port the backend happens to listen on.
+// E2E_BASE_URL can point at :3010 while auth is still told the caller is
+// localhost:3000. (e2e-journey.mjs has always done this; these two derived it
+// from BASE, which is why a non-:3000 backend broke them and not the journey.)
+const ORIGIN = process.env.E2E_ORIGIN ?? 'http://localhost:3000';
 const SOCKET_PATH = '/api/socket.io';
 const SHORT_CODE_CHARSET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 

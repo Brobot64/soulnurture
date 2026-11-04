@@ -1,11 +1,14 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { ContentKind } from '@prisma/client';
+import { ContentService } from '../content/content.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StudentsService } from '../students/students.service.js';
 import { ResourcesService } from './resources.service.js';
 
 describe('ResourcesService', () => {
   let service: ResourcesService;
+  let content: { liveCodes: ReturnType<typeof vi.fn> };
   let prisma: {
     wellbeingResource: Record<string, ReturnType<typeof vi.fn>>;
     toolboxItem: Record<string, ReturnType<typeof vi.fn>>;
@@ -22,6 +25,9 @@ describe('ResourcesService', () => {
   };
 
   beforeEach(async () => {
+    // One approved code by default, so the filter tests read as the old ones
+    // did. Each gate test overrides this with what the register should say.
+    content = { liveCodes: vi.fn().mockResolvedValue(new Set(['WN-01'])) };
     prisma = {
       wellbeingResource: { findMany: vi.fn(), findFirst: vi.fn() },
       toolboxItem: {
@@ -42,6 +48,7 @@ describe('ResourcesService', () => {
           provide: StudentsService,
           useValue: { ensureProfile: vi.fn().mockResolvedValue(student) },
         },
+        { provide: ContentService, useValue: content },
       ],
     }).compile();
 
@@ -100,20 +107,42 @@ describe('ResourcesService', () => {
       { category: 'ANXIETY' },
     ]);
     expect(result.title).toBe('Picked for you');
+    expect(result.basis).toBe('STATED_NEED');
     expect(result.rationale).toContain('overwhelmed');
     expect(result.rationale).not.toContain('reflection signals');
     expect(result.items).toHaveLength(1);
   });
 
-  it('labels the list as featured when no check-in is supplied', async () => {
+  it('labels the list as featured when the student has no check-in at all', async () => {
+    prisma.emotionalCheckIn.findFirst.mockResolvedValue(null);
     prisma.wellbeingResource.findMany.mockResolvedValue([]);
 
     const result = await service.tailored('user-1');
 
-    expect(prisma.emotionalCheckIn.findFirst).not.toHaveBeenCalled();
+    expect(prisma.emotionalCheckIn.findFirst).toHaveBeenCalledWith({
+      where: { studentId: student.id },
+      orderBy: { createdAt: 'desc' },
+    });
     expect(prisma.wellbeingResource.findMany.mock.calls[0][0].where.OR).toBeUndefined();
     expect(result.title).toBe('Featured resources');
+    expect(result.basis).toBe('NEWEST_APPROVED');
     expect(result.rationale).not.toContain('You said');
+  });
+
+  it('reads the newest check-in itself when the caller names no id', async () => {
+    // A student cannot know their check-in ids, so "from your check-in" has to
+    // be resolved server-side or the surface is making the claim up.
+    prisma.emotionalCheckIn.findFirst.mockResolvedValue({
+      id: 'checkin-newest',
+      feeling: 'ANXIOUS',
+    });
+    prisma.wellbeingResource.findMany.mockResolvedValue([]);
+
+    const result = await service.tailored('user-1');
+
+    expect(result.title).toBe('Picked for you');
+    expect(result.basis).toBe('STATED_NEED');
+    expect(result.rationale).toContain('anxious');
   });
 
   it('does not personalise from a check-in belonging to another student', async () => {
@@ -123,6 +152,7 @@ describe('ResourcesService', () => {
     const result = await service.tailored('user-1', 'someone-elses-checkin');
 
     expect(result.title).toBe('Featured resources');
+    expect(result.basis).toBe('NEWEST_APPROVED');
     expect(prisma.wellbeingResource.findMany.mock.calls[0][0].where.OR).toBeUndefined();
   });
 
@@ -136,6 +166,7 @@ describe('ResourcesService', () => {
     const result = await service.tailored('user-1', 'checkin-1');
 
     expect(result.title).toBe('Featured resources');
+    expect(result.basis).toBe('NEWEST_APPROVED');
     expect(prisma.wellbeingResource.findMany.mock.calls[0][0].where.OR).toBeUndefined();
   });
 
@@ -194,5 +225,101 @@ describe('ResourcesService', () => {
     ).rejects.toThrow(NotFoundException);
 
     expect(prisma.resourceFeedback.create).not.toHaveBeenCalled();
+  });
+
+  describe('the content register decides what a student may see (Doc B §5, Doc C §1)', () => {
+    it('reads only the codes the register currently approves', async () => {
+      prisma.wellbeingResource.findMany.mockResolvedValue([]);
+      prisma.toolboxItem.count.mockResolvedValue(0);
+
+      await service.list('user-1', {});
+
+      expect(content.liveCodes).toHaveBeenCalledWith({
+        kind: ContentKind.WELLBEING_RESOURCE,
+      });
+      expect(prisma.wellbeingResource.findMany.mock.calls[0][0].where.contentCode).toEqual({
+        in: ['WN-01'],
+      });
+    });
+
+    it('empties the catalogue when nothing is approved, rather than falling back to the row boolean', async () => {
+      // The five seeded placeholder rows carried approved: true and no code.
+      // A register that approves nothing must show nothing, not those rows.
+      content.liveCodes.mockResolvedValue(new Set());
+      prisma.wellbeingResource.findMany.mockResolvedValue([]);
+      prisma.toolboxItem.count.mockResolvedValue(0);
+
+      await service.list('user-1', {});
+
+      expect(prisma.wellbeingResource.findMany.mock.calls[0][0].where.contentCode).toEqual({
+        in: [],
+      });
+    });
+
+    it('gates the tailored surface with the same predicate it filters on', async () => {
+      prisma.wellbeingResource.findMany.mockResolvedValue([]);
+
+      await service.tailored('user-1');
+
+      expect(prisma.wellbeingResource.findMany.mock.calls[0][0].where.contentCode).toEqual({
+        in: ['WN-01'],
+      });
+    });
+
+    it('keeps the stated-need narrowing on top of the register gate', async () => {
+      prisma.emotionalCheckIn.findFirst.mockResolvedValue({
+        id: 'checkin-1',
+        feeling: 'STRESSED',
+      });
+      prisma.wellbeingResource.findMany.mockResolvedValue([]);
+
+      await service.tailored('user-1', 'checkin-1');
+
+      const where = prisma.wellbeingResource.findMany.mock.calls[0][0].where;
+      expect(where.contentCode).toEqual({ in: ['WN-01'] });
+      expect(where.OR).toHaveLength(3);
+    });
+
+    it('drops a toolbox row whose resource the register no longer approves', async () => {
+      prisma.toolboxItem.findMany.mockResolvedValue([
+        { resource: { id: 'r1', contentCode: 'WN-01', active: true, approved: true } },
+        { resource: { id: 'r2', contentCode: null, active: true, approved: true } },
+        { resource: { id: 'r3', contentCode: 'WN-02', active: true, approved: true } },
+      ]);
+
+      const result = await service.toolbox('user-1');
+
+      expect(result.items.map((r) => r.id)).toEqual(['r1']);
+      expect(result.count).toBe(1);
+    });
+
+    it('refuses to save a row that is approved on the table but unreviewed in the register', async () => {
+      prisma.wellbeingResource.findFirst.mockResolvedValue(null);
+
+      await expect(service.saveToolbox('user-1', 'r2')).rejects.toThrow(
+        NotFoundException,
+      );
+
+      expect(prisma.wellbeingResource.findFirst.mock.calls[0][0].where).toEqual(
+        expect.objectContaining({
+          id: 'r2',
+          contentCode: { in: ['WN-01'] },
+        }),
+      );
+      expect(prisma.toolboxItem.upsert).not.toHaveBeenCalled();
+    });
+
+    it('will not take a what-next answer for an unreviewed resource', async () => {
+      prisma.wellbeingResource.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.recordFeedback('user-1', { resourceId: 'r2', choice: 'NOT_HELPFUL' }),
+      ).rejects.toThrow(NotFoundException);
+
+      expect(prisma.wellbeingResource.findFirst.mock.calls[0][0].where).toEqual(
+        expect.objectContaining({ contentCode: { in: ['WN-01'] } }),
+      );
+      expect(prisma.resourceFeedback.create).not.toHaveBeenCalled();
+    });
   });
 });

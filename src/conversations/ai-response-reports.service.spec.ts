@@ -1,22 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { AiReportReason, Prisma } from '@prisma/client';
 import type { PrismaService } from '../prisma/prisma.service.js';
 import { AiResponseReportsService } from './ai-response-reports.service.js';
 
 const base = {
   id: 'report-1', messageId: 'message-1', responseContent: 'Original reply', responseLanguage: 'yo',
-  note: 'Original note\nẸ ṣé.', createdAt: new Date(), message: { conversationId: 'conv-1' },
+  reason: AiReportReason.UNSAFE_OR_UNKIND, note: 'Original note\nẸ ṣé.', createdAt: new Date(),
+  message: { conversationId: 'conv-1' },
 };
 const report = { ...base, reviewOutcome: null, reviewedAt: null, reviewedBy: null };
 const submitted = { id: base.id, messageId: base.messageId, responseContent: base.responseContent,
-  responseLanguage: base.responseLanguage, note: base.note, createdAt: base.createdAt, conversationId: 'conv-1' };
+  responseLanguage: base.responseLanguage, reason: base.reason, note: base.note, createdAt: base.createdAt,
+  conversationId: 'conv-1' };
 const view = { ...submitted, reviewOutcome: null, reviewedAt: null, reviewedBy: null };
-const dto = { messageId: 'message-1', expectedContent: 'Original reply', note: base.note };
+const dto = { messageId: 'message-1', expectedContent: 'Original reply', reason: base.reason, note: base.note };
 const owner = { student: { userId: 'student-user', user: { role: 'STUDENT', schoolId: 'school-1' } } };
 const school = { student: { user: { schoolId: 'school-1' } } };
-const baseSelect = { id: true, messageId: true, responseContent: true, responseLanguage: true, note: true,
-  createdAt: true, message: { select: { conversationId: true } } };
+const baseSelect = { id: true, messageId: true, responseContent: true, responseLanguage: true, reason: true,
+  note: true, createdAt: true, message: { select: { conversationId: true } } };
 const selected = { ...baseSelect, reviewOutcome: true, reviewedAt: true,
   reviewedBy: { select: { name: true, role: true } } };
 const guardSelect = { id: true, reviewOutcome: true, reviewedById: true };
@@ -55,7 +57,8 @@ describe('AiResponseReportsService', () => {
       where: { id: 'message-1', role: 'ASSISTANT', conversation: owner }, select: { id: true, content: true, language: true },
     });
     expect(tx.aiResponseReport.create).toHaveBeenCalledWith({ data: {
-      messageId: 'message-1', responseContent: 'Original reply', responseLanguage: 'yo', note: base.note,
+      messageId: 'message-1', responseContent: 'Original reply', responseLanguage: 'yo',
+      reason: AiReportReason.UNSAFE_OR_UNKIND, note: base.note,
     }, select: baseSelect });
     expect(tx.auditLog.create).toHaveBeenCalledWith({ data: {
       actorId: 'student-user', schoolId: 'school-1', action: 'ai_response_report.created', entity: 'AiResponseReport', entityId: 'report-1',
@@ -165,6 +168,17 @@ describe('AiResponseReportsService', () => {
     setup.prisma.user.findUnique.mockResolvedValue({ role: 'COUNSELLOR', schoolId: 'school-1' });
     setup.prisma.aiResponseReport.findFirst.mockResolvedValue(null);
     await expect(service.getOne('reviewer', 'foreign-report')).rejects.toThrow(NotFoundException);
+  });
+
+  // Reports filed before the reason existed are kept, not rewritten: a null
+  // reason is "the student never chose one", and the reviewer queue has to say
+  // that rather than inventing a category for them.
+  it('reads a pre-reason report through the reviewer queue with the reason left absent', async () => {
+    setup.prisma.user.findUnique.mockResolvedValue({ role: 'COUNSELLOR', schoolId: 'school-1' });
+    setup.prisma.aiResponseReport.findMany.mockResolvedValue([{ ...report, reason: null }]);
+    expect(await service.list('reviewer', { limit: 20, offset: 0 })).toEqual({
+      items: [{ ...view, reason: null }], nextOffset: null,
+    });
   });
 
   it.each(['COUNSELLOR', 'PSYCHOLOGIST'])('records a %s review decision with a metadata-only audit', async (role) => {

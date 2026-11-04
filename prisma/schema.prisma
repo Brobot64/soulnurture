@@ -196,6 +196,28 @@ enum AiReportReviewOutcome {
   CANNOT_ASSESS
 }
 
+/// Why the student flagged an AI reply, chosen by the student from a fixed set
+/// (Epic G "Did something feel off?"). These are report categories, not
+/// wellbeing content, so they are deliberately outside the content register:
+/// gating the reporting path behind a review workflow could hide the one
+/// control a student has over a bad reply.
+enum AiReportReason {
+  DIAGNOSIS_OR_MEDICAL_ADVICE
+  UNSAFE_OR_UNKIND
+  DID_NOT_UNDERSTAND
+  OTHER
+}
+
+/// What a student asks to have removed (Epic H "Ask to delete your history?").
+/// A request, never an action: nothing in this product deletes wellbeing data on
+/// a student's say-so, because some of it may have to be kept for safeguarding or
+/// legal reasons — so the row records the ask and a person decides.
+enum HistoryDeletionScope {
+  ALL_HISTORY
+  BEFORE_DATE
+  SELECTED_CHECK_INS
+}
+
 // --- Content registry (Doc C §6/§7) -----------------------------------------------------
 // Every reviewer-editable string (emotion term, check-in prompt, response option, resource,
 // category) is a versioned row here, NOT hard-coded, so nothing reaches a student until an
@@ -383,6 +405,7 @@ model StudentProfile {
   resourceFeedbacks ResourceFeedback[]
   consentRecords    ConsentRecord[]
   privacyPreference PrivacyPreference?
+  deletionRequests  HistoryDeletionRequest[]
   sessionSummaries  SessionSummary[]
   activitySessions  ActivitySession[]
   chatThreads       ChatThread[]
@@ -436,6 +459,57 @@ model PrivacyPreference {
   student                         StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
 
   @@map("privacy_preference")
+}
+
+/// Epic H. One row per ask, kept exactly as asked. The ask itself deletes
+/// nothing — the worker that reads `scheduledPurgeAt` does, after the student's
+/// 24-hour undo window has closed. The row keeps the ask verbatim (scope, the
+/// date or the check-in ids, the student's own note) so what was erased, and
+/// when, is reconstructable from what was actually requested.
+model HistoryDeletionRequest {
+  id        String               @id @default(uuid()) @db.Uuid
+  studentId String               @db.Uuid
+  scope     HistoryDeletionScope
+  /// Only for BEFORE_DATE. A day, not a moment — the student picks a date.
+  beforeDate DateTime?          @db.Date
+  /// Only for SELECTED_CHECK_INS. Ids are frozen as submitted, so the ask is
+  /// still reconstructable against the rows that were later erased.
+  checkInIds String[]           @default([])
+  note      String?              @db.VarChar(2000)
+  /// Set once a person at the school has actually been told. Kept for the
+  /// receipt: notification is informational now — the student decides, not staff.
+  alertedAt DateTime?
+  /// The moment this ask becomes an erasure. Stamped by create() as
+  /// "now + the undo window"; NULL on rows written before the engine existed,
+  /// which the worker deliberately leaves alone.
+  /// TIMESTAMPTZ on purpose: due-ness is decided by Postgres NOW() in the
+  /// worker's own interval arithmetic, never by an app-side Date.
+  scheduledPurgeAt DateTime?     @db.Timestamptz(6)
+  /// Only inside the window. A cancelled ask is never purged, by any path.
+  cancelledAt DateTime?          @db.Timestamptz(6)
+  /// Set when the erasure ran. Only ever set on the partial scopes: an
+  /// ALL_HISTORY purge deletes the student, and this row cascades away with
+  /// them — `history_deletion.executed` in the audit log is that erasure's only
+  /// surviving record, and it holds no personal content.
+  purgedAt DateTime?             @db.Timestamptz(6)
+  /// Why a due erasure did NOT run — e.g. the account cannot sign in, which
+  /// would make the undo window meaningless. Shown on the receipt, and the
+  /// worker re-checks it on a later pass.
+  holdReason String?
+  /// What the erasure actually removed, so a partial-scope receipt can say so
+  /// in counts rather than in the student's own words having been "cleared".
+  removedCheckIns      Int     @default(0)
+  removedConversations Int     @default(0)
+  createdAt DateTime            @default(now())
+
+  student StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([studentId, createdAt])
+  /// The worker's due-scan index is a PARTIAL index owned by the hand-written
+  /// migration (`WHERE "purgedAt" IS NULL AND "cancelledAt" IS NULL`). Prisma
+  /// cannot express a partial index, so it is deliberately absent here — the
+  /// same raw-SQL-owned pattern as `session_summary.embedding`.
+  @@map("history_deletion_request")
 }
 
 model EmotionalCheckIn {
@@ -574,6 +648,9 @@ model AiResponseReport {
   messageId        String                 @unique @db.Uuid
   responseContent  String
   responseLanguage String?
+  /// Reports submitted before Epic G carry no reason; the submit path has
+  /// required one since, so only historical rows are null.
+  reason           AiReportReason?
   note             String?                @db.VarChar(2000)
   /// Reviewer decision recorded in the school's review queue. Nullable = not
   /// reviewed yet; the last decision by any same-school reviewer wins.
