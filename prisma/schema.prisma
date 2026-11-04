@@ -196,6 +196,18 @@ enum AiReportReviewOutcome {
   CANNOT_ASSESS
 }
 
+/// Why the student flagged an AI reply, chosen by the student from a fixed set
+/// (Epic G "Did something feel off?"). These are report categories, not
+/// wellbeing content, so they are deliberately outside the content register:
+/// gating the reporting path behind a review workflow could hide the one
+/// control a student has over a bad reply.
+enum AiReportReason {
+  DIAGNOSIS_OR_MEDICAL_ADVICE
+  UNSAFE_OR_UNKIND
+  DID_NOT_UNDERSTAND
+  OTHER
+}
+
 // --- Content registry (Doc C §6/§7) -----------------------------------------------------
 // Every reviewer-editable string (emotion term, check-in prompt, response option, resource,
 // category) is a versioned row here, NOT hard-coded, so nothing reaches a student until an
@@ -574,6 +586,9 @@ model AiResponseReport {
   messageId        String                 @unique @db.Uuid
   responseContent  String
   responseLanguage String?
+  /// Reports submitted before Epic G carry no reason; the submit path has
+  /// required one since, so only historical rows are null.
+  reason           AiReportReason?
   note             String?                @db.VarChar(2000)
   /// Reviewer decision recorded in the school's review queue. Nullable = not
   /// reviewed yet; the last decision by any same-school reviewer wins.

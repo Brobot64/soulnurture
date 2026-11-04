@@ -6,7 +6,7 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import type { CreateAiResponseReportDto, ListAiResponseReportsDto } from './dto/ai-response-report.dto.js';
 
 const baseSelect = {
-  id: true, messageId: true, responseContent: true, responseLanguage: true, note: true, createdAt: true,
+  id: true, messageId: true, responseContent: true, responseLanguage: true, reason: true, note: true, createdAt: true,
   message: { select: { conversationId: true } },
 } satisfies Prisma.AiResponseReportSelect;
 
@@ -66,7 +66,10 @@ export class AiResponseReportsService {
         }
         // Async generation replaces message content in place; the reported text must stay fixed.
         const report = await tx.aiResponseReport.create({
-          data: { messageId: message.id, responseContent: message.content, responseLanguage: message.language, note: dto.note?.trim() ? dto.note : null },
+          data: {
+            messageId: message.id, responseContent: message.content, responseLanguage: message.language,
+            reason: dto.reason, note: dto.note?.trim() ? dto.note : null,
+          },
           select: submissionSelect,
         });
         await tx.auditLog.create({ data: {

@@ -20,10 +20,12 @@
  *      SERVER_POLICY flag + safety message + human-support pathway
  *   5. ASYNC AI — a queued AiGenerationJob is inserted by DB (simulating a
  *      first-generation outage); the worker must rewrite the placeholder
- *      message (COMPLETE) and an exhausted job must flip to FAILED
+ *      message (COMPLETE) and an exhausted job must flip to FAILED; then JUDE
+ *      reports an AI reply with a reason (Epic G)
  *   6. Resources / toolbox / journal / support request lifecycle
  *   7. ERIC's professional review — dashboard, flags ack/in-review, request
- *      review (status+note), follow-up create/complete, audit trail, AI config
+ *      review (status+note), follow-up create/complete, the reported reply's
+ *      review decision, audit trail, AI config
  *   8. RBAC negatives (+401 anon, 403 student→staff routes)
  *   9. Sign-out everywhere; sessions really revoked
  *
@@ -565,6 +567,38 @@ async function main() {
   }
   check('exhausted job flips placeholder to FAILED (holding kept)', failedTowards === true);
 
+  // ---------------------------------------------------------------- act 5
+  act('Act 5 — Epic G: a student reports an AI reply, with a reason');
+  // Reporting is the one control a student holds over a bad reply, so the
+  // reason Epic G asks for has to survive the whole path: chosen here, counted
+  // by a reviewer in Act 7, and never answered back as a review field.
+  res = await api(jude, 'GET', `/api/v1/conversations/${conversation.id}`);
+  const assistantMessages = (data(res)?.messages ?? []).filter((m) => m.role === 'ASSISTANT' && typeof m.content === 'string');
+  check('assistant replies exist to report', assistantMessages.length >= 2, `${assistantMessages.length}`);
+  const reportedMessage = assistantMessages[0];
+  res = await api(jude, 'POST', '/api/v1/ai-response-reports', {
+    messageId: reportedMessage.id,
+    expectedContent: reportedMessage.content,
+    reason: 'DIAGNOSIS_OR_MEDICAL_ADVICE',
+  });
+  const reportReceipt = data(res)?.report;
+  check('report accepted with the reason the student chose', res.status === 200 && data(res)?.alreadyReported === false
+    && reportReceipt?.reason === 'DIAGNOSIS_OR_MEDICAL_ADVICE', `status ${res.status} reason ${reportReceipt?.reason}`);
+  check('and the receipt still hides every reviewer field', !('reviewOutcome' in (reportReceipt ?? {})), Object.keys(reportReceipt ?? {}).join(','));
+  res = await api(jude, 'POST', '/api/v1/ai-response-reports', {
+    messageId: assistantMessages[1].id, expectedContent: assistantMessages[1].content,
+  });
+  check('a report with no reason is refused', res.status === 400, `status ${res.status}`);
+  res = await api(jude, 'POST', '/api/v1/ai-response-reports', {
+    messageId: assistantMessages[1].id, expectedContent: assistantMessages[1].content, reason: 'It was rude',
+  });
+  check('free text is not a reason', res.status === 400, `status ${res.status}`);
+  res = await api(jude, 'POST', '/api/v1/ai-response-reports', {
+    messageId: reportedMessage.id, expectedContent: reportedMessage.content, reason: 'OTHER',
+  });
+  check('a second report on the same reply returns the first one, reason and all',
+    data(res)?.alreadyReported === true && data(res)?.report?.reason === 'DIAGNOSIS_OR_MEDICAL_ADVICE', `reason ${data(res)?.report?.reason}`);
+
   // ---------------------------------------------------------------- act 6
   act('Act 6 — resources, toolbox, journal, support request');
   // The content register — not the row booleans — decides what a student sees
@@ -763,6 +797,26 @@ async function main() {
   const auditActions = (data(res)?.items ?? []).map((a) => a.action);
   check('audit shows auto-created flag', auditActions.includes('support_flag.auto_created'));
   check('audit shows enrollment + review + follow-up + disclosure trails', auditActions.includes('staff.bootstrap_enrollment') && auditActions.includes('support_request.status_changed') && auditActions.includes('follow_up.created') && auditActions.includes('ai.disclosure_acknowledged'), `unique actions: ${new Set(auditActions).size}`);
+
+  // The other half of Epic G's report path: a person in the school reads the
+  // reason, and the student who filed it is told nothing about that reading.
+  act('Act 7 — ERIC reviews the reported AI reply');
+  res = await api(eric, 'GET', '/api/v1/ai-response-reports');
+  const reportedRow = (data(res)?.items ?? []).find((r) => r.id === reportReceipt?.id);
+  check('the reviewer queue carries the reason the student chose', reportedRow?.reason === 'DIAGNOSIS_OR_MEDICAL_ADVICE'
+    && reportedRow?.reviewOutcome === null, `reason ${reportedRow?.reason} outcome ${reportedRow?.reviewOutcome}`);
+  check('and the reply text the student saw is the text on file', reportedRow?.responseContent === reportedMessage.content);
+  res = await api(eric, 'PATCH', `/api/v1/ai-response-reports/${reportReceipt.id}/review`, { outcome: 'NO_CHANGE_NEEDED' });
+  const reviewedReport = data(res);
+  check('a reviewer decision is recorded against the reply, not the conversation',
+    res.status === 200 && reviewedReport?.reviewOutcome === 'NO_CHANGE_NEEDED' && reviewedReport?.reviewedBy?.role === 'PSYCHOLOGIST',
+    `status ${res.status} outcome ${reviewedReport?.reviewOutcome} by ${JSON.stringify(reviewedReport?.reviewedBy)}`);
+  res = await api(jude, 'GET', `/api/v1/ai-response-reports/mine?conversationId=${conversation.id}`);
+  check('the student receipt after a review says only that it was reported',
+    (data(res)?.items ?? []).some((r) => r.id === reportReceipt.id)
+    && !JSON.stringify(data(res)).includes('reviewOutcome'), JSON.stringify(data(res))?.slice(0, 120));
+  res = await api(ngozi, 'GET', '/api/v1/ai-response-reports');
+  check('support staff are not AI-report reviewers', res.status === 403, `status ${res.status}`);
 
   act('Act 7 — AI configuration explainability endpoint');
   res = await api(eric, 'GET', '/api/v1/ai/config');

@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { AiReportReviewOutcome } from '@prisma/client';
+import { AiReportReason, AiReportReviewOutcome } from '@prisma/client';
 import { Transform, Type, type TransformFnParams } from 'class-transformer';
 import { IsEnum, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from 'class-validator';
 
@@ -14,6 +14,10 @@ export class CreateAiResponseReportDto {
   @MinLength(1)
   @MaxLength(20000)
   expectedContent!: string;
+
+  @ApiProperty({ enum: AiReportReason, enumName: 'AiReportReason' })
+  @IsEnum(AiReportReason)
+  reason!: AiReportReason;
 
   @ApiPropertyOptional({ maxLength: 2000 })
   @IsOptional()
