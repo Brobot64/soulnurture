@@ -244,6 +244,25 @@ inaccurate representations **inside the consent instrument** — the text a stud
 | **PE-15** | (no artboard says this) | `GET /v1/audit` is gated to `COUNSELLOR / PSYCHOLOGIST / SUPPORT_STAFF` (`src/audit/audit.controller.ts:13`) and returns the newest audit rows platform-wide — `audit.service.ts:38-48` applies no `schoolId` filter unless the caller passes one, and the controller never does. It carries action metadata, not wellbeing content, but it is cross-school visibility for staff accounts, against a tenancy model whose whole point is school separation. No frontend code calls it — every screen uses `GET /v1/admin/activity` or `GET /v1/schools/:id/activity` (`frontend/src/lib/admin.ts:67-80`). Either scope it or delete it |
 | **PE-16** | (no artboard says this) | Declining is invisible **and** unrecordable: nothing is written (§3), which is exactly what ④ promises — but it also means the product cannot state how many students read the disclosure and chose not to use the AI. If that number is ever wanted, the current design cannot produce it without breaking the promise that makes ④ honest |
 
+### 5.1 Decision record — owner, 2026-11-04 (`ai-disclosure-v3`)
+
+Answered in one sitting precisely because PE-03…PE-10 all edit the instrument and each edit alone
+would cost a whole-school re-consent. This batch moved `AI_DISCLOSURE_VERSION` **v2 → v3** once.
+
+| ID | Owner's answer | What shipped |
+| --- | --- | --- |
+| **PE-03** | Disclose it. Voice is transcribed by N-ATLaS and the recording is not saved there. | `what-we-collect` gains "If you send a voice note, we do not keep the recording…"; `how-we-protect` gains the speech-to-text sentence naming N-ATLaS for Yoruba/Hausa/Igbo and "a hosted transcription service" for English/Pidgin. **Correction to the owner's framing, recorded here:** the N-ATLaS ASR models carry only the three vernacular languages; English and Nigerian Pidgin audio is forwarded to the Groq Whisper member of the provider chain (`ai.service.ts:686-713`, `openai.provider.ts:110-119` throws by design so the chain skips it). The sentence therefore names both lanes. Nothing in `src/` writes the buffer to disk or stores it — verified by the absence of any `writeFile`/`createWriteStream`/base64 persistence under `src/ai` — but the instrument claims retention only about *our* record ("your school record never holds the recording"), because a third party's retention policy is not knowable from this codebase. |
+| **PE-04** | Say it draws context only from recent conversations. | `how-it-works` now reads "It sees this chat, your newest check-in, and short summaries of your recent chats — the last 30 days only." Made true without a behaviour change: `recallDays: 30` bounds **both** the recency bucket and the vector-similar bucket (`memory.repository.ts:49-55`, `:83-87`; `ai.config.ts:291`), and hooks are 14 days, so nothing older than 30 days can reach a prompt. `maxRecents: 2`, capped at four summaries carried (`ai-context.service.ts:136`). |
+| **PE-05** | The instrument stays honest by shrinking what the staff UI offers: hide the "view whole conversation" link, frontend only. | `privacy-in-short` says **first name** instead of "name", and says the alert carries "the start of the message that triggered it (the first 180 characters)" — the excerpt is `slice(0, 180)` (`support-flag-alerts.service.ts:124-127`). Three staff links are hidden with `display:none`, still in the DOM and still routed: `dash/CounsellorDashboard.tsx` (indicator card), `_dash/school/indicators.index.tsx` (detail card and the review dialog). Deliberately **not** hidden: `GET /v1/conversations/:id`, the `/school/requests/$conversationId` route, and the link in the support-requests queue — that surface is reached from a request the *student* raised, where the thread is the service they asked for. Two things this does not fix, stated plainly: the composed alert still tells staff "Please review the conversation" (server copy, out of scope by the same "frontend only"), and any staff role can still read the full transcript by URL or API. |
+| **PE-06** | "Not a writer's call." | **No change to `how-we-protect`'s "your school's secure server" in v3**, and PE-06 stays PENDING with the legal/product owner. Note the cost of answering it later: it is another instrument edit, therefore another re-consent of every student. |
+
+Also corrected here, against this document's own first draft: PE-05's evidence claimed the alert
+"names the student by `studentRef`, not by name". `studentRef` on the flag *is* a name —
+`student.displayName ?? student.firstName ?? 'Student'` (`conversations.service.ts:331`), and
+`displayName` is set to the first name at profile bootstrap (`students.service.ts:28`). The shipped
+sentence was right about that half; only "your name" → "your first name" was worth tightening. The
+understatement (a snippet vs the whole thread) was real and is what the link-hiding answers.
+
 ### Also open, lower order
 
 - **PE-17** — the design's single "I understand and agree" button vs the shipped three-checkbox gate
@@ -283,17 +302,19 @@ describe nothing that exists.
 
 ## 7. Decision table
 
-Every row is **PENDING**. Nothing in Epic E is release-approved; nothing here is a requirement until an
-owner signs it. Column D/C = decision owner / clinical-doc owner.
+As of 2026-11-04, **PE-03, PE-04 and PE-05 are answered** and shipped in `ai-disclosure-v3` (§5.1);
+PE-06 is explicitly left to legal. Every other row is **PENDING**. Nothing else in Epic E is
+release-approved; nothing here is a requirement until an owner signs it.
+Column D/C = decision owner / clinical-doc owner.
 
 | ID | Question the owner must answer | Evidence the answer must reckon with | Owner | Status |
 | --- | --- | --- | --- | --- |
 | PE-01 | Is a second factor required for staff and platform-admin sign-in, or is the design sentence deleted? | no OTP/TOTP/MFA anywhere; email+password + verified email only (`auth.config.ts:149-169`) | Product + security | ☐ PENDING |
 | PE-02 | Do we record sign-ins as audit events, or do we stop saying "every sign-in is recorded"? | no auth audit hook; `Session.ipAddress/userAgent` exist but are destroyed by lifecycle deletes (`admin.service.ts:167`) | Product + safeguarding | ☐ PENDING |
-| PE-03 | Does the consent instrument disclose voice capture and third-party transcription? | `what-we-collect` has no voice item (`ai-disclosure.ts:116-124`) while audio leaves the server (`ai.service.ts:686-713`); `/history/about:47` already says it | Safeguarding + legal | ☐ PENDING |
-| PE-04 | Does the instrument disclose cross-conversation memory? | `ai-disclosure.ts:112` vs `ai-context.service.ts:132-139` | Safeguarding + AI ethics | ☐ PENDING |
-| PE-05 | Correct the escalation sentence: ref or name, snippet or full transcript, which staff roles read it? | `ai-disclosure.ts:79` vs `support-flag-alerts.service.ts:159-164` + `conversations.controller.ts:52/:66` | Psychologist + safeguarding (Doc A) | ☐ PENDING |
-| PE-06 | Is "your school's secure server" acceptable language for logical tenancy on shared hardware? | `ai-disclosure.ts:130`; one Postgres, `schoolId` scoping (`tenant.guard.ts:80-86`) | Legal + product | ☐ PENDING |
+| PE-03 | Does the consent instrument disclose voice capture and third-party transcription? | `what-we-collect` has no voice item (`ai-disclosure.ts:116-124`) while audio leaves the server (`ai.service.ts:686-713`); `/history/about:47` already says it | Safeguarding + legal | ☑ ANSWERED 2026-11-04 — disclose; shipped in v3 (§5.1) |
+| PE-04 | Does the instrument disclose cross-conversation memory? | `ai-disclosure.ts:112` vs `ai-context.service.ts:132-139` | Safeguarding + AI ethics | ☑ ANSWERED 2026-11-04 — "recent chats, the last 30 days only"; true as shipped (`recallDays: 30` bounds both buckets). Shipped in v3 (§5.1) |
+| PE-05 | Correct the escalation sentence: ref or name, snippet or full transcript, which staff roles read it? | `ai-disclosure.ts:79` vs `support-flag-alerts.service.ts:159-164` + `conversations.controller.ts:52/:66` | Psychologist + safeguarding (Doc A) | ☑ ANSWERED 2026-11-04 — "first name" + the 180-char start in the sentence; three staff thread-links hidden `display:none`. API read-access unchanged by decision. Shipped in v3 (§5.1) |
+| PE-06 | Is "your school's secure server" acceptable language for logical tenancy on shared hardware? | `ai-disclosure.ts:130`; one Postgres, `schoolId` scoping (`tenant.guard.ts:80-86`) | Legal + product | ☐ PENDING — owner: "not a writer's call". Sentence left untouched; answering it later costs another version bump |
 | PE-07 | What retention sentence goes in the instrument — the truthful "until a person agrees" or nothing? | no retention job (§2.5); `lib/history.ts:187-188`; depends on HD-01…HD-11 | Legal + safeguarding | ☐ PENDING |
 | PE-08 | Add "a person decides what happens next, not the AI", and what does the instrument say while rules are unconfigured? | `ai-disclosure.ts:137-144`; every indicator rule `configured: false` | Psychologist (Doc A) | ☐ PENDING |
 | PE-09 | Add "you can see its status" to the instrument? | ships at `/support/requests` | Psychologist | ☐ PENDING |

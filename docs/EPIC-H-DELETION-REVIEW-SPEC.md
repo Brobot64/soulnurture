@@ -147,9 +147,54 @@ Each row is a question. "Code today" is what already ships; nothing there implie
 | **HD-10** | What happens to a pending ask when the student **changes or leaves school**? Recipients resolve through `professional.user.schoolId`, so the queue is the *current* school's; a deactivated account keeps its history (`API-TESTING-HANDBOOK.md:1366`). Who then owns the decision? | (a) current school; (b) platform operator; (c) ask becomes unactionable and the student is told | alert recipients = current school (`history-deletion.service.ts:157`–`:164`) | Safeguarding + legal | ☐ PENDING |
 | **HD-11** | Is a **hold** (a marker that says "keep this") settable by a reviewer before any deletion exists, so the rule can be recorded even while §HD-02 is unresolved? | (a) yes, hold first; (b) no | no field exists | Safeguarding | ☐ PENDING |
 
+### 4.1 Owner's ruling — 2026-11-04
+
+Verbatim: *"all student data can be deleted; all like it never exists; but this decision is made by
+the student; and would be on for 24 hrs; for the student to cancel; after 24 hrs all traces of the
+student data is erased from the system."*
+
+Read against the rows above, that answers six of eleven and settles the shape of the build:
+
+| ID | Ruling | Consequence for the code that ships today |
+| --- | --- | --- |
+| **HD-01** | **The student decides.** No staff role approves a deletion ask. | The notify-only path (`history-deletion.service.ts:157-164`) stays, but recipients stop being deciders — they are being told. The reviewer queue this document was written to design **is not built**: there is no decision to make. |
+| **HD-02** | Yes — in-app, self-executing. No second person, no operator ticket. | Needs a purge job. None exists; nothing destructive ships today. |
+| **HD-03** | Nothing is exempt. | **Flagged, not buried:** with the audit row and the flag itself in scope, a completed purge leaves the school no record that a safeguarding case ever existed, so it cannot prove it responded, and an active case can be erased by the student who opened it. This is the one row that should have Doc A's countersign before the job is wired, because the ruling removes the school's evidence rather than the student's. |
+| **HD-04** | There is no expiry *except* this: data is kept until the student asks, then erased 24 hours after the ask. | `HISTORY_RETENTION_TRUTH` (`frontend/src/lib/history.ts:181-188`) currently tells students nothing ever expires. It becomes wrong the moment the job ships, and stays right until then — so the copy changes in the same commit as the purge, not before. |
+| **HD-06** | No partial grants. One ask deletes everything of that student. | The immutable `scope` field (`schema.prisma:471-475`, `BEFORE_DATE` / `SELECTED_CHECK_INS`) is dead weight under this ruling — whole-student is the only scope. |
+| **HD-09** | Withdrawable for 24 hours, then irreversible. | Needs `cancelledAt` (or an equivalent) and a cancel action in the student UI. Today the row is write-once from the student side. |
+
+**Still open, and each one bites:**
+
+- **HD-07 — "like it never exists" is the one phrase the system cannot deliver.** Purging the database
+  reaches rows, pgvector embeddings, sessions and notifications; it does not reach the daily
+  `pg_dump` copies under `/opt/backups` (`docs/DEPLOYMENT.md:380-383`, §7 — automated, with no pruning
+  interval configured), nor what a staff member already read on screen, nor a reply the AI wrote from
+  the student's words that another student's conversation never saw but a person remembers. The build
+  can honestly claim **"erased from our live systems"**; claiming *never existed* is a promise the
+  deployment does not keep. Needs a one-line decision: what the student is told, and how long dumps
+  are kept.
+- **HD-05 — what the student is shown during the 24 hours and after.** There is no reviewer to name,
+  so the recommendation "never name them" is now automatic; what is missing is the receipt wording and
+  the countdown.
+- **HD-08 — age band.** Unanswered. Still true that the student row carries no age, only `classLabel`.
+- **HD-10 — who can cancel if the account stops working.** Sharper under this ruling than under the
+  old one: the 24-hour window only means something if the student can sign in inside it. A suspended
+  school (`admin.service.ts:167` deletes every session of the school) or a deactivated account
+  cancels nobody's ask — the purge would run on an account that cannot object. Needs an explicit rule
+  before the job ships.
+- **HD-11 — a reviewer hold** is moot with no reviewer; recorded as N/A rather than answered.
+
+**PE-07 and PE-11, which were blocked on this table:** both are answerable now in principle — retention
+becomes "kept until you ask, then gone within 24 hours of the ask" and withdrawal becomes a real path.
+Neither goes into `ai-disclosure-v3`. An instrument sentence describing a purge that does not exist
+repeats exactly the mistake §5 of the Epic E audit was written to catch. They land together with the
+job, in the version bump that the job earns.
+
 ---
 
 ## 5. Proposed vocabulary — proposals, not configuration
+
 
 Deliberately **not** added to `schema.prisma` while HD-01…HD-03 are open: an enum value is a
 claim about workflow, and the Epic D doctrine bans shipping review vocabulary ahead of
