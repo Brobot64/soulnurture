@@ -154,6 +154,9 @@ describe('AiService.generateAndApply', () => {
     prisma = {
       supportFlag: { findFirst: vi.fn(), create: vi.fn() },
       conversationMessage: { findUnique: vi.fn(), update: vi.fn() },
+      studentProfile: {
+        findUnique: vi.fn().mockResolvedValue({ user: { schoolId: 'school-1' } }),
+      },
     };
     auditService = { log: vi.fn().mockResolvedValue({ id: 'audit-1' }) };
     understandingProvider = {

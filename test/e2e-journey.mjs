@@ -286,6 +286,13 @@ async function main() {
   check('Ngozi signs in (hashed password bug fixed)', res.status === 200 && !!res.body?.user, `status ${res.status}`);
   res = await api(ngozi, 'GET', '/api/v1/dashboard/counsellor');
   check('SUPPORT_STAFF sees dashboard', res.status === 200, `status ${res.status}`);
+  // PE-15: at this point Ngozi has been provisioned by POST /v1/users, which
+  // assigns no school, so she is entitled to no tenant's audit trail. The
+  // dashboard above reads empty for the same reason — the audit log answers
+  // 403, because the trail is a governance surface and a reviewer with no
+  // school is a provisioning error, not a reader of zero rows.
+  res = await api(ngozi, 'GET', '/api/v1/audit');
+  check('school-less staff cannot read any school’s audit trail', res.status === 403, `status ${res.status}`);
 
   act('Act 2 — admin seeds Dr. Eric Moore as a support person');
   const ericProf = await db(
@@ -861,10 +868,19 @@ async function main() {
   res = await api(eric, 'PATCH', `/api/v1/follow-ups/${followUp.id}`, { status: 'SCHEDULED' });
   check('follow-up scheduled', data(res)?.status === 'SCHEDULED');
 
-  res = await api(eric, 'GET', '/api/v1/audit?limit=30');
-  const auditActions = (data(res)?.items ?? []).map((a) => a.action);
+  res = await api(eric, 'GET', '/api/v1/audit?limit=100');
+  const auditRows = data(res)?.items ?? [];
+  const auditActions = auditRows.map((a) => a.action);
   check('audit shows auto-created flag', auditActions.includes('support_flag.auto_created'));
-  check('audit shows enrollment + review + follow-up + disclosure trails', auditActions.includes('staff.bootstrap_enrollment') && auditActions.includes('support_request.status_changed') && auditActions.includes('follow_up.created') && auditActions.includes('ai.disclosure_acknowledged'), `unique actions: ${new Set(auditActions).size}`);
+  check('audit shows enrollment + review + follow-up + disclosure trails', auditActions.includes('school.student_enrolled') && auditActions.includes('support_request.status_changed') && auditActions.includes('follow_up.created') && auditActions.includes('ai.disclosure_acknowledged'), `unique actions: ${new Set(auditActions).size}`);
+  // PE-15 replaced the old `staff.bootstrap_enrollment` in that list on
+  // purpose: ERIC was bootstrapped in Act 1, before any school existed, so his
+  // enrolment is a platform event with no tenant to belong to. What a school
+  // reviewer must see is the enrolment INTO their own school, which is
+  // `school.student_enrolled` — and the proof of the fix is the next row: not
+  // one event in this reviewer's trail carries a different school.
+  check('every row of a reviewer’s trail is their own school’s', auditRows.length > 0 && auditRows.every((a) => a.schoolId === schoolId), `${auditRows.filter((a) => a.schoolId !== schoolId).length} foreign rows of ${auditRows.length}`);
+  check('and the flag an automated lane raised is still visible to the school it concerns', auditRows.some((a) => a.action === 'support_flag.auto_created' && a.schoolId === schoolId));
 
   // The other half of Epic G's report path: a person in the school reads the
   // reason, and the student who filed it is told nothing about that reading.

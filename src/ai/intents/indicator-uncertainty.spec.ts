@@ -144,6 +144,9 @@ describe('the level axis is a human axis', () => {
         findFirst: vi.fn().mockResolvedValue(null),
         create: vi.fn().mockResolvedValue({ id: 'flag-1' }),
       },
+      studentProfile: {
+        findUnique: vi.fn().mockResolvedValue({ user: { schoolId: 'school-1' } }),
+      },
     };
     const ctx = {
       prisma,

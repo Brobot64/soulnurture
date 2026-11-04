@@ -680,15 +680,62 @@ harness on `:5051` (a second one, because `:5050` belongs to the parallel main s
 config could not see these routes). Reading `.env` key names to work out trusted origins is credential access
 and is blocked; infer configuration from behaviour, and ask when behaviour is not enough.
 
-**Left, and not this session's call:** merge to `main` and the deploy — three migrations are now local-only
-(`ai_report_reason`, `history_deletion_request`, `history_deletion_purge`); `HISTORY_DELETION_UNDO_MINUTES` and
+**Left, and not this session's call:** merge to `main` and the deploy — three migrations were then local-only
+(`ai_report_reason`, `history_deletion_request`, `history_deletion_purge`; §0W added a fourth);
+`HISTORY_DELETION_UNDO_MINUTES` and
 `HISTORY_PURGE_POLL_MS` are unset on prod so the defaults (1440 min / 60 s) apply there, and the worker runs
 inside the same systemd service as the API; the HD-06 deviation and HD-03's countersign want a reviewer's eye;
 HD-08's age band is still unanswered; a delete path for object storage and a prune for the `rustfs` mirror are
-not invented here; PE-15 (`GET /v1/audit` is still cross-school) is unfixed by decision; PE-01/PE-02/PE-13 need
+not invented here; PE-01/PE-02/PE-13 need
 design, not invention; and everything else §0U listed stays owner-blocked (D1–D9, `WN-*`/`CP-*` so `/resources`
 remains honestly empty, ab04, Epic G's accuracy verdict, Epic I, staff credentials, the VPS frontend lane, the
 two diverged `main`s).
+
+## 0W. Session delta — 2026-11-04 (PE-15, the last engineering-side leak in the audit trail: the read is a school's own, and the write had to learn to name a school first — `natlas EPIC_E_PE15_AUDIT_TENANCY_001`)
+
+Backend-only branch `EPIC_E_PE15_AUDIT_TENANCY_001`, cut from `EPIC_H_PURGE_ENGINE_001` @ `b06affe`.
+
+**What was actually wrong, one level deeper than the audit wrote it.** §5's PE-15 row says
+`GET /v1/audit` leaks cross-school. True, and the reason scoping the read alone would have been theatre is
+that the write path had never been reliable about schools: `AuditService.log()` stamped `schoolId` only when
+the call site happened to have one to hand, so the `school.*` / `chat.*` / `follow_up.*` /
+`history_deletion.*` families were tagged and everything else — every disclosure acknowledgement, every
+preference change, every conversation close, and **every safeguarding flag the automated lane raised** — was
+written school-null, which under an unfiltered read meant "visible to every school's reviewer" and under a
+naive `schoolId` filter would have meant "visible to nobody".
+
+**The four moves.** (1) `log()` resolves the school itself: the caller's value wins, otherwise the actor's
+via `schoolOf`, otherwise none (`audit.service.ts:10-43`). (2) The one actor-less event a school must keep
+is `support_flag.auto_created`, so the intent executor now reads the student's school and passes it
+explicitly (`intent-executors.ts:114-129`). (3) `list(actorUserId, …)` filters by the reviewer's school
+unconditionally and 403s an account with none — the unscoped `findMany` is gone, not merely unused
+(`audit.service.ts:51-71`, `audit.controller.ts:29-37`). (4) `20261104190000_audit_trail_school_backfill`
+applies rule (1) to rows already on file, so shipping the scoping does not blank a school's existing trail.
+
+**A test assertion moved, on purpose.** The journey used to prove `staff.bootstrap_enrollment` appears in
+ERIC's audit read. Bootstrap runs in Act 1, before any school exists, and takes no school with it — that
+event is genuinely platform-level, so under the new rule it belongs in no school's trail. The assertion now
+names the enrolment that *is* the school's (`school.student_enrolled`) and a comment says why; two new legs
+prove the fix rather than accommodate it: school-less staff → `403`, and every row of a reviewer's trail
+carries their own `schoolId` (`0 foreign rows of 16`), including the automated flag.
+
+**Measured.** `npx vitest run` 1913/1913 (76 files, exit 0) — 3 new cases in `audit.service.spec.ts`;
+`npx tsc --noEmit` 20 errors (from a 47 baseline; `intent-executors.spec.ts:51`'s prisma mock type was
+wrong before this change and its correction removed the rest); `oxlint --type-aware` 13 warnings / 0 errors;
+journey **223/223 in 220s** on a throwaway `:3011` (started, verified by `Get-NetTCPConnection` as the PID
+owning that port, stopped — `:3000` and `:3010` are the owner's and were never touched); migration applied
+locally with `migrate deploy` and its effect read back with an aggregate-only `SELECT` (the local fixture
+is mostly school-null because every journey re-run deletes its users and schools, and both FKs are
+`onDelete: SetNull` — which is also why the backfill matters on prod, where accounts persist).
+
+**Trap worth carrying:** `AuditLog.actorId` and `.schoolId` are both `SetNull` relations, so historical
+rows silently lose their tenant when a fixture run deletes the school. An empty school trail is not
+evidence the write path is broken; check whether the school still exists.
+
+**Still the owner's call:** deleting the route instead of scoping it. Nothing in the frontend calls
+`GET /v1/audit` — staff screens use `/v1/admin/activity` and `/v1/schools/:id/activity` — and scoping was
+chosen over deletion only because a safeguarding system needs a "who touched this" surface and the journey
+needs one to prove US-D03's provenance. The trail keeps being written either way.
 
 
 ## 1. Who we are building (30-second orientation)

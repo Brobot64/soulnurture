@@ -241,7 +241,7 @@ inaccurate representations **inside the consent instrument** — the text a stud
 | **PE-09** | `human-support` tells the student how to ask, not what happens after | The design adds "you can see its status", which ships (§3). Cheap, true, missing |
 | **PE-10** | `how-it-works`: "A reflection chat is short on purpose: it **wraps up after a few turns**" (`ai-disclosure.ts:111`) | The turn cap is configuration, not code: the guided path wraps on a budget derived from `guided.maxExtendedTurns` and the free-text budget, and the deployed `.env` caps are what actually decide "a few". A consent instrument should not assert a number the deployment can change without re-consenting anyone |
 | **PE-11** | (no artboard says this) withdrawal | `ConsentService.accept` is the only write and hard-codes `accepted: true` (`consent.service.ts:60-77`). There is no withdraw, no revoke, no decline row, no expiry. A student who agreed cannot un-agree through any product surface; they can only stop using the chat. The design never promises a withdraw control either — which is itself the question |
-| **PE-15** | (no artboard says this) | `GET /v1/audit` is gated to `COUNSELLOR / PSYCHOLOGIST / SUPPORT_STAFF` (`src/audit/audit.controller.ts:13`) and returns the newest audit rows platform-wide — `audit.service.ts:38-48` applies no `schoolId` filter unless the caller passes one, and the controller never does. It carries action metadata, not wellbeing content, but it is cross-school visibility for staff accounts, against a tenancy model whose whole point is school separation. No frontend code calls it — every screen uses `GET /v1/admin/activity` or `GET /v1/schools/:id/activity` (`frontend/src/lib/admin.ts:67-80`). Either scope it or delete it |
+| **PE-15** | (no artboard says this) | `GET /v1/audit` is gated to `COUNSELLOR / PSYCHOLOGIST / SUPPORT_STAFF` (`src/audit/audit.controller.ts:13`) and returns the newest audit rows platform-wide — `audit.service.ts:38-48` applies no `schoolId` filter unless the caller passes one, and the controller never does. It carries action metadata, not wellbeing content, but it is cross-school visibility for staff accounts, against a tenancy model whose whole point is school separation. No frontend code calls it — every screen uses `GET /v1/admin/activity` or `GET /v1/schools/:id/activity` (`frontend/src/lib/admin.ts:67-80`). Either scope it or delete it — **scoped, built and proven 2026-11-04, see §5.3** |
 | **PE-16** | (no artboard says this) | Declining is invisible **and** unrecordable: nothing is written (§3), which is exactly what ④ promises — but it also means the product cannot state how many students read the disclosure and chose not to use the AI. If that number is ever wanted, the current design cannot produce it without breaking the promise that makes ④ honest |
 
 ### 5.1 Decision record — owner, 2026-11-04 (`ai-disclosure-v3`)
@@ -281,6 +281,44 @@ prompted once for all eight answers instead of twice.
 **PE-11 stays out, and stays blocked on code.** Withdrawing *consent* is not deleting *history*:
 `ConsentService.accept` is still the only write and still hard-codes `accepted: true`
 (`consent.service.ts:60-77`). Nothing to disclose until a withdrawal path exists.
+
+### 5.3 PE-15 — the audit trail is a school's own, built 2026-11-04
+
+No clinician and no owner ruling were needed for this one: it is cross-school visibility for staff
+accounts against a tenancy model whose entire purpose is school separation, so it was closed the way
+the rest of the tenancy work was. Scoping the read alone would have been a fake fix, because at that
+point **most audit rows had no `schoolId` on them at all** — the write path only tagged the events whose
+call site happened to have a school to hand (the `school.*`, `chat.*`, `follow_up.*` and
+`history_deletion.*` families), and everything else, including every safeguarding flag the automated
+lane raised, was written school-null and therefore visible to *every* reviewer. Four changes:
+
+| Where | Change |
+| --- | --- |
+| `audit.service.ts:10-43` (write) | `log()` takes the school the caller names, otherwise the **actor's** school (`schoolOf`), otherwise none. A student who accepts the disclosure, changes a preference or closes a conversation now writes the event into their own tenant. |
+| `intent-executors.ts:114-129` | `support_flag.auto_created` has no actor — the AI pipeline raised it — so the executor reads the student's school and names it explicitly. This is the row a safeguarding reviewer must not lose. |
+| `audit.service.ts:51-71` + `audit.controller.ts:29-37` (read) | `list()` takes the reviewer's user id, resolves their school and fails closed with `403` when the account has none. The unscoped `findMany` no longer exists: `schoolId` is in the `where` clause by construction, and there is no code path that can read the trail platform-wide. |
+| `prisma/migrations/20261104190000_audit_trail_school_backfill` | Applies the same rule to rows already on file — an event inherits its actor's school — so shipping the scoping does not blank a school's existing trail. Read-only on prod until the owner deploys it. |
+
+**What deliberately became invisible to school staff.** Actor-less platform events stay school-null,
+which now means "in nobody's trail" instead of "in everybody's": `staff.bootstrap_enrollment` (the
+bootstrapped account has no school yet at that moment), `ai_generation.exhausted`, and the AI worker's
+own `conversation.closed`. The journey's Act 7 assertion was moved off `staff.bootstrap_enrollment`
+onto `school.student_enrolled` for exactly that reason and says so in place — a test assertion changed
+because the product's meaning changed, not to make a red test green.
+
+**Measured, not asserted.** `npx vitest run` 1913/1913 (76 files, exit 0); `npx tsc --noEmit` 20 errors
+— the baseline was 47, and the drop is `intent-executors.spec.ts:51`'s mock type being corrected to the
+shape it always had; `npx oxlint --type-aware src/ test/` 13 warnings / 0 errors; journey
+`test/e2e-journey.mjs` **223/223 in 220s** against a throwaway backend, including three new legs: a
+school-less `SUPPORT_STAFF` reads `GET /v1/audit` → `403`, all 16 rows of ERIC's trail carry his own
+`schoolId` and none another school's, and the automated flag is still in that trail.
+
+**Still the owner's call, and unchanged by any of this:** nothing in the frontend consumes this route —
+every staff screen uses `GET /v1/admin/activity` or `GET /v1/schools/:id/activity`
+(`frontend/src/lib/admin.ts:67-80`). Scoping it was chosen over deleting it because a safeguarding
+system needs a "who touched this" surface and the journey needs one to prove US-D03's provenance. If
+the owner would rather the route simply not exist, deleting `AuditController` is now a one-file change
+and the trail keeps being written.
 
 
 ### Also open, lower order
@@ -343,7 +381,7 @@ Column D/C = decision owner / clinical-doc owner.
 | PE-12 | Does a human-readable school ID exist as a product concept? | `schema.prisma:286-304` gives `id` + `shortCode` | Product | ☐ PENDING |
 | PE-13 | Do school activation links / QR codes get built, or does Epic E's copy drop them? | no token surface at all; blocks Epic B's wizard too | Product + safeguarding | ☐ PENDING |
 | PE-14 | Wire the three privacy booleans to real behaviour, delete them, or ship UI that currently would lie? | `schema.prisma:451-462` read by nothing; `/privacy` has no controls | Product + legal | ☐ PENDING |
-| PE-15 | Scope `GET /v1/audit` to the caller's school, or remove the route? | `audit.controller.ts:13` + `audit.service.ts:38-48`; no consumer | Engineering owner | ☐ PENDING |
+| PE-15 | Scope `GET /v1/audit` to the caller's school, or remove the route? | `audit.controller.ts:13` + `audit.service.ts:38-48`; no consumer | Engineering owner | ☑ BUILT 2026-11-04 — scoped, and the write path had to be taught to carry a school before a scoped read meant anything (§5.3). Deleting the route remains available to the owner; nothing in the frontend calls it. |
 | PE-16 | Is "how many students declined" worth a record, given a decline record is the one thing that would break the "nothing was started" promise? | `ConsentGate.tsx:277-294` + zero writes | Safeguarding + product | ☐ PENDING |
 | PE-17 | Keep the shipped three-statement gate over the design's single button? | `ai-disclosure.ts:163-179` | Psychologist | ☐ PENDING |
 | PE-19 | Align the instrument's version vocabulary with the design, or mark the design stale? | `ai-disclosure.ts:11-13`; `ConsentGate.tsx:311` | Product | ☐ PENDING |
@@ -381,6 +419,10 @@ separate consent storms. PE-11 additionally cannot be answered before HD-04 and 
    audio object exists in storage — the claim `/history/about:47` makes.
 10. Set `allowParentGuardianNotification: true` and observe that nothing happens. That is PE-14 stated
     as a test.
+11. Run when a reviewer's audit read is touched (PE-15, executed 2026-11-04): `GET /v1/audit` as staff
+    whose account is on no school → `403`, and as a reviewer on a school → every returned row's
+    `schoolId` is that school's, and `support_flag.auto_created` is in the list although no human ever
+    raised it. These are three legs of `test/e2e-journey.mjs` Act 2 and Act 7, not a manual favour.
 
 ---
 

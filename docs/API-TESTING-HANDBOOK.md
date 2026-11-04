@@ -1019,15 +1019,24 @@ Follow-up statuses: `PENDING | SCHEDULED | COMPLETED | CANCELLED`.
 
 ### 9.4 Audit trail
 
-**Request** `GET /api/v1/audit?limit=30` — assert `data.items[].action` includes:
+**Request** `GET /api/v1/audit?limit=100` as a professional *on a school* —
+the read is school-scoped (PE-15): every returned row carries this reviewer's
+`schoolId`, and assert `data.items[].action` includes:
 
-- `support_flag.auto_created`
-- `staff.bootstrap_enrollment`
+- `support_flag.auto_created` (raised by the automated lane, tagged with the
+  student's school — the flag has no human actor to inherit one from)
+- `school.student_enrolled`
 - `support_request.status_changed`
 - `follow_up.created`
 - `ai.disclosure_acknowledged`
 - `ai_understanding.queued` (from the §5.3 vernacular probe; the follow-up
   `safety_flag.lang_refine` appears only when the second sweep escalates)
+
+Platform-level events are deliberately absent from a school's trail:
+`staff.bootstrap_enrollment` names no actor and the bootstrapped account has no
+school yet at that moment, so it belongs to no tenant and reads nowhere in this
+list. `ai_generation.exhausted` and the AI worker's `conversation.closed` are in
+the same class.
 
 ### 9.5 AI configuration explainability (as any professional role)
 
@@ -1150,6 +1159,7 @@ Every row must produce exactly the stated status **with the stated actor**:
 | 17 | School admin | `GET /api/v1/admin/analytics` | `403` (PLATFORM_ADMIN-only) |
 | 18 | School admin | `POST /api/v1/schools/<schoolId>/admins` | `403` (owner-only — school admins cannot mint peers) |
 | 19 | School A admin | `GET /api/v1/schools/<schoolBId>/analytics` | `403` `SCHOOL_ACCESS_DENIED` |
+| 20 | Ngozi **in Act 2**, before Act 7 puts her on a school | `GET /api/v1/audit` | `403` "Your account must be linked to a school to read the audit log." (PE-15 — no school, no tenant's trail) |
 
 ---
 

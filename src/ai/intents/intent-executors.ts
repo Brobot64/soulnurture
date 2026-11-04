@@ -109,10 +109,17 @@ const SUPPORT_FLAG_EXECUTOR: IntentExecutor = {
         studentStatementSnapshot: ctx.userContent,
       },
     });
+    // The flag has no actor — the AI pipeline raised it — so the school the
+    // reviewer is entitled to see it under is the student's own (PE-15).
+    const flagSchool = await ctx.prisma.studentProfile.findUnique({
+      where: { id: ctx.studentId },
+      select: { user: { select: { schoolId: true } } },
+    });
     await ctx.auditService.log({
       action: 'support_flag.auto_created',
       entity: 'SupportFlag',
       entityId: created.id,
+      schoolId: flagSchool?.user?.schoolId ?? null,
       meta: {
         intentId: verdict.intentId,
         category: verdict.category,
