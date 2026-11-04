@@ -201,9 +201,13 @@ part. The permission answers (HD-01) and the residue rules (HD-03) are the revie
   `migration.sql` with a rationale comment and `npx prisma migrate deploy` — `migrate dev` is
   unusable here because the shadow database cannot apply the pgvector migration
   (`docs/HANDOFF.md` §0Q).
-* Sequencing honest note: **seven** migrations are applied locally and not on prod (the five
-  Epic D ones, `ai_report_reason`, `history_deletion_request`). A reviewer queue on top of an
-  unshipped table would be unverifiable, so §0R's open item (3) is a prerequisite.
+* Sequencing honest note (re-measured 2026-11-04): **two** migrations are applied locally and not on
+  prod — `20261103120000_ai_report_reason` and `20261104093000_history_deletion_request`. The Epic D
+  set reached prod when the owner merged PR #15 (`main` @ `97d2454`, deployed, `_prisma_migrations`
+  current through `20261102140000_indicator_levels_and_review`). A reviewer queue on top of an
+  unshipped table would be unverifiable, so §0R's open item (3) is a prerequisite — and the deploy
+  lane applies both automatically once their branches merge, so this is a merge decision, not an ops
+  task.
 
 ---
 
