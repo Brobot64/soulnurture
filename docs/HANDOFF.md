@@ -738,6 +738,89 @@ chosen over deletion only because a safeguarding system needs a "who touched thi
 needs one to prove US-D03's provenance. The trail keeps being written either way.
 
 
+## 0X. Session delta — 2026-11-04 (the whole unmerged stack went to prod in one release: `main` 97d2454 → **95f1952**, frontend de39014 → **b57430a**, and the VPS frontend lane deployed for the first time — merge, migrations and the four things a demo will hit)
+
+The owner's instruction was "merge to main both frontend and backend and ensure it is deployed", with a
+presentation the same afternoon. Both repos are merged, deployed and re-measured. Nothing here is inferred
+from a green tick: every number below was read off the box or off the running service.
+
+**What the release carried.** Backend `main` gained the entire stacked chain that §0P–§0W built — Epic F's
+register gate, Epic G's report reason, Epic H's history + purge engine, `ai-disclosure-v3`, PE-15's audit
+tenancy. Frontend `main` gained Epic H's `/history` surfaces + the deletion countdown, BOUNDARY_POPUP_001,
+instrument-v3 wording and PE-05's hidden thread links.
+
+**The frontend merge conflicted because two sessions solved the same annotation.** `main` had PR #16
+(`ESCALATION_POPUP_001`, Epic A/B/C), #17 (`EPIC_D_SURFACES_002`) and #18 (`EPIC_G_SURFACES_001`) merged by
+the parallel session, while this session's chain stacked `EPIC_H_SURFACES_001 → BOUNDARY_POPUP_001 →
+EPIC_E_INSTRUMENT_V3_001 → EPIC_H_PURGE_ENGINE_001` off an older `main`. Both sides had independently turned
+the boundary notice into a closable popup. `main`'s version is the superset — `boundaryCopy()`, a
+`BoundaryNoticeMarker` that keeps a one-line record in the thread after the popup closes, and a
+`BoundaryNoticeDialog` that re-opens from that marker — so the merge took `main`'s component and its
+"interrupt once per turn, restored conversations keep markers but do not reopen" effect, and kept only this
+session's two unique behaviours: the student-only **My history** nav entry and `endedThisVisit`, which is
+what stops the end-of-chat mood band from following a student into a past reflection. **How to apply:** when
+two branches rebuild the same affordance, take the one that already shipped and was browser-verified, then
+re-assert the other side's unique states — do not blend the two implementations into a third.
+
+**A real defect on `main`, found and fixed by this merge.** PR #18's merge left
+`src/routes/_app/reflection/$conversationId.tsx` rendering `<AiSupportSafetySheet />` (line 717 on `main`)
+with **no import for it** — the file's own line 5 had been overwritten by the `BoundaryNotice` import during
+that resolution. `vite build` does not typecheck, so it shipped; the reflection page's "Using AI support
+safely" panel would have thrown on render. Same class of silent loss in the same merge: git took `main`'s
+import line and dropped this branch's, and the second symptom was a duplicate `type AiBoundary,` in the same
+import block (a declaration error that *does* fail the build, which is how the first one surfaced).
+`tsc --noEmit` is now exit 0 on the merged tree. **How to apply:** after any merge that touches an import
+block, run the typecheck — a clean `vite build` proves nothing about undefined identifiers.
+
+**Prod, measured after the deploy (read-only queries over SSH).** `/opt/natlas` HEAD and
+`~deploy/.natlas-last-deploy` both read `95f1952`; CI/CD run on `head_sha=95f1952` is
+`completed/success`; `natlas.service` is `active` and `/api/health/auth` → 200. `_prisma_migrations` now
+carries all four formerly local-only rows applied and not rolled back: `20261103120000_ai_report_reason`,
+`20261104093000_history_deletion_request`, `20261104170000_history_deletion_purge`,
+`20261104190000_audit_trail_school_backfill` — so §0W's release-coupling warning is closed: the instrument
+and the erasure engine it describes went out together. `GET /api/v1/ai/disclosure` on prod now answers
+`version: "v3"`, `consentVersion: "ai-disclosure-v3"`. The purge worker has nothing to do: `history_deletion_request`
+is 0 rows. New routes are mounted, proven by 401-not-404 on `/api/v1/history`, `/api/v1/audit`,
+`/api/v1/support-flags`, `/api/v1/resources`.
+
+**The VPS frontend finally deployed — manually.** `~deploy/.natlas-frontend-last-deploy` had been frozen at
+`3e641ce` since 2026-10-25 because the `FRONTEND_VPS_CI_001` lane has never completed a run (its repo secret
+and the Actions-failures notification are still the owner's steps). Running `/usr/local/bin/natlas-frontend-deploy`
+over SSH moved it: `FRONTEND DEPLOY OK: 3e641ce -> b57430a`, `natlas-frontend.service` active, and
+`https://app.169.58.86.169.sslip.io/`, `/history` and `/api/health/auth` all 200 with the new nav string
+present in the built bundle (`.output/public/assets/index-BDBCuEDe.js`). Vercel is on the same commit
+(`index-DySffB9B.js` carries "My history" and "Wellbeing Resources"). **How to apply:** the VPS lane is not
+a substitute for the deploy script — until that secret exists, every frontend merge needs this manual run or
+`app.` silently serves weeks-old UI while still answering 200.
+
+**Four things a live demo will hit, none of them bugs.**
+1. **Every existing student is re-prompted for consent** — `consent_record` holds 15 rows on
+   `ai-disclosure-v2` and the running instrument is v3, so the gate fails closed until they accept once.
+   That is the designed behaviour of a versioned instrument, and it is the honest price of PE-03/04/07–10.
+2. **`/resources` is an empty page by design** (Epic F's register gate ANDs approval with visibility and no
+   `WN-*` code is `APPROVED_ACTIVE`). It now renders the "no approved resources yet" state rather than a
+   shortage claim. Approving content is D1/the reviewers' call, not something to invent before a demo.
+3. **220 audit rows are now unreadable by any school** (`195` scoped vs `220` unscoped) — those are the
+   tenant-less platform/bootstrap events PE-15 deliberately left outside every school's trail.
+4. **Deletion is live and irreversible after the window**: `HISTORY_DELETION_UNDO_MINUTES` is unset on prod,
+   so a student who asks today is erased 24 h later by the worker inside `natlas.service`. Do not press it on
+   a demo account you want to keep.
+
+**One hygiene finding, reported not fixed.** `journalctl -u natlas.service -p err` shows systemd rejecting a
+line in `/opt/natlas/.env` as an invalid environment assignment (`DB-PASSWORD=…` — a dashed name is not a
+legal unit env key), so the app never saw it and nothing has depended on it. The value has already been
+printed into this session's log output once, so treat it as known and rotate it if it is real; fixing the
+line itself is an `.env` edit under the duplicate-key/640-ownership rules in [[project-deployment]], left to
+the owner rather than changed mid-release.
+
+**What was NOT verified.** No signed-in browser pass on prod: it would mean creating or using real
+credentials and writing a prod check-in, which is not this session's call. Structural proof is what the
+numbers above are; the interaction itself was last browser-verified locally on the mock harness (§0V/§0W).
+`Epic D ab04` remains deferred and `PE-01/02/06/11/13/14` remain owner decisions — merging shipped code, not
+answers.
+
+---
+
 ## 1. Who we are building (30-second orientation)
 
 **Soul Nurture AI (repo: `natlas`, project codename "Natlas")** — a school-based emotional-wellbeing backend for an NGO (PN Africa context), in week 3–4 of an 8-week MVP. Students (e.g. "Jude", 300-level Sociology at Miva University, Nigeria) walk a **4-step journey**: Check-in → Reflect (AI conversation) → Resources → Human Support. Professionals (counsellors/psychologists/support staff) triage via a dashboard: safeguarding flags **with reasons**, support requests, follow-ups, audit trail.
