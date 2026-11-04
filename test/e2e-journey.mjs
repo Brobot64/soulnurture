@@ -715,6 +715,60 @@ async function main() {
   check('student sees the request he made', asked.length === 1 && asked[0]?.supportPerson?.name === 'Dr. Eric Moore', `${asked.length} PENDING: ${asked.map((r) => r.supportPerson?.name).join(', ')}`);
   check('the Act 4 safety alert opened its own request to a same-school professional', openedBySafety.length === 1 && openedBySafety[0]?.supportPerson?.name === 'Dr. Eric Moore', `${openedBySafety.length} ESCALATED: ${openedBySafety.map((r) => r.supportPerson?.name).join(', ')}`);
 
+  // -------------------------------------------------------- Epic H: history
+  act('Act 6 — Epic H: the student’s own history is their own rows, and nothing else');
+  res = await api(jude, 'GET', '/api/v1/history');
+  const history = data(res);
+  const historyItems = history?.items ?? [];
+  const act4Entry = historyItems.find((e) => e.checkInId === checkIn.id);
+  const act6Entry = historyItems.find((e) => e.checkInId === stressedCheckIn.id);
+  check('every check-in the student made is on the list', !!act4Entry && !!act6Entry, `${historyItems.length} rows`);
+  check('the Act 4 row carries the reflection it led to', act4Entry?.reflection?.conversationId === conversation.id, `reflection ${act4Entry?.reflection?.conversationId}`);
+  // The newest request linked to the check-in, which is Jude's own from a few
+  // lines above. The Act 4 safety request is deliberately not linked: it has no
+  // checkInId, so it must not appear as though the student asked for it.
+  check('and the support request he sent, still unread by the school', act4Entry?.supportRequest?.id === supportRequest.id && act4Entry?.supportRequest?.queueStatus === 'NEW', `request ${act4Entry?.supportRequest?.id} · ${act4Entry?.supportRequest?.queueStatus}`);
+  check('a check-in that led nowhere is shown as that, not padded', act6Entry?.reflection === null && act6Entry?.supportRequest === null, `reflection ${act6Entry?.reflection} · request ${act6Entry?.supportRequest}`);
+  check('the counts are the same numbers the page prints per tab', history?.counts?.all === historyItems.length && history?.counts?.reflections === historyItems.filter((e) => e.reflection !== null).length && history?.counts?.supportRequests === historyItems.filter((e) => e.supportRequest !== null).length, JSON.stringify(history?.counts));
+  const historyWire = JSON.stringify(history ?? null);
+  // The projection is a whitelist, so this is the leak test: staff-only columns
+  // are not merely hidden by the frontend, they never leave the server.
+  check('no staff-only field is on the wire', !/reviewNote|aiPayload|initialMessage|supportPersonId|professionalId/.test(historyWire));
+  check('and no resource count is invented', !/resources/i.test(historyWire));
+
+  res = await api(jude, 'GET', `/api/v1/history/${checkIn.id}`);
+  const historyDetail = data(res);
+  check('one entry opens with the student’s own words', historyDetail?.description === checkIn.description);
+  const detailRoles = [...new Set((historyDetail?.messages ?? []).map((m) => m.role))];
+  check('the reflection read-back is the student and the AI only', (historyDetail?.messages ?? []).length > 0 && detailRoles.every((role) => role === 'USER' || role === 'ASSISTANT'), `roles ${detailRoles.join(', ')}`);
+  res = await api(jude, 'GET', `/api/v1/history/${randomUUID()}`);
+  check('an id that is not the student’s 404s — it is not their information', res.status === 404, `status ${res.status}`);
+
+  res = await api(jude, 'POST', '/api/v1/history/deletion-requests', {
+    scope: 'SELECTED_CHECK_INS',
+    checkInIds: [stressedCheckIn.id],
+    note: 'The exam-week one, please.',
+  });
+  const deletionAsk = data(res);
+  check('a deletion ask is filed as a request', (res.status === 201 || res.status === 200) && deletionAsk?.scope === 'SELECTED_CHECK_INS' && deletionAsk?.checkInIds?.length === 1, `status ${res.status}`);
+  check('a person at the school was actually told', !!deletionAsk?.alertedAt, `alertedAt ${deletionAsk?.alertedAt}`);
+  check('the student’s words are kept as sent', deletionAsk?.note === 'The exam-week one, please.');
+  res = await api(jude, 'GET', '/api/v1/history/deletion-requests');
+  check('the ask reads back to the student', (data(res)?.items ?? []).some((r) => r.id === deletionAsk?.id));
+  const asksBeforeCount = await db(`SELECT count(*)::int AS n FROM emotional_check_in WHERE "studentId" = $1`, [judeProfileId]);
+  res = await api(jude, 'POST', '/api/v1/history/deletion-requests', { scope: 'ALL_HISTORY', beforeDate: '2026-01-01' });
+  check('ALL_HISTORY carrying a stray date is refused, not half-honoured', res.status === 400 && res.body?.code === 'SCOPE_FIELDS_MISMATCH', `status ${res.status} code ${res.body?.code}`);
+  res = await api(jude, 'POST', '/api/v1/history/deletion-requests', { scope: 'SELECTED_CHECK_INS', checkInIds: [randomUUID()] });
+  // The filter puts the exception's own `message` on the wire and leaves the
+  // generic `error` label alone — and the frontend reads `message` too, so this
+  // is the exact sentence a student sees. It must stay unspecific: whether an id
+  // exists at all is not this student's information.
+  check('a check-in id that is not the student’s is refused without saying why', res.status === 400 && res.body?.code === 'CHECK_INS_NOT_FOUND' && res.body?.message === 'Some of those check-ins are not yours', `status ${res.status} code ${res.body?.code} message ${JSON.stringify(res.body?.message)}`);
+  const asksAfterCount = await db(`SELECT count(*)::int AS n FROM emotional_check_in WHERE "studentId" = $1`, [judeProfileId]);
+  check('filing a deletion request deleted nothing', asksBeforeCount.rows[0].n === asksAfterCount.rows[0].n, `${asksBeforeCount.rows[0].n} → ${asksAfterCount.rows[0].n}`);
+  res = await api(jude, 'GET', '/api/v1/history');
+  check('and the history still lists everything', (data(res)?.items ?? []).length === historyItems.length);
+
   // ---------------------------------------------------------------- act 7
   act("Act 7 — ERIC's professional review of Jude");
   res = await api(eric, 'GET', '/api/v1/dashboard/counsellor');
@@ -842,6 +896,16 @@ async function main() {
   check('student professionals/me → 403', res.status === 403, `status ${res.status}`);
   res = await api(jude, 'PATCH', `/api/v1/support-requests/${supportRequest.id}`, { status: 'CANCELLED' });
   check('student cannot review own request via PATCH', res.status === 403, `status ${res.status}`);
+  // Epic H's route is the student's own read. A professional reaches the same
+  // content through the staff surfaces, never through this one — so the history
+  // controller has no staff role to grant, and the frontend can leave the
+  // "About your history" page off every staff navigation.
+  res = await api(eric, 'GET', '/api/v1/history');
+  check('psychologist student-history route → 403', res.status === 403, `status ${res.status}`);
+  res = await api(schoolAdmin, 'GET', '/api/v1/history');
+  check('school admin student-history route → 403', res.status === 403, `status ${res.status}`);
+  res = await api(anon, 'GET', '/api/v1/history');
+  check('anon student-history route → 401', res.status === 401, `status ${res.status}`);
 
   // ---------------------------------------------------------------- act 9
   act('Act 9 — sign-out really invalidates sessions');
