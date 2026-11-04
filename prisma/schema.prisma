@@ -208,6 +208,16 @@ enum AiReportReason {
   OTHER
 }
 
+/// What a student asks to have removed (Epic H "Ask to delete your history?").
+/// A request, never an action: nothing in this product deletes wellbeing data on
+/// a student's say-so, because some of it may have to be kept for safeguarding or
+/// legal reasons — so the row records the ask and a person decides.
+enum HistoryDeletionScope {
+  ALL_HISTORY
+  BEFORE_DATE
+  SELECTED_CHECK_INS
+}
+
 // --- Content registry (Doc C §6/§7) -----------------------------------------------------
 // Every reviewer-editable string (emotion term, check-in prompt, response option, resource,
 // category) is a versioned row here, NOT hard-coded, so nothing reaches a student until an
@@ -395,6 +405,7 @@ model StudentProfile {
   resourceFeedbacks ResourceFeedback[]
   consentRecords    ConsentRecord[]
   privacyPreference PrivacyPreference?
+  deletionRequests  HistoryDeletionRequest[]
   sessionSummaries  SessionSummary[]
   activitySessions  ActivitySession[]
   chatThreads       ChatThread[]
@@ -448,6 +459,31 @@ model PrivacyPreference {
   student                         StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
 
   @@map("privacy_preference")
+}
+
+/// Epic H. One row per ask, kept exactly as asked. Deleting nothing is the
+/// point: the row is evidence a student requested removal, and the only write
+/// this path performs.
+model HistoryDeletionRequest {
+  id        String               @id @default(uuid()) @db.Uuid
+  studentId String               @db.Uuid
+  scope     HistoryDeletionScope
+  /// Only for BEFORE_DATE. A day, not a moment — the student picks a date.
+  beforeDate DateTime?          @db.Date
+  /// Only for SELECTED_CHECK_INS. Ids are frozen as submitted, so a reviewer
+  /// still sees the ask even if an entry disappears later.
+  checkInIds String[]           @default([])
+  note      String?              @db.VarChar(2000)
+  /// Set once a person at the school has actually been told. Null is not a
+  /// pending state to hide: it means no reviewer was notified, and the
+  /// student's receipt has to say so rather than promise a review.
+  alertedAt DateTime?
+  createdAt DateTime             @default(now())
+
+  student StudentProfile @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([studentId, createdAt])
+  @@map("history_deletion_request")
 }
 
 model EmotionalCheckIn {
