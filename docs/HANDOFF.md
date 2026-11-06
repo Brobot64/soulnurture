@@ -1089,3 +1089,86 @@ on every request for student `8bd984e7-…`. Chat survives on the fallback, but 
 30-day memory promised by instrument `ai-disclosure-v3` is degraded for that path.
 Predates this deploy (first hit 10:00:23, before the 10:01 restart) — not a regression
 from this change, and not something to fix by grepping for the key.
+
+## §0Z — 2026-11-06 session delta: the twelve approved wellbeing resources are live data
+
+**Requested (owner's words):** "fully add and implement the wellbeing resources as it was
+before; but it should follow the current style; add the wellbeign resources; **it is
+approved already**". That last clause is the D1 answer §0R/§0S kept naming as the only
+blocker on `/resources`, so it was taken as the review decision and implemented as a data
+write, not as a new approval UI.
+
+**Shipped, not yet merged:** backend `WELLBEING_RESOURCES_001 @ 16785ff` (off `main
+761350a`), frontend `WELLBEING_RESOURCES_001 @ 40c7902` (off `main 0e2a344`, carrying the
+hero swap `8aea084` that had been sitting uncommitted).
+
+**What "as it was before" resolved to:** the five invented seed placeholders (retrieved
+verbatim from `844a32f`) are *not* what ships. Doc B US-WR-D03 orders them replaced by the
+twelve reviewed titles, so they stay withdrawn and the twelve go in — which also keeps the
+journey harness's "the invented seed placeholders are gone" assertion true rather than
+rewriting it.
+
+**The five pieces:**
+- `20261106120000_wellbeing_resource_taxonomy` adds Doc B §3's eight groupings to the
+  `ResourceCategory` enum (additive `ALTER TYPE … ADD VALUE`; the eleven older values stay
+  because `WellbeingActivity`, the AI activity catalogue and the five withdrawn rows still
+  carry them, and a Postgres enum value cannot be dropped while any row uses it). Applied
+  locally with `migrate deploy` — `migrate dev` still cannot run against the shadow DB.
+- `ensureWellbeingResourceLibrary()` upserts the twelve `WN-01…WN-12` rows by `contentCode`
+  with Doc B §4's title, "Use when" and estimated time verbatim (U+2019 and en dashes
+  preserved). It writes them **unpublished**; the register answers that separately.
+- `approveWellbeingLibrary()` is the approval: 20 register rows advanced to
+  `APPROVED_ACTIVE` with `approvedBy = PRODUCT_OWNER`, guarded to
+  `status in [DRAFT, CONTENT_REVIEW_REQUIRED]` so a re-seed can never un-withdraw a
+  `BLOCKED`/`RETIRED`/`SUPERSEDED` reviewer answer, then the row booleans are made to
+  **follow** the register — codes in the approved set publish, every other coded row
+  unpublishes. Doing only one half of this is what produced an empty catalogue before.
+- `tailored()`'s stated-need narrowing moved to the approved groupings (`STEADIER`,
+  `ONE_STEP`) and the rationale now names those two labels; `intents.config`'s
+  `RECOMMEND_RESOURCE` categories moved too (`GROUNDING → STEADIER` for suicidal ideation
+  and acute panic, `EXAM_STRESS → HEAVY` for prolonged low mood), because the old values
+  have no rows and the executor silently attaches nothing then.
+- `AiContextService` was the last surface still reading `{active, approved}` alone — the
+  exact split Epic F removed everywhere else. It now uses the same register predicate, and
+  its `take: 8` with no `orderBy` (which, with twelve approved rows, handed the model an
+  arbitrary sample that changed per turn) became `take: 24` ordered by category + title.
+
+**Not invented:** `instructions`, `reflectionPrompt`, `safetyNote`, `mediaUrl`, `badge` and
+`durationMinutes` are empty on all twelve. No supplied document contains activity steps,
+reflection prompts or safety notes — Doc B §1 and US-WR-D04 forbid paraphrasing steps that
+were never written. The frontend correspondingly stopped printing a delivery format
+(§2 orders the Read/Listen/Practise filter replaced by the estimated duration), so a card
+shows title, "Use when" and time only. **These detail sections stay empty until a reviewed
+copy file arrives; that is a content gap, not a code gap.**
+
+**Verification:**
+- Backend: `nest build` 0, oxlint 0 errors, `vitest run` 77 files passed.
+- Frontend: `vite build` 0, `tsc --noEmit` 0.
+- Act 6 of the journey harness could **not** run: the harness crashes at Act 5
+  (`duplicate key … ai_generation_job_conversationMessageId_key`) because the expired
+  OpenAI key leaves the app's own retry job on that message while the harness inserts its
+  fixture — a pre-existing key problem, not this slice. So the Act 6 assertions were run
+  as a standalone probe against the live local API: **25/25 checks passed** — 12 rows, all
+  coded, all five placeholders gone, exactly the eight groupings, every card with approved
+  title/"Use when"/duration and no media, the boolean-only row invisible and unsaveable
+  (404), a real `WN-05` save + toolbox count, `?category=KINDNESS` to 1 row, a STRESSED
+  check-in earning "Picked for you" with the two labels named in the rationale, then
+  `WN-05` set `BLOCKED` and gone from the catalogue, its topic empty, unsaveable and dropped
+  from a toolbox that already held it, and fully restored. The probe file was deleted after
+  the run.
+- Local DB state left: migration applied, seed re-run, 12 rows live across 8 categories, 20
+  register rows `APPROVED_ACTIVE`, zero coded rows invisible.
+
+**Open / for the main session:**
+1. Nothing here is on `main` yet. Merging both branches is the owner's call — pushing
+   backend `main` triggers the VPS deploy.
+2. The resources reach students only when `npm run seed` runs. `docs/DEPLOYMENT.md` says
+   the deploy script does it after `prisma migrate deploy`, but that script is not
+   version-controlled, so after the first prod merge check for the `Content register
+   ensured (…)` / library-approval lines in the deploy log; if absent, run `npm run seed`
+   on the VPS once **as `deploy`, never with sudo**.
+3. The journey harness stays red locally and in CI until the OpenAI key is rotated
+   (`/opt/natlas/.env` line 23 + `sudo systemctl restart natlas`, plus the same key in the
+   local `natlas/.env`).
+4. No browser pass on `/resources` with the twelve cards yet — that wants a signed-in
+   student session on the local stack.
