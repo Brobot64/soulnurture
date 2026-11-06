@@ -1160,15 +1160,70 @@ copy file arrives; that is a content gap, not a code gap.**
   register rows `APPROVED_ACTIVE`, zero coded rows invisible.
 
 **Open / for the main session:**
-1. Nothing here is on `main` yet. Merging both branches is the owner's call — pushing
-   backend `main` triggers the VPS deploy.
-2. The resources reach students only when `npm run seed` runs. `docs/DEPLOYMENT.md` says
-   the deploy script does it after `prisma migrate deploy`, but that script is not
-   version-controlled, so after the first prod merge check for the `Content register
-   ensured (…)` / library-approval lines in the deploy log; if absent, run `npm run seed`
-   on the VPS once **as `deploy`, never with sudo**.
+1. ~~Nothing here is on `main` yet.~~ Both branches have since been merged and pushed —
+   backend `main` is `62249be`, frontend `main` is `3c6cc53`. Pushing backend `main` is what
+   starts the VPS deploy lane.
+2. ~~Run `npm run seed` on the VPS once~~ — measured instead: prod holds **twelve**
+   register-approved `APPROVED_ACTIVE` `WN-*` rows across **eight** categories, zero coded
+   rows invisible to a student and zero old placeholder rows still reachable, so
+   `/usr/local/bin/natlas-deploy` really does seed. (Read-only SELECTs through
+   `docker compose -f /opt/infra/docker-compose.yml exec -T postgres psql -U natlas -d natlas`;
+   every container call needs `</dev/null` or the container eats the rest of the `bash -s`
+   script, and `pg_enum`'s column is `enumlabel`, not `label`.)
 3. The journey harness stays red locally and in CI until the OpenAI key is rotated
    (`/opt/natlas/.env` line 23 + `sudo systemctl restart natlas`, plus the same key in the
    local `natlas/.env`).
 4. No browser pass on `/resources` with the twelve cards yet — that wants a signed-in
    student session on the local stack.
+
+## §0AA — 2026-11-06 session delta: the human-support scene lands on `/welcome` and `/signin`
+
+**What the owner asked.** "add this image to the welcom page and sign in page", with
+`soulnurture_landing_2_human_support.png` (1600×1000, 126,838 bytes) attached: two young
+people seen from behind on a lavender couch, a heart in a speech bubble above them, a
+sprout-shaped balloon, a purple shield-with-a-tick, and a plant at each end. Asked how it
+should meet the existing art, the owner chose **"Replace the sprout hero"** — so the scene
+takes `/welcome` and the `/signin` panel, and `soul-nurture-hero.png` stays on the landing
+page only.
+
+**Frontend only — no backend, no migration, no data.** Branch
+`HUMAN_SUPPORT_ART_001` off frontend `main` (`3c6cc53`), commit `596fce7`, pushed to
+origin; **not merged to `main`** — that is the owner's call.
+
+1. `frontend/src/assets/soul-nurture-human-support.png` — the attachment, copied in.
+2. `frontend/src/components/HumanSupportArtwork.tsx` — a new sibling of `HeroArtwork`,
+   `width={1600} height={1000}` with the scene described in the `alt`, so the page says out
+   loud what the picture promises: two people talking, and a shield that says it is safe.
+3. `frontend/src/routes/_app/welcome.tsx` — the art column drops the
+   `aspect-square bg-panel` wrapper and the sprout. The image carries its own pastel sky,
+   so a mint mat around it reads as a coloured ring; the art **is** the panel. Mobile keeps
+   the `w-[267px] max-w-[78vw]` sizing and the `lg:w-full lg:max-w-[560px]` desktop column.
+4. `frontend/src/components/AuthShell.tsx` — a new optional `illustration` prop. `AuthShell`
+   is shared by five routes (`signin`, `verify`, `forgot-password`, `reset-password`,
+   `first-password`), so the artwork is opt-in: when `illustration` is supplied it replaces
+   the drawn concentric-circle motif **and** the `bg-panel p-6` mat, and the `panel.heading`
+   / `panel.caption` still render underneath. The other four routes are untouched.
+5. `frontend/src/routes/_app/signin.tsx` — passes `illustration={<HumanSupportArtwork … />}`.
+
+**Verified.** `npx vite build` exit 0, `npx tsc --noEmit` exit 0 (the frontend repo has no
+lint tooling — those two are the gates). Built and served my own `vite preview` on `:3020`
+— **port `:3010` is not the natlas frontend and not mine**: it is
+`node dist/apps/gbeseid-api/main.js` (PID 24664), left alone. Over HTTP: `/welcome` and
+`/signin` both reference `soul-nurture-human-support-*.png` and no longer reference the
+sprout, `/` (landing) still references `soul-nurture-hero-*.png`, and the asset returns 200
+with the original 126,838 bytes. In the browser the `<img>` reports `naturalWidth` 1600 and
+a laid-out 267×167 box at a 565px viewport, so the aspect ratio is honoured.
+
+**Not verified.** A desktop-width screenshot. The in-app browser surface was hidden at
+565×735, below the `lg` breakpoint, and the `/signin` panel column is `hidden … lg:flex`,
+so the artwork on the sign-in page is proven by the built HTML and the class list, not by a
+picture of it. Worth one look at ≥1024px before this is called done.
+
+**Open / for the main session:**
+1. Merge `HUMAN_SUPPORT_ART_001` to frontend `main` when the owner says so.
+2. The VPS frontend lane is still manual and still serving the pre-resource build: the new
+   chips, the twelve cards and now this artwork only appear once `natlas-frontend-deploy` is
+   run **as `deploy`, never with sudo**. Vercel's deploy state remains unmeasured.
+3. The `AuthPanel.Icon` field is still required and simply isn't drawn when `illustration`
+   is passed — `signin` keeps passing `LockKeyhole` (it also uses it for the password field).
+   Harmless, but if a third illustrated route wants artwork, make `Icon` optional properly.
