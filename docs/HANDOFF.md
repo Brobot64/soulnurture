@@ -1188,7 +1188,7 @@ page only.
 
 **Frontend only — no backend, no migration, no data.** Branch
 `HUMAN_SUPPORT_ART_001` off frontend `main` (`3c6cc53`), commit `596fce7`, pushed to
-origin; **not merged to `main`** — that is the owner's call.
+origin and **merged into `main` as `2bc1a49`** (see the open list below).
 
 1. `frontend/src/assets/soul-nurture-human-support.png` — the attachment, copied in.
 2. `frontend/src/components/HumanSupportArtwork.tsx` — a new sibling of `HeroArtwork`,
@@ -1220,7 +1220,10 @@ so the artwork on the sign-in page is proven by the built HTML and the class lis
 picture of it. Worth one look at ≥1024px before this is called done.
 
 **Open / for the main session:**
-1. Merge `HUMAN_SUPPORT_ART_001` to frontend `main` when the owner says so.
+1. ~~Merge `HUMAN_SUPPORT_ART_001` to frontend `main` when the owner says so.~~ **Merged on
+   the owner's word** — frontend `main` is `2bc1a49` (`--no-ff`, no conflicts) and pushed to
+   `origin`, so Vercel's `main` lane picks it up. Gates re-run **on the merge commit**, not
+   just on the branch: `vite build` 0 + `tsc --noEmit` 0.
 2. The VPS frontend lane is still manual and still serving the pre-resource build: the new
    chips, the twelve cards and now this artwork only appear once `natlas-frontend-deploy` is
    run **as `deploy`, never with sudo**. Vercel's deploy state remains unmeasured.
