@@ -995,3 +995,59 @@ SMTP failure during signup/bootstrap: logged + `verificationEmailSent:false` ret
 - **Positioning matters**: emotional support, NOT therapy/diagnosis/emergency-care framing; crisis flows are product workflows (intent → flag+reason+human path), never prompt-only. Any new AI surface should ship with its eval-able guardrails and reach the counsellor/safeguarding reviewer early (defer to clinical sign-off; hospital-grade wording is a red flag the reviewer catches).
 - **ngo reality**: prefer free/self-hostable; state AI/budget implications openly; never let safety degrade silently ("pause intake instead of degraded safety" per the guide).
 - **Docs are deliverables**: README stays current; deployment/phase/handoff docs in `docs/` are part of done.
+
+---
+
+## §0Y — 2026-11-06 session delta: admin user erasure + verification resend (LIVE)
+
+**Requested:** admins able to delete a user entirely (Soul Nurture admin = any user;
+school admin = own school only), school admin able to resend verification emails to
+unverified users, and confirmation that onboarding already mails the verification link.
+
+**Shipped:** backend `main 686d61c → 7702be6` (`ADMIN_USER_ERASURE_001` @ `c7c234a`),
+frontend `main b57430a → 0e2a344`. CI/CD on `7702be6` = completed/success; prod
+`/opt/natlas` HEAD and marker both `7702be6`, `natlas.service` active,
+`/api/health/auth` 200, and both new routes answer **401** (not 404) unauthenticated —
+`POST /api/v1/admin/users/:userId/erase`, `POST /api/v1/admin/users/:userId/resend-verification`,
+`POST /api/v1/schools/:id/users/:userId/erase`, `POST .../resend-verification`.
+VPS frontend moved `b57430a → 0e2a344` via a manual run again (`FRONTEND DEPLOY OK`,
+marker `0e2a344`, SSR 200, `app.169.58.86.169.sslip.io` 200). That lane still needs
+`FRONTEND_VPS_SSH_KEY` before it can deploy itself. **`natlas-frontend-deploy` must be
+run as `deploy`, NOT with sudo** — it refuses root ("npm output must stay deploy-owned").
+
+**The deletion is Epic H's, not a second one.** `HistoryPurgeService.eraseUser(userId)`
+reuses `applySweep`/`accountTargets` for anyone with a `student_profile`, and adds
+`identityTargets()` for staff/admin accounts that never had one (audit rows naming them,
+others' notifications quoting them, and the `verification` rows Better Auth keys by email
+or phone). `DELETE FROM "user"` then cascades sessions, the credential account, profiles
+and their own notifications. One non-obvious repair: `support_person.professionalId` is
+`SetNull`, so a deleted counsellor would have stayed **clickable** in the student support
+directory — the erasure now flips those cards inactive (it cannot delete them:
+`support_request.supportPerson` is `Restrict`).
+
+**Guards, and why each exists:** remit is read from the actor + target rows, never from
+the URL (`assertWithinRemit`); no self-deletion; a school can never touch a
+`PLATFORM_ADMIN`; the last platform admin cannot be deleted (`LAST_PLATFORM_ADMIN` 422 —
+otherwise no account is left that can mint one); `confirm: true` is required in the body
+**and** re-checked in the service, because the 24-hour undo window is a student's
+protection against *their own* request and must not be read as covering an admin's
+decision. Sessions die with the row but open sockets do not, so `realtime.disconnectUser()`
+runs after the commit. The audit row is written after the sweep (with the acting admin as
+`actorId` and the erased uuid as `entityId`) and is the only record that survives.
+
+**Verification email on signup — already true, verified by reading, not changed:**
+`onboardStudent`, `onboardProfessional` and `onboardSchoolAdmin` all call
+`trySendVerificationEmail()` and return `verificationEmailSent`; `bootstrapStaff` mails
+too. `UsersService.provisionAdmin` is the deliberate exception — it creates the account
+`emailVerified: true`, so there is nothing to verify.
+
+**Tests:** `src/admin/user-erasure.service.spec.ts` 14/14 (mock-prisma style, but note
+`vi.clearAllMocks()` does NOT clear queued `mockResolvedValueOnce` — this file needs
+`vi.resetAllMocks()` or the next test inherits the previous test's actor/target rows;
+that cost 6 phantom failures before it was spotted). Backend gates green:
+`tsc -p tsconfig.build.json` 0, oxlint 0. Frontend gates green: `vite build` 0,
+`tsc --noEmit` 0.
+
+**Not done:** no signed-in prod browser pass on either new dialog (no live admin
+credentials — the staff password is dead; ask, never grep), and no journey-harness leg
+for the admin erasure path. The engine change is exercised by unit tests + CI only.
