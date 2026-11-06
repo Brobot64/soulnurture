@@ -6,9 +6,16 @@ import { RealtimeModule } from '../realtime/realtime.module.js';
 import { AdminController } from './admin.controller.js';
 import { AdminService } from './admin.service.js';
 import { SchoolsAdminController } from './schools-admin.controller.js';
+import { UserErasureModule } from './user-erasure.module.js';
 
 @Module({
-  imports: [PrismaModule, AuditModule, NotificationsModule, RealtimeModule],
+  imports: [
+    PrismaModule,
+    AuditModule,
+    NotificationsModule,
+    RealtimeModule,
+    UserErasureModule,
+  ],
   controllers: [AdminController, SchoolsAdminController],
   providers: [AdminService],
   exports: [AdminService],
