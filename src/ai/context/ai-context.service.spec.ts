@@ -3,6 +3,7 @@ import { AiContextService } from './ai-context.service.js';
 import { AI_CONFIG } from '../config/ai.config.js';
 import type { AiConfig } from '../config/ai.config.js';
 import { MemoryRepository } from '../memory/memory.repository.js';
+import { ContentService } from '../../content/content.service.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
 
 const aiConfigStub = {
@@ -27,6 +28,7 @@ describe('AiContextService', () => {
     wellbeingResource: { findMany: ReturnType<typeof vi.fn> };
   };
   let memory: { recall: ReturnType<typeof vi.fn> };
+  let content: { liveCodes: ReturnType<typeof vi.fn> };
 
   beforeEach(async () => {
     prisma = {
@@ -44,6 +46,7 @@ describe('AiContextService', () => {
       wellbeingResource: { findMany: vi.fn().mockResolvedValue([]) },
     };
     memory = { recall: vi.fn() };
+    content = { liveCodes: vi.fn().mockResolvedValue(new Set(['WN-01'])) };
 
     const module = await Test.createTestingModule({
       providers: [
@@ -51,6 +54,7 @@ describe('AiContextService', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: MemoryRepository, useValue: memory },
         { provide: AI_CONFIG, useValue: aiConfigStub },
+        { provide: ContentService, useValue: content },
       ],
     }).compile();
     service = module.get(AiContextService);
@@ -106,5 +110,32 @@ describe('AiContextService', () => {
       summaries: [],
       followUpHooks: [{ followUpHook: 'Check in gently.', createdAt }],
     });
+  });
+
+  it('offers the model only register-approved resources', async () => {
+    memory.recall.mockResolvedValue({ recents: [], similar: [], hooks: [] });
+
+    await service.build({ studentId: 's1', conversationId: 'c1' });
+
+    expect(prisma.wellbeingResource.findMany.mock.calls[0][0].where).toEqual({
+      active: true,
+      approved: true,
+      contentCode: { in: ['WN-01'] },
+    });
+  });
+
+  it('reads the whole approved library in a stable order', async () => {
+    memory.recall.mockResolvedValue({ recents: [], similar: [], hooks: [] });
+
+    await service.build({ studentId: 's1', conversationId: 'c1' });
+
+    const query = prisma.wellbeingResource.findMany.mock.calls[0][0];
+    // Without an order the sample would differ per turn, and an intent that
+    // recommends by grouping could find its category missing at random.
+    expect(query.orderBy).toEqual([
+      { category: 'asc' },
+      { title: 'asc' },
+    ]);
+    expect(query.take).toBeGreaterThanOrEqual(12);
   });
 });

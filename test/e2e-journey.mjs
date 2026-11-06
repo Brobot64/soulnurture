@@ -623,42 +623,35 @@ async function main() {
   // ---------------------------------------------------------------- act 6
   act('Act 6 — resources, toolbox, journal, support request');
   // The content register — not the row booleans — decides what a student sees
-  // (Doc B §5, Doc C §1). This local DB still carries the five invented seed
-  // placeholder rows with approved: true and no contentCode, so Act 6 is the
-  // proof that they are now invisible, and that a register-approved row is not.
-  const CODED_TITLE = '[e2e] register-approved breathing';
+  // (Doc B §5, Doc C §1). The twelve approved entries now ship from the seed,
+  // so the gate is proved the other way round: take one code away from the
+  // register and show it leaves every student surface. A row the register stops
+  // approving has to go, which is the same rule that kept the five invented
+  // placeholders out.
+  const TEST_CODE = 'WN-05';
   const UNCODED_TITLE = '[e2e] approved on the table only';
-  await db(`DELETE FROM wellbeing_resource WHERE title IN ($1, $2)`, [CODED_TITLE, UNCODED_TITLE]);
+  await db(`DELETE FROM wellbeing_resource WHERE title = $1`, [UNCODED_TITLE]);
   res = await api(jude, 'GET', '/api/v1/resources');
-  const unapproved = (data(res)?.items ?? []).filter((r) => !r.contentCode);
-  check('no row without a register code reaches the catalogue', unapproved.length === 0, `${unapproved.length} leaked: ${unapproved.map((r) => r.title).join(', ')}`);
-  check('the invented seed placeholders are gone', !(data(res)?.items ?? []).some((r) => /Navigating Exam Stress|Not All On You|Chill Breath|Palm-Wine|Without the Fear/.test(r.title ?? '')), (data(res)?.items ?? []).map((r) => r.title).join(', '));
+  const catalogue = data(res)?.items ?? [];
+  check('the approved library reaches the catalogue', catalogue.length >= 12, `${catalogue.length} rows`);
+  check('no row without a register code reaches the catalogue', catalogue.every((r) => !!r.contentCode), `${catalogue.filter((r) => !r.contentCode).map((r) => r.title).join(', ')} leaked`);
+  check('the invented seed placeholders are gone', !catalogue.some((r) => /Navigating Exam Stress|Not All On You|Chill Breath|Palm-Wine|Without the Fear/.test(r.title ?? '')), catalogue.map((r) => r.title).join(', '));
+  // Doc B §3 is the whole taxonomy: eight labels, and every one of them has at
+  // least one approved resource under it, so no topic chip opens onto a blank.
+  check('the eight approved categories carry the catalogue', new Set(catalogue.map((r) => r.category)).size === 8, [...new Set(catalogue.map((r) => r.category))].join(', '));
+  check('every card states an approved title and a duration', catalogue.every((r) => r.title?.trim() && r.description?.trim() && r.durationLabel?.trim()), catalogue.slice(0, 3).map((r) => `${r.title}/${r.durationLabel}`).join(', '));
+  check('and no card claims a media file that was never supplied', catalogue.every((r) => !r.mediaUrl), catalogue.filter((r) => r.mediaUrl).map((r) => r.title).join(', '));
 
   await db(
-    `INSERT INTO content_item (id, code, kind, namespace, status, payload, "createdAt", "updatedAt")
-     VALUES ($1, 'WN-01', 'WELLBEING_RESOURCE', 'WELLBEING', 'CONTENT_REVIEW_REQUIRED', '{}'::jsonb, now(), now())
-     ON CONFLICT DO NOTHING`,
-    [randomUUID()],
-  );
-  await db(
-    `UPDATE content_item SET status = 'APPROVED_ACTIVE', "approvedBy" = 'e2e-journey'
-     WHERE code = 'WN-01' AND kind = 'WELLBEING_RESOURCE'`,
-  );
-  await db(
-    `INSERT INTO wellbeing_resource (id, title, description, type, category, "contentCode", instructions, active, approved, "createdAt", "updatedAt")
-     VALUES ($1, $2, 'One breathing step the register has approved.', 'SOMATIC_EXERCISE', 'GROUNDING', 'WN-01', ARRAY['Breathe in for four, out for six.'], true, true, now(), now())`,
-    [randomUUID(), CODED_TITLE],
-  );
-  await db(
     `INSERT INTO wellbeing_resource (id, title, description, type, category, active, approved, "createdAt", "updatedAt")
-     VALUES ($1, $2, 'Approved by the boolean alone — never registered, never reviewed.', 'ARTICLE', 'GROUNDING', true, true, now(), now())`,
+     VALUES ($1, $2, 'Approved by the boolean alone — never registered, never reviewed.', 'ARTICLE', 'GENERAL', true, true, now(), now())`,
     [randomUUID(), UNCODED_TITLE],
   );
 
   res = await api(jude, 'GET', '/api/v1/resources');
   const resources = data(res)?.items ?? [];
-  const codedResource = resources.find((r) => r.title === CODED_TITLE);
-  check('the register-approved row appears', !!codedResource, `${resources.length} rows`);
+  const liveResource = resources.find((r) => r.contentCode === TEST_CODE);
+  check('the register-approved row appears', !!liveResource, `${resources.length} rows`);
   check('and the boolean-approved row still does not', !resources.some((r) => r.title === UNCODED_TITLE));
 
   res = await api(jude, 'GET', '/api/v1/resources/tailored', undefined);
@@ -680,9 +673,9 @@ async function main() {
   res = await api(jude, 'GET', '/api/v1/resources/tailored', undefined);
   const personalised = data(res);
   check('the newest check-in drives the claim without the client naming it', personalised?.basis === 'STATED_NEED' && personalised?.title === 'Picked for you', `title ${personalised?.title} · basis ${personalised?.basis}`);
-  check('and it only ever offers the three reviewed groupings', (personalised?.items ?? []).every((r) => ['EXAM_STRESS', 'GROUNDING', 'ANXIETY'].includes(r.category)), (personalised?.items ?? []).map((r) => r.category).join(', '));
+  check('and it only ever offers the two reviewed groupings', (personalised?.items ?? []).every((r) => ['STEADIER', 'ONE_STEP'].includes(r.category)), (personalised?.items ?? []).map((r) => r.category).join(', '));
 
-  res = await api(jude, 'POST', '/api/v1/resources/toolbox', { resourceId: codedResource.id });
+  res = await api(jude, 'POST', '/api/v1/resources/toolbox', { resourceId: liveResource.id });
   check('toolbox save', res.status === 201 || res.status === 200, `status ${res.status}`);
   const uncodedRow = await db(`SELECT id FROM wellbeing_resource WHERE title = $1`, [UNCODED_TITLE]);
   res = await api(jude, 'POST', '/api/v1/resources/toolbox', { resourceId: uncodedRow.rows[0].id });
@@ -690,17 +683,36 @@ async function main() {
   res = await api(jude, 'GET', '/api/v1/resources/toolbox');
   check('toolbox lists saved resource', data(res)?.count === 1);
 
-  // Put the register back, so a run leaves the local DB as honest as it found
+  // Withdraw the code from the register, which is exactly what a reviewer does
+  // to retire one entry — and nothing student-facing may keep showing it.
+  await db(
+    `UPDATE content_item SET status = 'BLOCKED', "approvedBy" = 'e2e-journey'
+     WHERE code = $1 AND kind = 'WELLBEING_RESOURCE'`,
+    [TEST_CODE],
+  );
+  res = await api(jude, 'GET', '/api/v1/resources');
+  check('a withdrawn code leaves the catalogue', !(data(res)?.items ?? []).some((r) => r.contentCode === TEST_CODE));
+  res = await api(jude, 'GET', `/api/v1/resources?category=KINDNESS`);
+  check('and leaves its own topic empty', (data(res)?.items ?? []).length === 0, `${(data(res)?.items ?? []).length} rows`);
+  res = await api(jude, 'POST', '/api/v1/resources/toolbox', { resourceId: liveResource.id });
+  check('a withdrawn resource can no longer be saved', res.status === 404, `status ${res.status}`);
+  res = await api(jude, 'GET', '/api/v1/resources/toolbox');
+  check('and drops out of a toolbox that already held it', data(res)?.count === 0, `count ${data(res)?.count}`);
+
+  // Put the register back, so a run leaves the database as honest as it found
   // it. E2E_KEEP_RESOURCES=1 skips the restore — that is how a browser pass
-  // gets one real approved resource to look at, without anyone hand-editing SQL.
+  // looks at the withdrawn state, without anyone hand-editing SQL.
   if (process.env.E2E_KEEP_RESOURCES === '1') {
-    console.log('  E2E_KEEP_RESOURCES=1 — the [e2e] resource and the WN-01 approval stay put.');
+    console.log(`  E2E_KEEP_RESOURCES=1 — ${TEST_CODE} stays BLOCKED and the [e2e] row stays on file.`);
   } else {
-    await db(`DELETE FROM wellbeing_resource WHERE title IN ($1, $2)`, [CODED_TITLE, UNCODED_TITLE]);
+    await db(`DELETE FROM wellbeing_resource WHERE title = $1`, [UNCODED_TITLE]);
     await db(
-      `UPDATE content_item SET status = 'CONTENT_REVIEW_REQUIRED', "approvedBy" = NULL
-       WHERE code = 'WN-01' AND kind = 'WELLBEING_RESOURCE'`,
+      `UPDATE content_item SET status = 'APPROVED_ACTIVE', "approvedBy" = 'PRODUCT_OWNER'
+       WHERE code = $1 AND kind = 'WELLBEING_RESOURCE'`,
+      [TEST_CODE],
     );
+    res = await api(jude, 'GET', '/api/v1/resources');
+    check('the withdrawal reverses completely', (data(res)?.items ?? []).some((r) => r.contentCode === TEST_CODE));
   }
 
   res = await api(jude, 'POST', '/api/v1/journal', { title: 'Rough day', content: 'Long notes about the exam-week haze and the loud hostel.', prompt: 'good news' });
