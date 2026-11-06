@@ -1230,3 +1230,65 @@ picture of it. Worth one look at ≥1024px before this is called done.
 3. The `AuthPanel.Icon` field is still required and simply isn't drawn when `illustration`
    is passed — `signin` keeps passing `LockKeyhole` (it also uses it for the password field).
    Harmless, but if a third illustrated route wants artwork, make `Icon` optional properly.
+
+## §0AB — 2026-11-06 session delta: `soulnurtureai.vercel.app` is a permitted origin on prod
+
+**Requested:** "addd soulnurtureai.vercel.app to vps for cors origin".
+
+**First, is the hostname real?** `https://soulnurtureai.vercel.app/welcome` returns **200**
+(`soulnurture.vercel.app` also 200; `soulnurture-frontend.vercel.app` 307s). So the origin
+was used exactly as the owner wrote it, with `https://` and no trailing slash.
+
+**What changed — prod env only, no code, no migration.** `/opt/natlas/.env` lines 93 and 94
+gained `,https://soulnurtureai.vercel.app`:
+
+- `ALLOWED_ORIGINS` — read once at boot in `src/main.ts:22` and handed to `@fastify/cors`
+  (comma-split, trimmed), and it is also what the socket.io gateway checks.
+- `BETTER_AUTH_TRUSTED_ORIGINS` — added **with** it, not because it was asked for. The repo's
+  own `.env.example` (lines 18–25) documents these two as a pair: CORS alone lets the fetch
+  through while the session still refuses to mint a cookie for an untrusted origin, so a
+  half-done change looks like a broken login. Both Vercel hosts were already in both lists,
+  so this keeps the new one consistent with them.
+
+**How it was applied.** `deploy` reads the file (group `natlas`, mode 640) but cannot write
+it, so the edit is `sudo sed -i` anchored on the key name, with an idempotency guard
+(`grep -q "^KEY=.*soulnurtureai"` first), then `chown root:natlas` + `chmod 640` re-asserted
+because GNU `sed -i` rewrites the file. Both keys have exactly **one** assignment in the
+file — checked afterwards, because a later duplicate would silently win and undo the edit
+(the `.env` duplicate-key trap). `sudo systemctl restart natlas` (exit 0, `active`, new
+MainPID) because the origin list is read at boot.
+
+**Verified from outside, through both nginx hosts:**
+- `OPTIONS /api/v1/resources` with `Origin: https://soulnurtureai.vercel.app` → `204` with
+  `access-control-allow-origin: https://soulnurtureai.vercel.app` and the full method list,
+  on `app.169.58.86.169.sslip.io` **and** `api.169.58.86.169.sslip.io`.
+- No regression: `https://soulnurture.vercel.app` still echoes.
+- Unknown origin `https://evil.example` → `204` with **no** `access-control-allow-origin`,
+  i.e. the browser still blocks it. The allowlist is still an allowlist.
+- `/api/health/auth` → 200 after the restart.
+- Not proven: the socket.io origin gate. `GET /api/socket.io/?EIO=4&transport=polling` 404s
+  from the app for *any* origin, so the probe never reached the gateway — the earlier 101
+  evidence used a websocket upgrade, which this pass did not attempt.
+
+**The finding that matters more than the change.** The deployed Vercel bundle is not talking
+to this API at all. `https://soulnurtureai.vercel.app/assets/api-BcTno9bo.js` contains,
+verbatim:
+
+```
+var e=`http://localhost:3000`.replace(/\/+$/,``)
+```
+
+so `VITE_API_BASE_URL` was **unset at build time** and the client falls back to the visitor's
+own `localhost:3000`. Until that variable is set in the Vercel dashboard (Production *and*
+Preview) to a prod API origin and the site is **rebuilt** — it is inlined at build, not read
+at runtime — no browser on that host sends a cross-origin request, and this new CORS entry
+protects traffic that does not exist yet. `BETTER_AUTH_CROSS_SITE_COOKIES=true` is already
+set (line 80), which is the third leg of that pairing.
+
+**Open / for the main session:**
+1. Set `VITE_API_BASE_URL` in Vercel (which host — `api.` or `app.` — is the owner's call;
+   `app.` is the same-origin lane that exists for the iPhone cookie problem) and redeploy.
+2. Three docs-only backend commits (`563a9b4`, `dc0b4c9` and this one) are unpushed on
+   `main`; pushing backend `main` starts the VPS deploy lane.
+3. The VPS frontend lane still has not been redeployed, so `app.` still serves the pre-art
+   build.
