@@ -17,6 +17,8 @@ import {
   ApiStandardErrors,
 } from '../docs/openapi.helpers.js';
 import { Roles } from '../common/guards/roles.decorator.js';
+import { EraseUserDto } from '../common/dto/erase-user.dto.js';
+import { UserErasureService } from '../admin/user-erasure.service.js';
 import { OnboardProfessionalDto } from './dto/onboard-professional.dto.js';
 import { OnboardSchoolAdminDto } from './dto/onboard-school-admin.dto.js';
 import { OnboardStudentDto } from './dto/onboard-student.dto.js';
@@ -28,7 +30,10 @@ import { SchoolUsersService } from './school-users.service.js';
 @Controller('v1/schools')
 @Roles('SCHOOL_ADMIN', 'PLATFORM_ADMIN')
 export class SchoolUsersController {
-  constructor(private readonly schoolUsers: SchoolUsersService) {}
+  constructor(
+    private readonly schoolUsers: SchoolUsersService,
+    private readonly userErasure: UserErasureService,
+  ) {}
 
   @Get(':id/overview')
   @ApiSessionAuth()
@@ -151,6 +156,55 @@ reactivated.
     @Param('userId') userId: string,
   ) {
     return this.schoolUsers.reactivateUser(session.user.id, id, userId);
+  }
+
+  @Post(':id/users/:userId/erase')
+  @ApiSessionAuth()
+  @ApiStandardErrors()
+  @ApiOperation({
+    summary: 'Delete a school user entirely (school admin)',
+    description: `
+The permanent one — \`DELETE :id/users/:userId\` is the reversible off-boarding
+that keeps the history. This removes the account and everything the system
+holds about that person: history, sessions, credential, the audit rows naming
+them and the verification links sent to their address. It is not undoable and
+does not wait out the student's own 24-hour window, because that window
+protects a request the student filed, not a decision made about them.
+
+Refused for the caller's own account, for a platform admin, and for any
+account outside this school.
+`,
+  })
+  @ApiBody({ type: EraseUserDto })
+  @ApiEnvelopeOk(Object)
+  eraseUser(
+    @Session() session: UserSession,
+    @Param('id') id: string,
+    @Param('userId') userId: string,
+    @Body() body: EraseUserDto,
+  ) {
+    return this.userErasure.erase(session.user.id, userId, id, body.confirm);
+  }
+
+  @Post(':id/users/:userId/resend-verification')
+  @ApiSessionAuth()
+  @ApiStandardErrors()
+  @ApiOperation({
+    summary: 'Resend a school user’s verification email (school admin)',
+    description: `
+For an enrolled account that has not clicked the verification link yet. An
+already-verified account answers \`sent: false, alreadyVerified: true\` and no
+email goes out. If the mail itself fails the endpoint still answers 200 with
+\`sent: false\` — the account is unchanged and the admin can try again.
+`,
+  })
+  @ApiEnvelopeOk(Object)
+  resendVerification(
+    @Session() session: UserSession,
+    @Param('id') id: string,
+    @Param('userId') userId: string,
+  ) {
+    return this.userErasure.resendVerificationEmail(session.user.id, userId, id);
   }
 
   @Get(':id/settings')

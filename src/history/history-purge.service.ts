@@ -58,6 +58,27 @@ interface StudentOwner {
   schoolStatus: string | null;
 }
 
+/** The account an administrator is erasing, as the database holds it. */
+interface ErasureTarget {
+  id: string;
+  email: string;
+  phone: string | null;
+  role: string;
+  schoolId: string | null;
+  studentId: string | null;
+  professionalId: string | null;
+}
+
+/** What an administrative erasure removed — counts and routing only, never
+ * the person's contact details or content. */
+export interface ErasedUser {
+  role: string;
+  schoolId: string | null;
+  hadStudentProfile: boolean;
+  removedCheckIns: number;
+  removedConversations: number;
+}
+
 type PurgeOutcome = 'erased' | 'executed' | 'held' | 'skipped';
 
 /**
@@ -201,6 +222,119 @@ export class HistoryPurgeService implements OnModuleInit, OnModuleDestroy {
       );
     }
     return result.outcome;
+  }
+
+  /**
+   * Erase one account outright, on someone else's authority.
+   *
+   * A student's own ALL_HISTORY ask removes exactly this, so the sweep is
+   * reused rather than rewritten — two copies of "everything that names this
+   * person" would drift, and the drift would be invisible until an audit.
+   * A staff or admin account has no `student_profile`, so for those the
+   * identity sweep alone applies: the audit rows that name them, the Better
+   * Auth verifications keyed by their contact details, then the user row and
+   * everything that cascades off it (sessions, the credential hash, their own
+   * notifications and profile).
+   *
+   * There is no undo window here, and that is deliberate. The 24 hours protect
+   * a student from a request *they* filed; an administrative erasure is
+   * decided by a named person who is not the data subject, and the audit row
+   * the caller writes after this returns is what stands behind it.
+   *
+   * Returns null when the account is already gone — an idempotent answer, not
+   * an error, because a second click must not report a second deletion.
+   */
+  async eraseUser(userId: string): Promise<ErasedUser | null> {
+    return this.prisma.$transaction(
+      (tx) => this.eraseUserInTransaction(tx, userId),
+      { timeout: 120_000, maxWait: 10_000 },
+    );
+  }
+
+  private async eraseUserInTransaction(
+    tx: Prisma.TransactionClient,
+    userId: string,
+  ): Promise<ErasedUser | null> {
+    // Locking the identity row keeps this out of the purge worker's way: the
+    // same student can be one due ALL_HISTORY ask away from removal, and two
+    // erasures of one account must not both run.
+    const [target] = await tx.$queryRaw<ErasureTarget[]>`
+      SELECT u.id, u.email, u.phone, u.role, u."schoolId",
+             sp.id AS "studentId", pp.id AS "professionalId"
+      FROM "user" u
+      LEFT JOIN student_profile sp ON sp."userId" = u.id
+      LEFT JOIN professional_profile pp ON pp."userId" = u.id
+      WHERE u.id = ${userId}::uuid
+      FOR UPDATE OF u`;
+    if (!target) return null;
+
+    let removed = { checkIns: 0, conversations: 0 };
+    if (target.studentId) {
+      removed = await this.countStudentRows(tx, target.studentId);
+      await this.applySweep(
+        tx,
+        accountTargets(target.studentId, {
+          userId: target.id,
+          email: target.email,
+          phone: target.phone,
+          deactivatedAt: null,
+          schoolId: target.schoolId,
+          schoolStatus: null,
+        }),
+      );
+      // Cascades over every wellbeing table the student ever produced.
+      await tx.$executeRaw`
+        DELETE FROM student_profile WHERE id = ${target.studentId}::uuid`;
+    } else {
+      await this.applySweep(tx, identityTargets(target));
+      // The support directory is the one place a deleted staff account would
+      // otherwise keep breathing: `support_person.professionalId` is SetNull,
+      // so the card survives its profile and a student could pick a person who
+      // no longer exists. Requests already routed to it keep their row — that
+      // FK is Restrict — but the card goes inactive.
+      if (target.professionalId) {
+        await tx.$executeRaw`
+          UPDATE support_person
+          SET active = false
+          WHERE "professionalId" = ${target.professionalId}::uuid`;
+      }
+    }
+
+    // Every staff account also holds verification rows that are keyed by
+    // contact detail rather than by user id — a password-reset link must not
+    // outlive the person it was sent to.
+    await tx.$executeRaw(
+      Prisma.sql`
+        DELETE FROM verification
+        WHERE "identifier" = ${target.email}
+           OR (${target.phone}::text IS NOT NULL AND "identifier" = ${target.phone})`,
+    );
+
+    // Last, the identity itself: sessions, the credential account, their own
+    // notifications and both profile rows cascade from here.
+    await tx.$executeRaw`
+      DELETE FROM "user" WHERE id = ${userId}::uuid`;
+
+    return {
+      role: target.role,
+      schoolId: target.schoolId,
+      hadStudentProfile: target.studentId !== null,
+      removedCheckIns: removed.checkIns,
+      removedConversations: removed.conversations,
+    };
+  }
+
+  private async countStudentRows(
+    tx: Prisma.TransactionClient,
+    studentId: string,
+  ): Promise<{ checkIns: number; conversations: number }> {
+    const counts = await tx.$queryRaw<
+      { checkIns: number; conversations: number }[]
+    >`
+      SELECT
+        (SELECT count(*) FROM emotional_check_in WHERE "studentId" = ${studentId}::uuid)::int AS "checkIns",
+        (SELECT count(*) FROM conversation WHERE "studentId" = ${studentId}::uuid)::int AS "conversations"`;
+    return counts[0] ?? { checkIns: 0, conversations: 0 };
   }
 
   private async purgeInTransaction(
@@ -631,6 +765,31 @@ function accountTargets(studentId: string, owner: StudentOwner): SweepTargets {
     verification: Prisma.sql`
       "identifier" = ${owner.email}
       OR (${owner.phone}::text IS NOT NULL AND "identifier" = ${owner.phone})`,
+  };
+}
+
+/**
+ * The unlinked copies of a staff or admin identity — an account that never
+ * had a student profile, so nothing about it is reachable through `studentId`.
+ * What is left is the trail that names them and the notifications other
+ * people hold about them.
+ */
+function identityTargets(target: ErasureTarget): SweepTargets {
+  const userId = target.id;
+  const named = Prisma.sql`
+    "entityId" = ${userId}
+    OR "meta" ->> 'userId' = ${userId}
+    OR "meta" ->> 'professionalId' = ${target.professionalId ?? ''}`;
+  return {
+    audit: Prisma.sql`"actorId" = ${userId}::uuid OR (${named})`,
+    notification: Prisma.sql`
+      "userId" <> ${userId}::uuid
+      AND (
+           "data" ->> 'userId' = ${userId}
+        OR "data" ->> 'professionalId' = ${target.professionalId ?? ''}
+      )`,
+    job: Prisma.sql`"input" ->> 'studentId' = ${userId}`,
+    verification: null,
   };
 }
 
