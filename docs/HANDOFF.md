@@ -1051,3 +1051,41 @@ that cost 6 phantom failures before it was spotted). Backend gates green:
 **Not done:** no signed-in prod browser pass on either new dialog (no live admin
 credentials — the staff password is dead; ask, never grep), and no journey-harness leg
 for the admin erasure path. The engine change is exercised by unit tests + CI only.
+
+**Production verification, same day — measured, not assumed:**
+- Prod HEAD and the deploy marker are both `04c0318`; the frontend marker is `0e2a344`.
+  CI on the exact SHA: "Lint, test, build" and "Deploy to production VPS" both
+  completed/success. `natlas.service` and `natlas-frontend.service` active, `NRestarts=0`
+  on both, zero unfinished migrations.
+- All four routes are mapped by the running process — they appear verbatim in
+  `journalctl -u natlas.service` at 10:01 and again at the 10:11 restart.
+- Live route matrix on `127.0.0.1:3000`: the four POSTs answer **401**
+  ("Authentication required") while a bogus path under the same prefix answers **404** —
+  the routes exist and are guarded, not merely compiled. **The API prefix is
+  `/api/v1/...`, not `/v1/...`** (`app.setGlobalPrefix('api')` at `src/main.ts:37` plus
+  `@Controller('v1/...')`); a probe that omits `/api` returns 404 for everything and
+  reads as a failed deploy when it is not.
+- The new raw SQL is proven against the **real prod schema** with `EXPLAIN` (plans only,
+  never executes — the sanctioned way to check `$queryRaw` text that mock-prisma cannot
+  validate). The erase-target `SELECT … FOR UPDATE OF u`, the `UPDATE support_person SET
+  active = false`, the `DELETE FROM verification` by identifier, and the `identityTargets`
+  audit/notification/job predicates all plan cleanly. Note `audit_log."entityId"` is
+  **text**, not uuid — the code compares it uncast, which is right; a `::uuid` cast there
+  would have thrown in prod and nowhere else.
+- `ai_generation_job` has **no `userId` column**; the sweep reaches it through
+  `"input" ->> 'studentId'`. Anyone adding a job predicate later should not assume
+  otherwise.
+- Deployed frontend bundle on the VPS ships the controls: `grep` finds both strings in
+  `.output/public/assets/users-*.js` and `.output/server/_ssr/users-*.mjs`, and the
+  compiled client calls `erase` and `resend-verification`. The unauthenticated home page
+  contains neither — they are behind the signed-in people register, so a landing-page
+  grep proves nothing either way.
+- **Still open:** what no measurement above can show is an authenticated admin clicking
+  Delete on a real prod account. That needs a live admin session.
+
+**Unrelated prod finding, surfaced by the log sweep:** the OpenAI key is expired.
+`MemoryRepository` warns "Vector recall unavailable" and `ChainedAiProvider` fails over
+on every request for student `8bd984e7-…`. Chat survives on the fallback, but the
+30-day memory promised by instrument `ai-disclosure-v3` is degraded for that path.
+Predates this deploy (first hit 10:00:23, before the 10:01 restart) — not a regression
+from this change, and not something to fix by grepping for the key.
