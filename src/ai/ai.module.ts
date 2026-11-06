@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuditModule } from '../audit/audit.module.js';
 import { ConsentModule } from '../consent/consent.module.js';
+import { ContentModule } from '../content/content.module.js';
 import { PrismaModule } from '../prisma/prisma.module.js';
 import { RealtimeModule } from '../realtime/realtime.module.js';
 import { StudentsModule } from '../students/students.module.js';
@@ -40,6 +41,7 @@ import { ReplyRendererService } from './language/reply-renderer.service.js';
     PrismaModule,
     AuditModule,
     ConsentModule,
+    ContentModule,
     ConfigModule,
     StudentsModule,
     SupportFlagsModule,

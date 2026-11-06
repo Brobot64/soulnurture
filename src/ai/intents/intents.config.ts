@@ -150,7 +150,12 @@ export const INTENTS: IntentDefinition[] = [
         reason:
           "When thoughts like this come up, a trained person can help you through. You can reach out to a support person at any time — you don't have to carry this alone.",
       },
-      { type: 'RECOMMEND_RESOURCE', category: 'GROUNDING' },
+      // The approved groupings (Doc B §3), not the old placeholder categories:
+      // "Help me feel steadier" (WN-02 grounding, WN-03 breathing) is what the
+      // reviewed library offers for a moment this acute, and "When things feel
+      // heavy" (WN-07, WN-08) for a mood that has not lifted. A category with
+      // no approved row silently attaches nothing.
+      { type: 'RECOMMEND_RESOURCE', category: 'STEADIER' },
       { type: 'RECOMMEND_ACTIVITY', activitySlugs: ['five-senses-grounding'] },
     ],
   },
@@ -212,7 +217,7 @@ export const INTENTS: IntentDefinition[] = [
       { type: 'SUPPORT_FLAG' },
       { type: 'GROUNDING', exerciseLabel: '4-7-8 breathing exercise' },
       { type: 'RECOMMEND_ACTIVITY', activitySlugs: ['box-breathing'] },
-      { type: 'RECOMMEND_RESOURCE', category: 'GROUNDING' },
+      { type: 'RECOMMEND_RESOURCE', category: 'STEADIER' },
       {
         type: 'HUMAN_SUPPORT_PROMPT',
         reason:
@@ -245,7 +250,7 @@ export const INTENTS: IntentDefinition[] = [
         reason:
           "Feeling this low for a while is heavy. A caring person at your school can listen and walk with you — there's no threshold you need to reach first.",
       },
-      { type: 'RECOMMEND_RESOURCE', category: 'EXAM_STRESS' },
+      { type: 'RECOMMEND_RESOURCE', category: 'HEAVY' },
       {
         type: 'RECOMMEND_ACTIVITY',
         activitySlugs: ['thought-recap', 'mindful-body-scan'],

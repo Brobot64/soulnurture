@@ -10,12 +10,24 @@ import type { ResourceQueryDto } from './dto/resource-query.dto.js';
  * The only check-in feelings with an approved resource grouping (Doc B / G13).
  * Anything outside this map gets the neutral "featured" surface instead of a
  * personalisation claim, because no mapping has been reviewed for it.
+ *
+ * Two groupings, each traceable to the approved "Use when" wording rather than
+ * to a rule invented here: "Help me feel steadier" covers WN-02 ("when
+ * overwhelmed … or caught in a stressful moment") and WN-03 ("when the body
+ * feels tense or hurried"); "Take one small step" covers WN-04 ("when
+ * schoolwork, responsibilities or decisions feel too big") and WN-12 ("when
+ * unsure what kind of help is needed").
  */
 const STATED_NEED_CATEGORIES: ResourceCategory[] = [
-  ResourceCategory.EXAM_STRESS,
-  ResourceCategory.GROUNDING,
-  ResourceCategory.ANXIETY,
+  ResourceCategory.STEADIER,
+  ResourceCategory.ONE_STEP,
 ];
+
+/** The Doc B §3 labels, in the order the handoff lists them. */
+const STATED_NEED_CATEGORY_LABELS: Partial<Record<ResourceCategory, string>> = {
+  STEADIER: 'Help me feel steadier',
+  ONE_STEP: 'Take one small step',
+};
 
 const STATED_NEED_LABELS: Partial<Record<FeelingLabel, string>> = {
   OVERWHELMED: 'overwhelmed',
@@ -109,7 +121,11 @@ export class ResourcesService {
     if (statedNeed) {
       where = { ...where, OR: STATED_NEED_CATEGORIES.map((category) => ({ category })) };
       title = 'Picked for you';
-      rationale = `You said you feel ${statedNeed}, so these are the exam-stress, anxiety and grounding resources.`;
+      // Names the approved groupings it actually filtered by, so the sentence
+      // cannot outlive the rule that earned it.
+      rationale = `You said you feel ${statedNeed}, so these come from ${STATED_NEED_CATEGORIES.map(
+        (category) => `“${STATED_NEED_CATEGORY_LABELS[category]}”`,
+      ).join(' and ')}.`;
       basis = 'STATED_NEED';
     }
 

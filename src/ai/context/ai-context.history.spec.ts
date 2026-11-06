@@ -3,6 +3,7 @@ import { AiContextService } from './ai-context.service.js';
 import { AI_CONFIG } from '../config/ai.config.js';
 import type { AiConfig } from '../config/ai.config.js';
 import { MemoryRepository } from '../memory/memory.repository.js';
+import { ContentService } from '../../content/content.service.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
 
 /** Rows come back newest-first, as the real query orders them. */
@@ -44,6 +45,10 @@ describe('AiContextService — conversation history (current-turn fixes)', () =>
         {
           provide: AI_CONFIG,
           useValue: { context: { messageLimit: 12, characterLimit: charLimit } } as unknown as AiConfig,
+        },
+        {
+          provide: ContentService,
+          useValue: { liveCodes: vi.fn().mockResolvedValue(new Set<string>()) },
         },
       ],
     }).compile();

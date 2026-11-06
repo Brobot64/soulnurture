@@ -1,9 +1,18 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { MessageRole } from '@prisma/client';
+import { ContentKind, MessageRole } from '@prisma/client';
 import { AI_CONFIG } from '../config/ai.config.js';
 import type { AiConfig } from '../config/ai.config.js';
 import { MemoryRepository } from '../memory/memory.repository.js';
+import { ContentService } from '../../content/content.service.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
+
+/**
+ * How many approved resources the model may choose between. The reviewed
+ * library is twelve rows (Doc B §4), so this is the whole catalogue with head-
+ * room to grow; the cap exists only so a future library cannot outrun the
+ * prompt budget it is packed into.
+ */
+const RESOURCE_CONTEXT_LIMIT = 24;
 
 export interface AiContext {
   student: { firstName: string | null; preferredLanguage: string | null };
@@ -62,6 +71,7 @@ export class AiContextService {
     private readonly prisma: PrismaService,
     private readonly memory: MemoryRepository,
     @Inject(AI_CONFIG) private readonly aiConfig: AiConfig,
+    private readonly contentService: ContentService,
   ) {}
 
   async build(params: {
@@ -123,9 +133,24 @@ export class AiContextService {
       language: m.language ?? null,
     }));
 
+    // The same predicate the student-facing catalogue uses (Doc B §5, Doc C §1):
+    // the row booleans are a publisher's intention, the content register is the
+    // review record. Without this, a resource a reviewer withdrew from the
+    // register could still be attached to a reply and shown as a card that then
+    // 404s on the resources page. Ordered by category so the intent configs —
+    // which recommend a resource by its approved grouping — see the same
+    // catalogue on every turn instead of an arbitrary sample of it.
+    const liveCodes = await this.contentService.liveCodes({
+      kind: ContentKind.WELLBEING_RESOURCE,
+    });
     const resources = await this.prisma.wellbeingResource.findMany({
-      where: { active: true, approved: true },
-      take: 8,
+      where: {
+        active: true,
+        approved: true,
+        contentCode: { in: [...liveCodes] },
+      },
+      orderBy: [{ category: 'asc' }, { title: 'asc' }],
+      take: RESOURCE_CONTEXT_LIMIT,
       select: { id: true, title: true, type: true, category: true, description: true },
     });
 

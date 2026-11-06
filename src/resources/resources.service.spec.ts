@@ -101,14 +101,14 @@ describe('ResourcesService', () => {
       where: { id: 'checkin-1', studentId: student.id },
     });
     const where = prisma.wellbeingResource.findMany.mock.calls[0][0].where;
-    expect(where.OR).toEqual([
-      { category: 'EXAM_STRESS' },
-      { category: 'GROUNDING' },
-      { category: 'ANXIETY' },
-    ]);
+    expect(where.OR).toEqual([{ category: 'STEADIER' }, { category: 'ONE_STEP' }]);
     expect(result.title).toBe('Picked for you');
     expect(result.basis).toBe('STATED_NEED');
     expect(result.rationale).toContain('overwhelmed');
+    // The sentence names the Doc B §3 labels it actually filtered by, so the
+    // rationale cannot outlive the rule that produced the list.
+    expect(result.rationale).toContain('Help me feel steadier');
+    expect(result.rationale).toContain('Take one small step');
     expect(result.rationale).not.toContain('reflection signals');
     expect(result.items).toHaveLength(1);
   });
@@ -277,7 +277,7 @@ describe('ResourcesService', () => {
 
       const where = prisma.wellbeingResource.findMany.mock.calls[0][0].where;
       expect(where.contentCode).toEqual({ in: ['WN-01'] });
-      expect(where.OR).toHaveLength(3);
+      expect(where.OR).toEqual([{ category: 'STEADIER' }, { category: 'ONE_STEP' }]);
     });
 
     it('drops a toolbox row whose resource the register no longer approves', async () => {

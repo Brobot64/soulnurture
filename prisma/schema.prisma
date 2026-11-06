@@ -94,6 +94,12 @@ enum ResourceFeedbackChoice {
   DECLINED
 }
 
+/// The eight values after GENERAL are the approved student-facing taxonomy
+/// (Doc B §3), which the resource surfaces present and filter by. The eleven
+/// before it stay because `WellbeingActivity` and the AI activity catalogue
+/// already key off GROUNDING/SLEEP/ANXIETY/GENERAL, and the five withdrawn
+/// placeholder rows still carry their original value — a Postgres enum value
+/// cannot be dropped while any row uses it.
 enum ResourceCategory {
   EXAM_STRESS
   FRIENDSHIPS
@@ -106,6 +112,14 @@ enum ResourceCategory {
   CULTURAL_WISDOM
   PEER_DYNAMICS
   GENERAL
+  FEELINGS
+  STEADIER
+  ONE_STEP
+  KINDNESS
+  DIFFICULT_MOMENT
+  HEAVY
+  ASK_FOR_SUPPORT
+  REST
 }
 
 enum SupportPersonType {
