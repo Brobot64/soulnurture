@@ -6,8 +6,15 @@ import {
   ParseUUIDPipe,
   Post,
   Body,
+  Query,
 } from '@nestjs/common';
-import { ApiBody, ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBody,
+  ApiOperation,
+  ApiParam,
+  ApiQuery,
+  ApiTags,
+} from '@nestjs/swagger';
 import { Session, type UserSession } from '@thallesp/nestjs-better-auth';
 import { Roles } from '../common/guards/roles.decorator.js';
 import {
@@ -32,7 +39,7 @@ export class HistoryController {
   @ApiSessionAuth()
   @ApiStandardErrors()
   @ApiOperation({
-    summary: 'Own wellbeing history',
+    summary: 'Own wellbeing history, one page at a time',
     description: `
 Newest-first timeline of the student's own check-ins, each carrying the
 reflection it led to (turn count, typed vs voice, summary once closed) and the
@@ -40,13 +47,34 @@ support request it produced (status plus the same derived follow-up state the
 staff queue uses). Nothing professional-only is in this response: review notes,
 safeguarding flags and audit rows are never selected.
 
+\`supportRequests[]\` is the student's requests read by student, not by check-in.
+Most requests have no \`checkInId\` — the escalation path files one against the
+conversation only — so counting them through the timeline link reported zero for
+students who had asked for help. \`counts\` are totals over the whole history,
+never over this page.
+
 Every entry is one the student created. There is no resource link in the schema,
 so no entry claims a resource was shared.
 `,
   })
+  @ApiQuery({
+    name: 'take',
+    required: false,
+    description: 'Entries per page (default 30, max 100)',
+  })
+  @ApiQuery({
+    name: 'before',
+    required: false,
+    description:
+      'Cursor: pass page.nextBefore to walk back through older entries',
+  })
   @ApiEnvelopeOk(Object)
-  list(@Session() session: UserSession) {
-    return this.historyService.list(session.user.id);
+  list(
+    @Session() session: UserSession,
+    @Query('take') take?: string,
+    @Query('before') before?: string,
+  ) {
+    return this.historyService.list(session.user.id, take, before);
   }
 
   /**
@@ -131,7 +159,11 @@ nobody has been notified.
     description:
       'The student’s own check-in with the full message list of the reflection it led to. Another student’s id, or an id that does not exist, is a 404 — never a 403 that confirms it belongs to someone else.',
   })
-  @ApiParam({ name: 'checkInId', description: 'Check-in id (uuid)', example: '6f0f...' })
+  @ApiParam({
+    name: 'checkInId',
+    description: 'Check-in id (uuid)',
+    example: '6f0f...',
+  })
   @ApiEnvelopeOk(Object)
   async detail(
     @Session() session: UserSession,

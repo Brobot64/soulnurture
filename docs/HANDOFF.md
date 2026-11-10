@@ -1292,3 +1292,165 @@ set (line 80), which is the third leg of that pairing.
    `main`; pushing backend `main` starts the VPS deploy lane.
 3. The VPS frontend lane still has not been redeployed, so `app.` still serves the pre-art
    build.
+
+
+## §0AC — 2026-11-10 session delta: the owner's seven-item dashboard feedback batch
+
+**Requested** (verbatim batch, re-sent once, which per standing instruction meant
+*verify what already landed* rather than rewrite):
+
+1. "Support request counter not showing on my history"
+2. "Safeguarding indicators classification not done yet for levels A, b, c and unclassified"
+3. "Add a counter to all the icons on the side bar for staff dashboard so they will see where a new request is"
+4. "Wellbeing history is having responsive issue. Infinity scroll issue. Soul nurture admin dashboard is also having infinity scroll issue"
+5. "staff page should show dashboard after login and not new chat requests."
+6. "There are no wellbeing resources details on each resources in the wellbeing area"
+
+Both repos are on branch `DASH_FEEDBACK_001`. Nothing here is pushed.
+
+### 1. The history counter was counting through a link that is often empty
+
+`GET /v1/history` used to expose requests only through
+`emotionalCheckIn.supportRequest`, i.e. through `checkInId`. That column is
+nullable and **the escalation path never fills it**, so a student who asked for
+human help twice could be told they had never asked. The service now reads
+`supportRequest` directly by `studentId` and returns it as its own list plus a
+total, so the tab prints a number that is true for the student rather than a
+number that happens to have a check-in attached. Counts are totals, never page
+totals. `checkInId` is still projected so a request keeps its place in the
+timeline.
+
+Verified in the browser harness as `STUDENT`: `/history` chips read
+`All (63) / Check-ins (63) / Reflections (11) / Support requests (9)` while the
+mock's own linked rows are three, one of which (`sr-2`, `URGENT_UNSAFE`) has no
+check-in at all — the exact shape that used to report zero.
+
+### 2. Indicator levels A/B/C/U are shipped UI over ungraded data — a policy blocker
+
+The classification screen is not missing. The chips render and filter:
+`All (8) / Level A (1) / Level B (1) / Level C (1) / Level U (1) / Unclassified (4)`,
+and the detail page states which rule is blocking. What is missing is the grading.
+
+Prod evidence (`support_flag`, one read-only query): **73 rows, all 73 with
+`level` NULL.** Every rule in `src/indicators/indicators.config.ts` is still
+`configured: false`, which is deliberate — grading thresholds are Doc A decisions
+**D1, D5 and D8**, still with the psychologist. A number invented here would put a
+severity on a student's record without a clinician having chosen it, so this item
+stays open and is not code.
+
+### 3. Every staff rail icon now carries its own page's number
+
+`GET /v1/dashboard/attention` (`src/dashboard/attention.service.ts`, wired into
+`dashboard.module.ts`) returns `{ indicators, reports, roster }` in one request.
+The frontend `src/lib/attention.ts` feeds `RailNav`, so the rail fans out to one
+endpoint per navigation instead of one per page.
+
+The rules that make a number trustworthy:
+- `null` means *this surface is not yours to open* — the rail draws nothing. A `0`
+  there would claim a page is clean when nobody measured it.
+- Each badge's predicate is **copied** from the page it decorates, not re-derived:
+  indicators count `status in [OPEN, IN_REVIEW]`, reports count
+  `reviewOutcome is null`, roster counts accounts still on the bootstrap password
+  or with an unverified email — the same two conditions pilot analytics calls an
+  unfinished onboarding.
+- Requests and inbox unread stay on their existing event-driven lanes
+  (`support-requests:changed`, socket read receipts). Two sources of truth for one
+  badge is how a badge starts lying.
+
+Measured rail labels, each beside the number its destination page prints:
+`Overview — 2 awaiting action`, `Inbox — 2 unread messages`,
+`Support requests — 2 awaiting action`, `Support indicators — 6 open indicators`,
+`AI reply reports — 3 reports awaiting review`, `Users — 7 accounts not fully set up`
+(school admin) and `Users — 22 accounts not fully set up` (platform admin).
+"Where the AI stops" is deliberately unbadged — it is a page about limits, not a queue.
+
+### 4. The admin dashboard's infinity scroll was a real bug, and it is fixed
+
+`/admin/schools` kept `rows` in state but read its cursor from the **first page's**
+response object, which never changes. Every "Load earlier schools" therefore asked
+for the same page again, appended it again, and the control never retired because
+`hasMore` also came from that stale first page. Probe before the fix, three clicks,
+identical URL every time:
+
+```
+click 1: "Load earlier schools (10)" -> rows 50 -> 70
+click 2: "Load earlier schools (0)"  -> rows 70 -> 90
+click 3: "Load earlier schools (0)"  -> rows 90 -> 110
+paged requests: 3   distinct paged URLs: 1
+```
+
+After the fix the cursor travels with the rows (`page` state, `hasMore` read from
+the newest page):
+
+```
+click 1: "Load earlier schools (10)" -> rows 50 -> 70
+click 2: no enabled "Load earlier" button — the control retired itself
+paged requests: 1   distinct paged URLs: 1
+```
+
+`/history` was already correct and is unchanged in this respect: it walks
+`?before=`, appends, and retires — click 1 gave 54 rows, click 2 gave 67, then the
+probe reported no enabled button, with two distinct cursors in the log.
+The third paginated surface, `/school/reports`, navigates by `offset` state and was
+audited as correct. Only these three pages in the whole app paginate.
+
+**Responsive**: at a real 390x844 viewport, with the probe now waiting for the page
+to *stop growing* before measuring (the old 200-character threshold measured the
+shell and produced a false pass), `/history`, `/resources`, `/resources/:id` and
+`/admin/schools` all report `overflowX=false`, `scrollW=390`, `offenders=0`,
+`scrollers=0`. Nothing slides the document sideways and no nested horizontal
+scroller appeared.
+
+### 5. Staff land on the dashboard
+
+`homeForRole` sends chat staff to `/school`, not the inbox — the inbox is one of the
+things the dashboard reports. Proven by navigating the app root as each role:
+`COUNSELLOR:/` reported "still on /school after 20s" and `PLATFORM_ADMIN:/`
+"still on /admin after 20s". That message is the pass condition — the probe asked
+for `/` and the app had already moved on.
+
+### 6. Resource detail says what the reviewed copy actually is
+
+The twelve approved WN-* rows carry title, one-line description, duration and
+category. Their instruction / reflection / safety texts **were never delivered**
+for psychologist review, and `prisma/seed.ts` says so in its own comment and leaves
+the columns empty rather than inventing copy. The detail page used to hide that: it
+rendered sections around content that was not there. It now branches: external links
+still say "Continue to the resource"; rows with guided sections say
+"That is the whole resource"; rows with nothing beyond the summary say — heading and
+all — "**Try this on your own time**", then that this is a prompt to sit with rather
+than a step-by-step exercise because no approved set of steps exists yet, with a
+route to talk to someone at school. Measured on `STUDENT:/resources/res-wn-01`:
+headings `Name What You're Feeling`, `About this resource`,
+`Try this on your own time`, `What next?`, `Still feeling heavy?`,
+`What happens next`.
+
+If the owner wants real step-by-step content in those cards, the ask is the same
+one already open: the reviewed instruction/reflection/safety text for each WN-*.
+
+### Gates
+
+- Backend: full `npm test` exit 0; `vitest run src/admin src/history src/dashboard`
+  gave 7 files and 128 tests passed. `oxlint --type-aware` returned 0 warnings and
+  0 errors. `prettier --check` was failing on the eight touched files — the HEAD
+  versions were clean, so the drift was mine — and they are now formatted.
+- Frontend: `vite build` exit 0, then `tsc --noEmit` exit 0.
+- Harness: `vite.mock.config.mjs` gained the indicator / report / attention / queue /
+  history / resources mocks the badges and pages needed, with one builder per fact so
+  a badge and its page cannot disagree *inside the verification rig*. The mock school
+  register is now 35 rows so `/admin/schools` can actually show a second page.
+- Two throwaway probes were added under `.probe/` (`badges.mjs`, `paging.mjs`) and are
+  **not** staged, matching their own headers. Both got the same fix as the mobile
+  probe: wait for the DOM to stop changing, because "some text is on screen" is not a
+  ready signal and it had been silently passing unrendered student pages.
+
+### Open / for the main session
+
+1. Item 2 is blocked on Doc A **D1/D5/D8** from the psychologist, not on code. Until
+   those land and the rules flip to `configured: true`, prod `support_flag.level`
+   stays NULL and the Unclassified chip stays the busiest one.
+2. Item 6 wants the reviewed instruction/reflection/safety copy per WN-* row to show
+   real steps; the honest-state fallback is the stand-in, not the deliverable.
+3. Nothing on `DASH_FEEDBACK_001` is pushed in either repo. Pushing backend `main`
+   starts the VPS deploy lane, and the `attention` endpoint is new, so the VPS needs
+   this branch before the rail badges can be seen live.

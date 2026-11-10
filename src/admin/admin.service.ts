@@ -1,10 +1,11 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { Prisma, UserRole } from '@prisma/client';
+import { Prisma, SchoolStatus, UserRole } from '@prisma/client';
 import { hashPassword } from 'better-auth/crypto';
 import { AuditService } from '../audit/audit.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
@@ -14,6 +15,25 @@ import { generateShortCode } from '../schools/short-code.js';
 import { STAFF_ROLES } from '../users/dto/staff-bootstrap.dto.js';
 
 const CODE_RETRY_ATTEMPTS = 5;
+
+/**
+ * The school register is a page, not a dump: every row costs a groupBy lookup,
+ * so an unbounded list grew the admin dashboard with the tenant count.
+ */
+const DEFAULT_SCHOOL_PAGE = 25;
+const MAX_SCHOOL_PAGE = 100;
+
+function clampTake(raw?: string): number {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 1) return DEFAULT_SCHOOL_PAGE;
+  return Math.min(Math.floor(parsed), MAX_SCHOOL_PAGE);
+}
+
+function parseCursor(raw?: string): Date | null {
+  if (!raw) return null;
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
 
 function isUniqueViolation(error: unknown): boolean {
   return (
@@ -31,14 +51,26 @@ export class AdminService {
     private readonly realtime: RealtimeService,
   ) {}
 
-  async createSchool(actorId: string, input: { name: string; defaultPassword?: string }) {
+  async createSchool(
+    actorId: string,
+    input: { name: string; defaultPassword?: string },
+  ) {
     const name = input.name.trim();
     const defaultPasswordHash = input.defaultPassword
       ? await hashPassword(input.defaultPassword)
       : null;
 
-    let school: { id: string; name: string; shortCode: string; status: string } | null = null;
-    for (let attempt = 0; attempt < CODE_RETRY_ATTEMPTS && !school; attempt += 1) {
+    let school: {
+      id: string;
+      name: string;
+      shortCode: string;
+      status: string;
+    } | null = null;
+    for (
+      let attempt = 0;
+      attempt < CODE_RETRY_ATTEMPTS && !school;
+      attempt += 1
+    ) {
       try {
         school = await this.prisma.school.create({
           data: {
@@ -53,7 +85,9 @@ export class AdminService {
       }
     }
     if (!school) {
-      throw new ConflictException('Could not allocate a unique school short code');
+      throw new ConflictException(
+        'Could not allocate a unique school short code',
+      );
     }
 
     await this.auditService.log({
@@ -70,59 +104,104 @@ export class AdminService {
   /// Dashboard register: identity + live gauges. `lastActivityAt` rides the
   /// session table — the newest `updatedAt` across a school's sessions — so
   /// "activity" means genuine recent sign-ins, not data mutations.
-  async listSchools() {
-    const [schools, studentCounts, professionalCounts, pendingCounts, lastActivity] =
-      await Promise.all([
-        this.prisma.school.findMany({
-          orderBy: { createdAt: 'desc' },
-          select: {
-            id: true,
-            name: true,
-            shortCode: true,
-            status: true,
-            createdAt: true,
-            _count: { select: { users: true } },
-          },
-        }),
-        this.prisma.user.groupBy({
-          by: ['schoolId'],
-          where: { schoolId: { not: null }, role: 'STUDENT' },
-          _count: { _all: true },
-        }),
-        this.prisma.user.groupBy({
-          by: ['schoolId'],
-          where: { schoolId: { not: null }, role: { in: [...STAFF_ROLES] } },
-          _count: { _all: true },
-        }),
-        this.prisma.chatThread.groupBy({
-          by: ['schoolId'],
-          where: { status: 'PENDING' },
-          _count: { _all: true },
-        }),
-        this.prisma.$queryRaw<{ schoolId: string; lastActivityAt: Date | null }[]>`
+  async listSchools(
+    rawTake?: string,
+    rawBefore?: string,
+    filters: { q?: string; status?: string } = {},
+  ) {
+    const take = clampTake(rawTake);
+    const before = parseCursor(rawBefore);
+    const needle = filters.q?.trim();
+    const where: Prisma.SchoolWhereInput = {
+      ...(before ? { createdAt: { lt: before } } : {}),
+      ...(filters.status ? { status: this.statusOrThrow(filters.status) } : {}),
+      ...(needle
+        ? {
+            OR: [
+              { name: { contains: needle, mode: 'insensitive' } },
+              { shortCode: { contains: needle, mode: 'insensitive' } },
+            ],
+          }
+        : {}),
+    };
+    const [
+      schools,
+      total,
+      studentCounts,
+      professionalCounts,
+      pendingCounts,
+      lastActivity,
+    ] = await Promise.all([
+      this.prisma.school.findMany({
+        where,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: take + 1,
+        select: {
+          id: true,
+          name: true,
+          shortCode: true,
+          status: true,
+          createdAt: true,
+          _count: { select: { users: true } },
+        },
+      }),
+      this.prisma.school.count({ where }),
+      this.prisma.user.groupBy({
+        by: ['schoolId'],
+        where: { schoolId: { not: null }, role: 'STUDENT' },
+        _count: { _all: true },
+      }),
+      this.prisma.user.groupBy({
+        by: ['schoolId'],
+        where: { schoolId: { not: null }, role: { in: [...STAFF_ROLES] } },
+        _count: { _all: true },
+      }),
+      this.prisma.chatThread.groupBy({
+        by: ['schoolId'],
+        where: { status: 'PENDING' },
+        _count: { _all: true },
+      }),
+      this.prisma.$queryRaw<
+        { schoolId: string; lastActivityAt: Date | null }[]
+      >`
           SELECT u."schoolId" AS "schoolId", MAX(s."updatedAt") AS "lastActivityAt"
           FROM "session" s
           JOIN "user" u ON u.id = s."userId"
           WHERE u."schoolId" IS NOT NULL
           GROUP BY 1
         `,
-      ]);
+    ]);
 
-    const students = new Map(studentCounts.map((row) => [row.schoolId, row._count._all]));
+    const students = new Map(
+      studentCounts.map((row) => [row.schoolId, row._count._all]),
+    );
     const professionals = new Map(
       professionalCounts.map((row) => [row.schoolId, row._count._all]),
     );
-    const pending = new Map(pendingCounts.map((row) => [row.schoolId, row._count._all]));
-    const activity = new Map(lastActivity.map((row) => [row.schoolId, row.lastActivityAt]));
+    const pending = new Map(
+      pendingCounts.map((row) => [row.schoolId, row._count._all]),
+    );
+    const activity = new Map(
+      lastActivity.map((row) => [row.schoolId, row.lastActivityAt]),
+    );
+
+    const page = schools.slice(0, take);
+    const last = page.at(-1);
 
     return {
-      items: schools.map((school) => ({
+      items: page.map((school) => ({
         ...school,
         students: students.get(school.id) ?? 0,
         professionals: professionals.get(school.id) ?? 0,
         pendingChats: pending.get(school.id) ?? 0,
         lastActivityAt: activity.get(school.id) ?? null,
       })),
+      total,
+      page: {
+        take,
+        hasMore: schools.length > take,
+        nextBefore: last ? last.createdAt.toISOString() : null,
+      },
     };
   }
 
@@ -152,7 +231,8 @@ export class AdminService {
   /// session revocation, and suspension must bite immediately.
   async suspendSchool(actorId: string, schoolId: string) {
     const school = await this.requireSchool(schoolId);
-    if (school.status === 'SUSPENDED') return { id: schoolId, status: 'SUSPENDED' };
+    if (school.status === 'SUSPENDED')
+      return { id: schoolId, status: 'SUSPENDED' };
 
     const users = await this.prisma.user.findMany({
       where: { schoolId },
@@ -303,6 +383,14 @@ export class AdminService {
       this.prisma.user.count({ where }),
     ]);
     return { items: users, total };
+  }
+
+  private statusOrThrow(raw: string): SchoolStatus {
+    const values = Object.values(SchoolStatus) as string[];
+    if (!values.includes(raw)) {
+      throw new BadRequestException(`Unknown school status: ${raw}`);
+    }
+    return raw as SchoolStatus;
   }
 
   private async requireSchool(schoolId: string) {

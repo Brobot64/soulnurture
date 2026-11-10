@@ -20,7 +20,13 @@ async function rejectionOf(promise: Promise<unknown>): Promise<HttpException> {
 describe('AdminService', () => {
   let service: AdminService;
   const prisma = {
-    school: { create: vi.fn(), findMany: vi.fn(), findUnique: vi.fn(), update: vi.fn(), count: vi.fn() },
+    school: {
+      create: vi.fn(),
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      update: vi.fn(),
+      count: vi.fn(),
+    },
     user: { findMany: vi.fn(), count: vi.fn(), groupBy: vi.fn() },
     session: { deleteMany: vi.fn() },
     chatThread: { count: vi.fn(), groupBy: vi.fn() },
@@ -54,11 +60,15 @@ describe('AdminService', () => {
         status: 'ACTIVE',
       });
 
-      const result = await service.createSchool('admin-1', { name: 'Achimota School' });
+      const result = await service.createSchool('admin-1', {
+        name: 'Achimota School',
+      });
 
       const createArgs = prisma.school.create.mock.calls[0][0];
       expect(createArgs.data.name).toBe('Achimota School');
-      expect(createArgs.data.shortCode).toMatch(/^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/);
+      expect(createArgs.data.shortCode).toMatch(
+        /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/,
+      );
       expect(createArgs.data.defaultPasswordHash).toBeNull();
       expect(result).toEqual({
         id: 'school-1',
@@ -89,10 +99,13 @@ describe('AdminService', () => {
         defaultPassword: 'welcome-1234',
       });
 
-      const hash = prisma.school.create.mock.calls[0][0].data.defaultPasswordHash;
+      const hash =
+        prisma.school.create.mock.calls[0][0].data.defaultPasswordHash;
       expect(typeof hash).toBe('string');
       expect(hash).not.toContain('welcome-1234');
-      expect(JSON.stringify(prisma.school.create.mock.calls)).not.toContain('welcome-1234');
+      expect(JSON.stringify(prisma.school.create.mock.calls)).not.toContain(
+        'welcome-1234',
+      );
     });
 
     it('retries on short-code unique conflicts', async () => {
@@ -119,7 +132,10 @@ describe('AdminService', () => {
 
   describe('suspendSchool', () => {
     it('suspends, revokes every school session, notifies users, kills live sockets, audits', async () => {
-      prisma.school.findUnique.mockResolvedValue({ id: 'school-1', status: 'ACTIVE' });
+      prisma.school.findUnique.mockResolvedValue({
+        id: 'school-1',
+        status: 'ACTIVE',
+      });
       prisma.user.findMany.mockResolvedValue([{ id: 'u1' }, { id: 'u2' }]);
       prisma.$transaction.mockResolvedValue([]);
       notifications.pushMany.mockResolvedValue([]);
@@ -144,12 +160,18 @@ describe('AdminService', () => {
       expect(realtime.disconnectUser).toHaveBeenCalledWith('u1');
       expect(realtime.disconnectUser).toHaveBeenCalledWith('u2');
       expect(auditService.log).toHaveBeenCalledWith(
-        expect.objectContaining({ action: 'school.suspended', entityId: 'school-1' }),
+        expect.objectContaining({
+          action: 'school.suspended',
+          entityId: 'school-1',
+        }),
       );
     });
 
     it('is idempotent for an already-suspended school', async () => {
-      prisma.school.findUnique.mockResolvedValue({ id: 'school-1', status: 'SUSPENDED' });
+      prisma.school.findUnique.mockResolvedValue({
+        id: 'school-1',
+        status: 'SUSPENDED',
+      });
 
       await service.suspendSchool('admin-1', 'school-1');
 
@@ -260,6 +282,85 @@ describe('AdminService', () => {
         lastActivityAt: null,
       });
     });
+
+    it('walks the register backwards from the cursor and keeps one row in reserve', async () => {
+      prisma.school.findMany.mockResolvedValue([
+        { id: 'school-1', createdAt: new Date('2026-10-05T00:00:00Z') },
+        { id: 'school-2', createdAt: new Date('2026-10-01T00:00:00Z') },
+      ]);
+      prisma.school.count.mockResolvedValue(37);
+      prisma.user.groupBy.mockResolvedValue([]);
+      prisma.chatThread.groupBy.mockResolvedValue([]);
+      prisma.$queryRaw.mockResolvedValue([]);
+
+      const result = await service.listSchools('1', '2026-10-20T00:00:00.000Z');
+
+      expect(prisma.school.findMany.mock.calls[0][0]).toMatchObject({
+        where: { createdAt: { lt: new Date('2026-10-20T00:00:00.000Z') } },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: 2,
+      });
+      expect(result.items).toHaveLength(1);
+      expect(result.total).toBe(37);
+      expect(result.page).toEqual({
+        take: 1,
+        hasMore: true,
+        nextBefore: '2026-10-05T00:00:00.000Z',
+      });
+    });
+
+    it('caps a requested page size at 100', async () => {
+      prisma.school.findMany.mockResolvedValue([]);
+      prisma.school.count.mockResolvedValue(0);
+      prisma.user.groupBy.mockResolvedValue([]);
+      prisma.chatThread.groupBy.mockResolvedValue([]);
+      prisma.$queryRaw.mockResolvedValue([]);
+
+      const result = await service.listSchools('100000');
+
+      expect(prisma.school.findMany.mock.calls[0][0].take).toBe(101);
+      expect(result.page).toEqual({
+        take: 100,
+        hasMore: false,
+        nextBefore: null,
+      });
+    });
+
+    it('searches and filters in the query so a page cannot hide a match', async () => {
+      prisma.school.findMany.mockResolvedValue([]);
+      prisma.school.count.mockResolvedValue(0);
+      prisma.user.groupBy.mockResolvedValue([]);
+      prisma.chatThread.groupBy.mockResolvedValue([]);
+      prisma.$queryRaw.mockResolvedValue([]);
+
+      await service.listSchools(undefined, undefined, {
+        q: ' ridge ',
+        status: 'SUSPENDED',
+      });
+
+      const expectedWhere = {
+        status: 'SUSPENDED',
+        OR: [
+          { name: { contains: 'ridge', mode: 'insensitive' } },
+          { shortCode: { contains: 'ridge', mode: 'insensitive' } },
+        ],
+      };
+      expect(prisma.school.findMany.mock.calls[0][0].where).toEqual(
+        expectedWhere,
+      );
+      expect(prisma.school.count).toHaveBeenCalledWith({
+        where: expectedWhere,
+      });
+    });
+
+    it('rejects a status the register cannot hold', async () => {
+      const error = await rejectionOf(
+        service.listSchools(undefined, undefined, { status: 'PENDING' }),
+      );
+
+      expect(error.getStatus()).toBe(400);
+      expect(prisma.school.findMany).not.toHaveBeenCalled();
+    });
   });
 
   describe('listUsers', () => {
@@ -298,13 +399,13 @@ describe('AdminService', () => {
       expect(args.take).toBe(10);
       expect(prisma.user.count).toHaveBeenCalledWith({ where: args.where });
       const selectKeys = Object.keys(args.select);
-      expect(selectKeys).toEqual(
-        expect.arrayContaining(['role', 'schoolId']),
-      );
+      expect(selectKeys).toEqual(expect.arrayContaining(['role', 'schoolId']));
     });
 
     it('rejects an unknown role filter with 422', async () => {
-      const rejection = await rejectionOf(service.listUsers({ role: 'PRINCIPAL' }));
+      const rejection = await rejectionOf(
+        service.listUsers({ role: 'PRINCIPAL' }),
+      );
 
       expect(rejection.getStatus()).toBe(422);
       expect(prisma.user.findMany).not.toHaveBeenCalled();
