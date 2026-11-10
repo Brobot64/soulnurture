@@ -1444,6 +1444,51 @@ one already open: the reviewed instruction/reflection/safety text for each WN-*.
   probe: wait for the DOM to stop changing, because "some text is on screen" is not a
   ready signal and it had been silently passing unrendered student pages.
 
+### Preview pass — the screenshots caught two harness lies
+
+Asked "have you actually looked at it?", the surfaces were captured full-page at
+1440 and at 390 and read. Two defects appeared, and **both were in the mock, not
+the app** — which is worth recording because each one looked like an app bug:
+
+1. `/school` as COUNSELLOR rendered **"Something went wrong! Cannot read
+   properties of null (reading 'name')"**. The harness built queue rows with
+   `supportPerson: null` for a NEW request, and the overview reads
+   `.supportPerson.name`. Prod cannot produce that row: `SupportRequest.
+   supportPersonId` is non-nullable with `onDelete: Restrict`
+   (`prisma/schema.prisma:780`), so a request always has a person. The mock now
+   always attaches one.
+2. The overview then showed **"No urgent request is waiting for a first action"**
+   beside a card reading **"Urgent awaiting action 1"**, and
+   "Showing 2 of 1 routine awaiting requests". The harness passed queue-shaped
+   rows straight into `supportRequests`, so the rows carried no `urgency` field
+   while `urgentRequestCount` was derived from `timing`. The panel and the card
+   were reading two different predicates. The mock now projects the dashboard's
+   own row shape and derives urgency the way `deriveUrgency()` does —
+   `timing === URGENT_UNSAFE || status === ESCALATED`
+   (`src/support-requests/queue-status.ts:95`) — and computes the count from that
+   same field. Re-measured: the urgent row sits in "REVIEW THESE FIRST", the card
+   says 1, and "OTHER REQUESTS" reads "Showing 1 of 1".
+
+Neither bug is user-visible in prod, and neither was caused by this batch's code.
+What they do prove is that the earlier text-only probes were **not** enough: a
+page that throws and paints an error card still has 120+ characters of text, so
+the settle-and-measure probes passed `/school` while it was actually broken.
+Screenshots are now part of this harness's pass condition.
+
+What the pixels confirmed, item by item:
+
+| Surface | What the shot shows |
+| --- | --- |
+| `COUNSELLOR:/school` | Rail badges `2 / 2 / 2 / 6 / 3` on five icons, the sixth ("Where the AI stops") deliberately bare; urgent row with `Urgent` + `Pending` + `Unread by you` pills |
+| `COUNSELLOR:/school/indicators` | `Open for review 6` — the same number the rail icon carries — with chips `All (8) / Level A (1) / Level B (1) / Level C (1) / Level U (1) / Unclassified (4)` and Level A/B/C pills in the table (item 2's UI, over ungraded data) |
+| `STUDENT:/history` | Tabs `All 63 / Check-ins 63 / Reflections 11 / Support requests 9` (item 1), and at 390 the tab row wraps to two lines with no sideways scroll |
+| `PLATFORM_ADMIN:/admin/schools` | "25 of 35 schools" with the roster badge `22` on Users; "Load earlier schools (10)" appends once and retires (item 4) |
+| `STUDENT:/resources/res-wn-01` | "Try this on your own time — this one is a 2–4 minutes prompt to sit with, not a step-by-step exercise — we do not have an approved set of steps for it yet", with the counsellor link (item 6) |
+
+Console errors and missing mocks were empty on all three mobile routes
+(`errors=[]`, `api404=[]`), and no fixed or sticky element covered content
+(`fixed: 0`).
+
 ### Open / for the main session
 
 1. Item 2 is blocked on Doc A **D1/D5/D8** from the psychologist, not on code. Until
