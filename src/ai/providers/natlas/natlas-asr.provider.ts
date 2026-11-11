@@ -74,6 +74,38 @@ export class NAtlasAsrProvider {
     throw new ServiceUnavailableException(this.unavailable(language));
   }
 
+  /**
+   * Ask the proxy for a replica and walk away.
+   *
+   * A scaled-to-zero replica needs 2.5-3.5 min to come up (measured, and the
+   * reason COLD_START_ATTEMPTS exists), which is longer than the whole request
+   * budget — so a student who presses the mic first always loses. Warming on
+   * page open moves that wait into the time the student spends reading the
+   * chat, when nobody is blocked on it.
+   *
+   * Nothing is awaited and no answer is inspected: the request only has to
+   * reach the proxy, which is what starts the replica. The sidecar lane is a
+   * long-running process and needs no warm-up.
+   */
+  warmUp(language: string): boolean {
+    const endpoint =
+      this.aiConfig.transcription.natlas.endpoints[
+        language as AsrVernacularLanguage
+      ];
+    if (!endpoint) return false;
+    const headers: Record<string, string> = {};
+    const apiKey = this.apiKey;
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    void fetch(endpoint, {
+      method: 'GET',
+      headers,
+      signal: AbortSignal.timeout(5_000),
+    })
+      .then((res) => res.body?.cancel())
+      .catch(() => undefined);
+    return true;
+  }
+
   private async viaEndpoint(
     url: string,
     input: AiTranscriptionInput,

@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  Body,
   Controller,
   Get,
   Inject,
@@ -168,5 +169,32 @@ export class AiController {
       language,
       preferredLanguage: student.preferredLanguage,
     });
+  }
+
+  @Post('transcribe/warm')
+  @ApiSessionAuth()
+  @ApiStandardErrors()
+  @ApiOperation({
+    summary: 'Start the vernacular speech model warming up',
+    description:
+      'A scaled-to-zero replica needs minutes to come up, which no request can wait for. The client calls this when the voice control appears so the wake happens while the student is still reading, not while they are waiting. It answers immediately and never fails the chat if the model cannot be reached. Only Yoruba, Hausa and Igbo have a cold-starting model; English and Pidgin ride the always-on Whisper chain and are ignored.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: { language: { type: 'string' } },
+    },
+  })
+  @ApiEnvelopeOk(Object)
+  async warmTranscribe(
+    @Session() session: UserSession,
+    @Body() body: { language?: string },
+  ) {
+    const student = await this.studentsService.ensureProfile(session.user.id);
+    this.aiService.warmAsr({
+      language: body?.language,
+      preferredLanguage: student.preferredLanguage,
+    });
+    return { started: true };
   }
 }

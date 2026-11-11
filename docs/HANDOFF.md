@@ -1499,3 +1499,161 @@ Console errors and missing mocks were empty on all three mobile routes
 3. Nothing on `DASH_FEEDBACK_001` is pushed in either repo. Pushing backend `main`
    starts the VPS deploy lane, and the `attention` endpoint is new, so the VPS needs
    this branch before the rail badges can be seen live.
+
+## §0AD — 2026-11-11 session delta: vernacular voice routing, ASR cold-wake pre-warm, the reviewed indicator document
+
+**Requested** (verbatim, re-sent once, so treated as *verify what already landed*):
+
+1. "Every Natlas ASR model seems to be having Issues even yoruba. When we speak, It says sopmething entirely different. Fix all ASR models. (Hausa, Igbo and Yoruba)"
+2. "Work on the runtime for the AI"
+3. "Remove the welcome-back button showing on the home page"
+4. "Read this too … Soul_Nurture_AI_Indicator_an_Escalation_Rules_Reviewed_Copy.pdf … Soul_Nurture_AI_Wellbeing_Coping_Resources_Draft.pdf"
+
+Both repos stay on `DASH_FEEDBACK_001`. Nothing here is pushed.
+
+### 1. The models were never broken — the client never told the server which language was spoken
+
+A warm Yoruba endpoint transcribes `YO.wav` into correct Yoruba (27 of the 39
+reference words, 4.2 s). The mis-transcription is a routing bug in front of it:
+`transcribeVoice` posted the clip with **no `language` field**, so
+`AiController.transcribe` fell through to `student.preferredLanguage`, which is
+the language we *write replies in* — for most students `en`. Every vernacular
+note was therefore handed to the English Whisper chain, which is exactly what
+"says something entirely different" describes.
+
+The student-facing fix is a per-note spoken-language control on the reflection
+composer (`I'm speaking …`), because the reply language and the spoken language
+are genuinely different facts: a `yo` profile that writes in English and an `en`
+profile that speaks Yoruba are both real.
+
+- `frontend/src/lib/voice.ts` — `VoiceLanguage`, `VOICE_LANGUAGE_OPTIONS`,
+  `readStoredVoiceLanguage` / `storeVoiceLanguage` (localStorage
+  `natlas.voice.language`), and `transcribeVoice(clip, language)`, which appends
+  the field only when a language is chosen.
+- `frontend/src/routes/_app/reflection/$conversationId.tsx` — the selector,
+  disabled until the boundary notice is accepted, hidden while recording and on
+  a read-only conversation.
+- **Unset means "same as my account"**, i.e. today's behaviour. That is why the
+  control is opt-in rather than pre-filled: the 41 `preferredLanguage = 'yo'`
+  profiles keep routing exactly as they do now, and no English speaker is
+  silently moved onto a vernacular model.
+
+Verified on the wire, not just on screen: the harness echoes the multipart body,
+and `language=yo` appears only after a choice is made. Screenshot-checked at
+1440 and 390 (`overflowX=false`, no clipped selector).
+
+### 2. Runtime: a cold replica can never answer inside the request budget, so the wake now starts earlier
+
+Measured: a scaled-to-zero T4 whisper replica takes **2.5–3.5 minutes** to come
+up. `NATLAS_ASR_TIMEOUT_MS` defaults to **60 000** (`ai.config.ts:277`), and the
+503 retry loop is 3 × 10 s. So the first student of the day loses no matter what
+the model is capable of — the budget is not the same order of magnitude as the
+wake.
+
+Shipped: the wake now overlaps the time the student spends reading instead of
+the time they spend waiting.
+
+- `NAtlasAsrProvider.warmUp(language)` — fire-and-forget `GET` to the endpoint
+  for that language with a 5 s abort. Nothing is awaited, nothing is inspected,
+  failure is swallowed: a warm-up that cannot run must not fail the chat.
+- `AiService.warmAsr()` reuses the *same* routing decision as `transcribe()`
+  (explicit language, else profile language) and returns without touching a
+  provider for `en`/`pcm`, which ride the always-on Whisper chain.
+- `POST /api/v1/ai/transcribe/warm` (`ai.controller.ts`) answers
+  `{ started: true }` immediately.
+- The client calls it from an effect when the mic actually appears, and again
+  whenever the language choice changes.
+
+**Not verified, and the main session should not assume it:** that a bare `GET`
+wakes a scaled-to-zero HF replica. It is the documented behaviour of the proxy
+and it is harmless if wrong (the request is aborted at 5 s and the transcribe
+path is unchanged), but it has not been measured here.
+
+Deliberately left to the owner as a spend decision, not applied: `minReplica`
+and `scaleToZeroTimeout` on the ASR endpoints and on `n-atlas` (chat LLM, L4,
+$0.80/hr, `scaleToZeroTimeout: 15`). Pre-warming hides the wait; keeping a
+replica resident removes it.
+
+Still true and still degrading quality: **the prod OpenAI key is expired**, so
+vector recall and the 30-day memory run on the fallback path.
+
+### 3. "Welcome back" on the sign-in panel
+
+The only chrome matching that wording was `/signin`: a mint pill (which reads as
+a button) and an `<h1>`. The pill prop is gone; the panel heading is now "Good to
+see you again". **The `<h1>` still says "Welcome back"** — it is the page's
+accessible title, not a control, and removing it would leave the panel unnamed.
+Say the word if the owner wants the heading gone too.
+
+### 4. The reviewed indicator document: signed by psychology, and it does not authorize switching a rule on
+
+§16 records Prof. Ejike Mgbenkemdi (Department of Psychology, Enugu State
+University of Science and Technology), **25 October 2026, sections ALL,
+"Reviewed and approved for development"**. That makes the `IND-A01…IND-U01`
+catalogue citable, which it was not before.
+
+It does not make any rule fire, and the document says so itself:
+
+- §5 heads the catalogue "These are **candidate** rules… The psychologist and
+  safeguarding lead must approve exact definitions, wording, thresholds,
+  recipients and response expectations."
+- §2 and §6 forbid inventing cut-offs — no numeric threshold, persistence window
+  or risk score until a qualified professional specifies and validates one.
+- §16 leaves the **safeguarding reviewer, the safeguarding review date, the
+  document-version line and "school-specific routes tested" blank**, and the
+  approval statement limits itself to "the scope and version recorded here".
+- §17: "Do not launch with placeholder contacts, unapproved thresholds,
+  unmonitored escalation queues or untested emergency routes."
+
+So `indicators.config.ts` keeps every rule at `configured: false` — and the
+§0AC open item that asked for the levels to be classified is answered with the
+registry now citing the section that blocks each rule instead of a bare "D1/D5"
+reference. §11's field list (`rule_version`, `trigger_definition`,
+`persistence_window`, `recipient_role`, `backup_route_id`, `service_standard`,
+`closure_authority`) is named in the header as what a rule must carry before it
+can be switched on, and is deliberately absent from the data rather than filled
+with developer defaults.
+
+One §4 requirement needed no approval at all because it already exists:
+**precedence**. `intent-engine.service.ts` picks the highest-severity match,
+locks the server keyword layer against AI downgrade, and `intent-engine.spec.ts`
+tests both ("the model can never downgrade a server keyword match", "highest
+severity wins when several intents match keywords") — which is §4.1, §12's
+no-suppression criterion and the T-04 bullying-plus-threat case.
+
+### 5. The twelve WN-* rows now carry their reviewed steps and reflection
+
+`prisma/seed.ts` writes Doc B §3's numbered steps into `instructions` and the
+reflection question into `reflectionPrompt`, verbatim — §1 forbids inventing
+coping content and US-WR-D04 forbids paraphrasing activity steps into
+production.
+
+`safetyNote` stays **null on purpose**. §3 writes every safety note in the voice
+of the responding adult ("do not encourage a student to confront a person who
+may be violent", "follow the approved escalation process"), and the detail
+screen renders that column to the student under "Good to know". It needs a
+rewrite in the student's own voice before it can ship. `mediaUrl` stays null —
+no approved audio or external asset exists.
+
+Gates: `nest build` exit 0, `vitest run` 77 files / 1937 tests passed with
+`REAL_EXIT=0` captured from the log, `indicators.config.spec.ts` 7/7 (the
+all-`configured: false` invariant still holds). Browser: `/resources/res-wn-01`
+and `/resources/res-wn-06` screenshot at 390 and at 1440 scrolled — steps render
+as a numbered "How to try it", the reflection as "Afterwards", no "Good to know"
+band, `overflowX=false`, `offenders=0`.
+
+### Open / for the main session
+
+1. **The seed has to actually run on prod** for the steps to appear. `npm run
+   seed` is not part of the deploy path unless `natlas-deploy` calls it, and that
+   script is not version-controlled.
+2. Hausa and Igbo were never re-measured against references: the HF datasets rows
+   API returned 502/503 twelve times and the clips were not fetched. Yoruba is
+   measured good; Hausa's earlier "invents a paragraph about China's 2022 space
+   station" tail is unconfirmed either way.
+3. Yoruba output drops lexical tone diacritics. Model behaviour, not a client bug.
+4. The wake-on-`GET` assumption in `warmUp()` is unverified.
+5. `minReplica` / `scaleToZeroTimeout` remain the owner's spend decision.
+6. Indicator levels stay NULL in prod until D1/D5/D8 are answered **in writing**,
+   including the blank §16 lines.
+7. Nothing is pushed on `DASH_FEEDBACK_001` in either repo.

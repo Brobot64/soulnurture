@@ -714,4 +714,25 @@ export class AiService {
       language: language === 'en' ? 'en' : undefined,
     });
   }
+
+  /**
+   * Same routing decision as transcribe(), but it only asks the provider to
+   * start a replica — see NAtlasAsrProvider.warmUp(). A client that declares
+   * no language still warms the profile language, because that is what the
+   * next note would be routed by.
+   */
+  warmAsr(input: { language?: string; preferredLanguage?: string }): void {
+    const requested = input.language?.trim().toLowerCase() || undefined;
+    if (
+      requested &&
+      !SUPPORTED_LANGUAGES.includes(requested as SupportedLanguage)
+    ) {
+      return;
+    }
+    const language = requested ?? input.preferredLanguage ?? 'en';
+    if (!(ASR_VERNACULAR_LANGUAGES as readonly string[]).includes(language)) {
+      return;
+    }
+    this.natlasAsr.warmUp(language);
+  }
 }

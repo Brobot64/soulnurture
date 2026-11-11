@@ -157,26 +157,210 @@ const APPROVED_RESOURCE_CATEGORIES = [
  * these entries. It is therefore NOT duplicated into `intendedSituation`, which
  * would print the same sentence twice on the detail screen.
  *
- * What Doc B §4 does not supply is the instruction sequence, the reflection
- * prompt or the safety note — the reviewed copy document named in doc C's
- * control table was never delivered. Those fields stay empty rather than being
- * written here: §1 forbids inventing coping content and US-WR-D04 forbids
- * paraphrasing activity steps into production. `mediaUrl` stays null for the
- * same reason — no approved audio or external asset exists.
+ * What Doc B §3 supplies beyond the card line is the exercise itself: the
+ * numbered steps, the optional reflection and the safety note. Those are copied
+ * here verbatim — §1 forbids inventing coping content and US-WR-D04 forbids
+ * paraphrasing activity steps into production, so the wording below is the
+ * reviewed wording, not a summary of it. The extracted §3 list numbering runs
+ * straight through the whole library (WN-02 starts at 5); each resource
+ * restarts at 1 in the document itself, and `instructions` stores the steps
+ * unnumbered because the detail template numbers them.
+ *
+ * `mediaUrl` stays null — no approved audio or external asset exists.
  */
 const APPROVED_WELLBEING_RESOURCES = [
-  { code: 'WN-01', title: 'Name What You’re Feeling', useWhen: 'When feelings feel confusing, mixed or hard to explain', estimatedTime: '2–4 minutes' },
-  { code: 'WN-02', title: 'Grounding: Notice the Present', useWhen: 'When overwhelmed, distracted or caught in a stressful moment', estimatedTime: '1–3 minutes' },
-  { code: 'WN-03', title: 'Gentle Breathing Pause', useWhen: 'When the body feels tense or hurried', estimatedTime: '1–2 minutes' },
-  { code: 'WN-04', title: 'Break a Problem into Smaller Steps', useWhen: 'When schoolwork, responsibilities or decisions feel too big', estimatedTime: '3–5 minutes' },
-  { code: 'WN-05', title: 'Respond to Yourself with Kindness', useWhen: 'After a mistake, disappointment or harsh self-criticism', estimatedTime: '2–4 minutes' },
-  { code: 'WN-06', title: 'When Anger Is Rising', useWhen: 'When irritation or anger is getting stronger', estimatedTime: '2–5 minutes' },
-  { code: 'WN-07', title: 'A Small Step Through Sadness', useWhen: 'When feeling low, disappointed, lonely or unmotivated', estimatedTime: '3–10 minutes' },
-  { code: 'WN-08', title: 'Grief and Missing Someone', useWhen: 'After a death, separation or another significant loss', estimatedTime: 'Flexible' },
-  { code: 'WN-09', title: 'Handling Peer Conflict or Bullying', useWhen: 'When experiencing exclusion, insults, harassment or conflict', estimatedTime: '3–5 minutes' },
-  { code: 'WN-10', title: 'Ask for Support: A Message Starter', useWhen: 'When it is hard to tell someone you need help', estimatedTime: '2 minutes' },
-  { code: 'WN-11', title: 'A Simple Sleep Wind-Down', useWhen: 'When preparing for rest and thoughts are busy', estimatedTime: '5–10 minutes' },
-  { code: 'WN-12', title: 'Choose a Coping Plan for the Next Hour', useWhen: 'When unsure what kind of help is needed', estimatedTime: '2–3 minutes' },
+  {
+    code: 'WN-01',
+    title: 'Name What You’re Feeling',
+    useWhen: 'When feelings feel confusing, mixed or hard to explain',
+    estimatedTime: '2–4 minutes',
+    steps: [
+      'Pause for a moment. You do not have to explain everything perfectly.',
+      'Choose one or more words that come close to what you feel: sad, worried, angry, lonely, embarrassed, relieved, excited, numb, confused, or “something else.”',
+      'Notice how strong the feeling seems right now: a little, medium, or a lot. There is no right answer.',
+      'If it helps, finish this sentence: “I think I may be feeling ___ because ___.” You can leave the reason blank.',
+    ],
+    reflection:
+      'What would help you most right now: to be heard, to understand the feeling, to calm your body, to solve a problem, or to reach someone?',
+    safety:
+      'Feelings are information, not proof that a thought is true or that something is wrong with you. If you feel unsafe or overwhelmed, seek support from a trusted adult or appropriate professional.',
+  },
+  {
+    code: 'WN-02',
+    title: 'Grounding: Notice the Present',
+    useWhen: 'When overwhelmed, distracted or caught in a stressful moment',
+    estimatedTime: '1–3 minutes',
+    steps: [
+      'If it feels comfortable, place both feet on the floor or notice where your body is supported.',
+      'Name five things you can see, four things you can feel, three things you can hear, two things you can smell, and one thing you can taste. You can adapt or skip any step.',
+      'Look around and name where you are and one thing that tells you about the present moment.',
+      'Ask yourself: “What is one small, safe next step I can take?”',
+    ],
+    reflection:
+      'Did anything change in your attention or comfort level? It is okay if it did not.',
+    safety:
+      'If focusing on your senses makes you feel worse, stop and choose another activity, such as looking at a familiar object or contacting someone supportive.',
+  },
+  {
+    code: 'WN-03',
+    title: 'Gentle Breathing Pause',
+    useWhen: 'When the body feels tense or hurried',
+    estimatedTime: '1–2 minutes',
+    steps: [
+      'Sit or stand in a comfortable position. Let your shoulders rest if you can.',
+      'Breathe naturally. If comfortable, breathe in gently and let the breath out slowly, without forcing or holding it.',
+      'Repeat for a few breaths while noticing the chair, floor or other support beneath you.',
+      'Stop whenever you want and return to normal breathing.',
+    ],
+    reflection:
+      'Would a quiet pause, a drink of water, a short walk, or talking to someone be more helpful now?',
+    safety:
+      'Do not force deep breathing or hold your breath. Stop if you feel dizzy, breathless or uncomfortable. This exercise is not a substitute for medical help or urgent support.',
+  },
+  {
+    code: 'WN-04',
+    title: 'Break a Problem into Smaller Steps',
+    useWhen: 'When schoolwork, responsibilities or decisions feel too big',
+    estimatedTime: '3–5 minutes',
+    steps: [
+      'Write or think of the problem in one sentence.',
+      'Separate what you can influence from what you cannot control right now.',
+      'Choose one action that takes about five to ten minutes, such as opening the assignment, listing questions, or asking a teacher for clarification.',
+      'Decide when you will try that action. If you need help, identify one person to ask.',
+    ],
+    reflection: 'What is the smallest useful next step—not the whole solution?',
+    safety:
+      'Some problems need adult help or a change in circumstances, not just better planning. If the issue involves bullying, threats, abuse or feeling unsafe, tell a trusted adult or designated school support person.',
+  },
+  {
+    code: 'WN-05',
+    title: 'Respond to Yourself with Kindness',
+    useWhen: 'After a mistake, disappointment or harsh self-criticism',
+    estimatedTime: '2–4 minutes',
+    steps: [
+      'Notice the words you are using toward yourself, without judging yourself for having them.',
+      'Ask: “Would I say this exact thing to a friend who was struggling?”',
+      'Try a more balanced sentence: “This is difficult, and I can learn one thing from it,” or “One mistake does not describe my whole self.”',
+      'Choose one supportive action: rest, practise, apologise if needed, ask for help, or try again later.',
+    ],
+    reflection:
+      'What would be both kind and honest to tell yourself about this situation?',
+    safety:
+      'Self-kindness does not mean ignoring harm or avoiding responsibility. It means addressing the situation without attacking your worth as a person.',
+  },
+  {
+    code: 'WN-06',
+    title: 'When Anger Is Rising',
+    useWhen: 'When irritation or anger is getting stronger',
+    estimatedTime: '2–5 minutes',
+    steps: [
+      'If safe, pause the conversation or move to a calmer place.',
+      'Notice early body signals such as a tight jaw, hot face, fast heartbeat or clenched hands.',
+      'Give yourself time before sending a message or making a decision. Try walking, drinking water, or slowly counting while you settle.',
+      'When ready, describe the issue using “I” language: “I felt ___ when ___ happened. I need ___.”',
+      'If anyone may be hurt, create distance and contact a trusted adult or appropriate support person.',
+    ],
+    reflection:
+      'What boundary, need or concern might the anger be pointing to?',
+    safety:
+      'Do not encourage a student to confront a person who may be violent or unsafe. Safety comes first; involve a trusted adult or safeguarding professional.',
+  },
+  {
+    code: 'WN-07',
+    title: 'A Small Step Through Sadness',
+    useWhen: 'When feeling low, disappointed, lonely or unmotivated',
+    estimatedTime: '3–10 minutes',
+    steps: [
+      'You do not need to force yourself to feel happy. Name what today feels like.',
+      'Choose one manageable action: wash your face, eat or drink something if needed, step outside safely, listen to calming music, or complete one small task.',
+      'Consider one connection: message a trusted person, sit near someone safe, or ask for company.',
+      'Notice whether you need rest, practical help, a conversation, or professional support.',
+    ],
+    reflection:
+      'What is one gentle thing you can do for yourself in the next ten minutes?',
+    safety:
+      'If sadness persists, disrupts daily life, or becomes difficult to manage, encourage speaking with a qualified professional or trusted adult. If the student mentions self-harm or not wanting to live, follow the approved urgent safeguarding pathway.',
+  },
+  {
+    code: 'WN-08',
+    title: 'Grief and Missing Someone',
+    useWhen: 'After a death, separation or another significant loss',
+    estimatedTime: 'Flexible',
+    steps: [
+      'There is no single correct way to grieve. You may feel sad, angry, numb, confused, relieved, or different feelings at different times.',
+      'If you want, choose a way to remember the person or what was lost: write a memory, draw, say a prayer if that fits your beliefs, look at a meaningful object, or talk with someone safe.',
+      'Let yourself take breaks. You do not have to share details before you are ready.',
+      'Think of one person who could listen without pressuring you to “move on.”',
+    ],
+    reflection:
+      'Would you like to share a memory, talk about what feels hardest, or find someone supportive to speak with?',
+    safety:
+      'Do not set a timetable for grief or imply that grief follows fixed stages. If grief is accompanied by danger, severe distress or thoughts of self-harm, follow the appropriate human-support pathway.',
+  },
+  {
+    code: 'WN-09',
+    title: 'Handling Peer Conflict or Bullying',
+    useWhen: 'When experiencing exclusion, insults, harassment or conflict',
+    estimatedTime: '3–5 minutes',
+    steps: [
+      'First ask: “Am I safe right now?” If not, move toward a safer place and seek adult help.',
+      'If it is safe, write down what happened, when it happened and who was present. Keep records only in a way that does not put you at further risk.',
+      'Choose a trusted adult, teacher, counsellor, caregiver or designated safeguarding contact to tell.',
+      'You do not have to handle repeated bullying alone or prove that you can tolerate it.',
+      'If online, consider saving relevant evidence and using platform reporting/blocking tools when safe to do so.',
+    ],
+    reflection:
+      'Who is one adult or support person you could tell, and what would make it easier to start?',
+    safety:
+      'Do not advise retaliation, public exposure, or confronting a group alone. Follow school safeguarding policy for threats, harassment, discrimination, violence or repeated bullying.',
+  },
+  {
+    code: 'WN-10',
+    title: 'Ask for Support: A Message Starter',
+    useWhen: 'When it is hard to tell someone you need help',
+    estimatedTime: '2 minutes',
+    steps: [
+      'Choose someone who is likely to listen and help you stay safe.',
+      'Use or adapt this message: “I have been finding things difficult lately. I do not need you to solve everything immediately, but I would like you to listen and help me work out what to do next.”',
+      'If speaking feels difficult, consider writing a note or asking another trusted person to join the conversation.',
+      'If the first person does not respond helpfully, try another trusted adult or appropriate professional.',
+    ],
+    reflection:
+      'Would you like help choosing words for a teacher, counsellor, caregiver or friend?',
+    safety:
+      'Do not promise that every adult will respond well. If the first person is unsafe, involved in the harm, or dismisses a serious concern, help the student identify another safe route.',
+  },
+  {
+    code: 'WN-11',
+    title: 'A Simple Sleep Wind-Down',
+    useWhen: 'When preparing for rest and thoughts are busy',
+    estimatedTime: '5–10 minutes',
+    steps: [
+      'If possible, choose a roughly consistent time to begin winding down.',
+      'Put school tasks or worries on paper and write one small next step for tomorrow.',
+      'Try a quiet activity such as reading, gentle stretching, calm audio or preparing clothes and materials for the next day.',
+      'If thoughts return, remind yourself: “I have written this down; I can return to it tomorrow.”',
+    ],
+    reflection:
+      'What is one thing you can set aside for tomorrow, and one thing that helps you feel settled?',
+    safety:
+      'Do not frame sleep difficulty as a personal failure. Persistent sleep problems, severe distress, or symptoms affecting daily functioning should be discussed with a qualified professional or healthcare provider.',
+  },
+  {
+    code: 'WN-12',
+    title: 'Choose a Coping Plan for the Next Hour',
+    useWhen: 'When unsure what kind of help is needed',
+    estimatedTime: '2–3 minutes',
+    steps: [
+      'Choose what feels closest: I need to calm my body; understand a feeling; solve a practical problem; connect with someone; or get help to stay safe.',
+      'Choose one small action that matches your need.',
+      'Choose a person or service you can contact if the first step is not enough.',
+      'After trying it, check: “Am I a little safer or more supported? What do I need next?”',
+    ],
+    reflection: 'Which next step feels manageable right now?',
+    safety:
+      'If the student is in immediate danger, may harm themselves or someone else, or reports abuse or another urgent safeguarding concern, do not keep them in a self-help flow. Use the approved escalation process.',
+  },
 ] as const;
 
 const categoryFor = (resourceCode: string) =>
@@ -205,6 +389,15 @@ async function ensureWellbeingResourceLibrary() {
       // no row claims one. The column is not nullable and the surfaces no
       // longer print it; TOOLKIT_ITEM is the listing-equals-what-you-get value.
       type: ResourceType.TOOLKIT_ITEM,
+      instructions: [...resource.steps],
+      reflectionPrompt: resource.reflection,
+      // Doc B §3 writes every "Safety note" as guidance for the reviewer or the
+      // responding adult ("do not encourage a student to confront…", "follow the
+      // approved escalation process"), not as copy addressed to the reader. The
+      // detail screen renders this column to the student under "Good to know",
+      // so it stays empty until the psychologist rewrites these in the
+      // student's own voice — see docs/HANDOFF.md.
+      safetyNote: null,
     };
     await prisma.wellbeingResource.upsert({
       where: { contentCode: resource.code },
@@ -234,7 +427,7 @@ async function approveWellbeingLibrary() {
       payload: {
         reviewPending: false,
         title: resource.title,
-        note: 'Title, intended-situation wording and duration quoted from Doc B §4; released by the product owner.',
+        note: 'Title, intended-situation wording and duration quoted from Doc B §4; steps and reflection quoted from Doc B §3; released by the product owner.',
       } as Prisma.InputJsonValue,
     })),
     ...APPROVED_RESOURCE_CATEGORIES.map((category) => ({
