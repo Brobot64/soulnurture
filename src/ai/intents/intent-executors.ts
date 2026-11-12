@@ -8,6 +8,11 @@ import { LANGUAGE_DISPLAY_NAMES } from '../language/language.config.js';
 import type { SupportedLanguage } from '../language/language.config.js';
 import { safetyLine } from '../language/scripted-copy.js';
 import { vernacularGloss } from './vernacular-keywords.js';
+import {
+  INTENT_LEVEL_MAPPING_VERSION,
+  levelForVerdict,
+  levelOriginForFlag,
+} from './indicator-levels.js';
 import type { SupportFlagAlertsService } from '../../support-flags/support-flag-alerts.service.js';
 import type { IntentAction } from './intents.config.js';
 import type { IntentVerdict } from './intent-engine.service.js';
@@ -66,6 +71,7 @@ const SUPPORT_FLAG_EXECUTOR: IntentExecutor = {
   type: 'SUPPORT_FLAG',
   async execute(action, verdict, ctx, notes) {
     if (action.type !== 'SUPPORT_FLAG') return;
+    const level = levelForVerdict(verdict);
     const existing = await ctx.prisma.supportFlag.findFirst({
       where: {
         conversationId: ctx.conversationId,
@@ -101,6 +107,10 @@ const SUPPORT_FLAG_EXECUTOR: IntentExecutor = {
         aiContextSummary: summary,
         autoActions: verdict.actions.map((a) => a.type),
         intentId: verdict.intentId,
+        // §3's level for the condition that fired, from the mapping in
+        // `indicator-levels.ts`; where no condition is graded there, the level is
+        // the tier two lines above, and `levelSource` says which of the two it was.
+        level,
         // `ruleId` stays empty: it names an Doc A indicator rule, and no rule in
         // `indicators.config.ts` is switched on. Storing the intent id here would
         // make a keyword-floor flag read as if a graded rule produced it.
@@ -125,9 +135,16 @@ const SUPPORT_FLAG_EXECUTOR: IntentExecutor = {
         category: verdict.category,
         matchedBy: verdict.matchedBy,
         severity: verdict.severity,
+        level,
+        levelOrigin: levelOriginForFlag(verdict),
+        // §10/§11: the graded record names the logic that graded it. There is no
+        // rule id to cite, so the mapping version is what a reviewer can trace.
+        levelMapping: INTENT_LEVEL_MAPPING_VERSION,
       },
     });
-    notes.push(`Safeguarding flag persisted (${verdict.severity}, ${verdict.matchedBy}).`);
+    notes.push(
+      `Safeguarding flag persisted (${verdict.severity}, ${verdict.matchedBy}, level ${level}).`,
+    );
 
     // Over the line: an acute flag must reach the school's professionals even
     // when nothing else does. Alert failure never fails the flag.

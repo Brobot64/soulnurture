@@ -128,7 +128,7 @@ describe('Doc A §8 U-02 — a skipped safety question is unknown, not safe', ()
   });
 });
 
-describe('the level axis is a human axis', () => {
+describe('the level axis is a mapping, never a gradient', () => {
   let engine: IntentEngineService;
 
   beforeAll(async () => {
@@ -138,7 +138,7 @@ describe('the level axis is a human axis', () => {
     engine = module.get(IntentEngineService);
   });
 
-  it('is never written by the automatic path, so no machine grades a student', async () => {
+  it('writes the mapping grade and nothing the tier implies', async () => {
     const prisma = {
       supportFlag: {
         findFirst: vi.fn().mockResolvedValue(null),
@@ -172,13 +172,17 @@ describe('the level axis is a human axis', () => {
     );
 
     const data = prisma.supportFlag.create.mock.calls[0][0].data as Record<string, unknown>;
-    // G1: level is its own axis, never a projection of severity. Writing it
-    // here would be that projection, and unfalsifiable once written.
-    expect(data.level).toBeUndefined();
+    // The owner's 2026-11-12 rule: the condition table first, then the AI's own
+    // tier. This verdict has no condition — the model named a category no rule is
+    // bound to — so its level is its tier. Worth reading together with
+    // `intent-engine.service.ts` layer 3: the TIER_2 here is the engine's default
+    // for an unbound candidate whose model asserted no severity, so the B is our
+    // fallback two deep, and `levelSource: 'AI_TIER'` is what tells a reviewer.
+    expect(data.level).toBe(IndicatorLevel.B);
+    expect(data.severity).toBe(SupportFlagSeverity.TIER_2_HIGH);
     expect(data.reviewDecision).toBeUndefined();
     // And no provenance the rule catalogue does not actually have.
     expect(data.ruleId).toBeUndefined();
-    expect(data.severity).toBe(SupportFlagSeverity.TIER_2_HIGH);
   });
 
   it('has no default level for a row nothing graded', () => {

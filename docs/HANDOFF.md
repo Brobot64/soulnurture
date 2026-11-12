@@ -1657,3 +1657,267 @@ band, `overflowX=false`, `offenders=0`.
 6. Indicator levels stay NULL in prod until D1/D5/D8 are answered **in writing**,
    including the blank §16 lines.
 7. Nothing is pushed on `DASH_FEEDBACK_001` in either repo.
+
+
+## §0AE — 2026-11-11 session delta: support indicators are now classified A / B / C / U
+
+**The owner's decision, recorded first because it reverses a documented one.** Asked
+who should assign the Doc A §3 level — a reviewer, a mapping, only the unbound rows,
+or nothing until D1/D5/D8 are signed — the owner answered **"automatically map
+intents"**. So the level is now written by the code, from the condition that raised
+the flag. This supersedes §0AD open item 6 ("Indicator levels stay NULL in prod until
+D1/D5/D8 are answered in writing") and it supersedes the invariant in
+`indicator-uncertainty.spec.ts` that asserted `data.level` was `undefined` on every
+automatic write. Both are rewritten here rather than quietly deleted, because the next
+reviewer needs to know the null was deliberate once.
+
+### What was actually missing
+
+Everything except the writer already shipped and is live on prod:
+
+| Piece | State before this session |
+| --- | --- |
+| `IndicatorLevel` enum, nullable `SupportFlag.level`, `ruleId`, `ruleVersion` | migration `20261102140000_indicator_levels_and_review`, deployed |
+| `GET /v1/support-flags` level chips (`A/B/C/U/UNCLASSIFIED`) + `level=` filter | shipped, `support-flags.service.ts:63-92` |
+| Staff chips, per-row `LevelBadge`, `linkedIndicator.level` in the review queue | shipped |
+| **Any writer of `level`** | **none** — prod measured `graded = 0`, `withRule = 0` on all 75 flags |
+
+Prod distribution measured this session (75 rows, not 73 — two landed during the
+session), which is what the mapping had to cover:
+
+```
+SUICIDAL_IDEATION   AI_CANDIDATE   TIER_3_ACUTE   24   ← 20 with intentId, 4 via the keyword floor
+PROLONGED_LOW_MOOD  AI_CANDIDATE   TIER_2_HIGH    15
+(none)              AI_CANDIDATE   TIER_1/2/3     25   ← MODEL_CANDIDATE layer
+ABUSE_DISCLOSURE    AI_CANDIDATE   TIER_3_ACUTE    6
+SELF_HARM           AI_CANDIDATE   TIER_3_ACUTE    4
+THREAT_OR_COERCION  SERVER_POLICY  TIER_3_ACUTE    1
+```
+
+One incidental finding while reading it: 4 rows carry `category = 'ABUSE'` with
+`intentId` NULL, all dated 2026-10-09. `ABUSE_DISCLOSURE.aiCategories` contains
+`'ABUSE'` today (`intents.config.ts:282`), so Layer 2 binds it now; those rows predate
+that binding and are not an open leak.
+
+### The mapping — `src/ai/intents/indicator-levels.ts`
+
+| Intent | §3 level | The §3 wording it is answering |
+| --- | --- | --- |
+| `SUICIDAL_IDEATION` | C | "self-harm/suicide-related disclosure" |
+| `SELF_HARM` | C | same |
+| `ABUSE_DISCLOSURE` | C | "serious abuse, exploitation, neglect or violence" |
+| `THREAT_OR_COERCION` | C | "credible serious threat" |
+| `PROLONGED_LOW_MOOD` | B | "recurring/persistent distress" |
+| `ACUTE_PANIC` | B | "difficulty coping" |
+| *no intent bound* (`MODEL_CANDIDATE`) | U | "meaning unclear or potentially serious information cannot be reliably classified" |
+
+Two deliberate omissions, both §3's own text:
+
+1. **Level A has no writer.** §3's A row is "No alert by default", and a support flag
+   *is* an alert, so an A on one is a contradiction. Ordinary wellbeing stays in the
+   conversation. `IND-A01/A02` stay `configured: false`, and §5's "a single AI category
+   is not sufficient evidence for a graded conclusion" still holds.
+2. **An unrecognised intent stays NULL**, i.e. the Unclassified chip, rather than
+   borrowing the nearest level.
+
+### What was *not* touched, and has to stay that way
+
+- `indicators.config.ts` — all thirteen IND-* rules remain `configured: false`. §5, §6,
+  §11 and §17 are unchanged and the registry header still cites them.
+- `ruleId` / `ruleVersion` stay NULL on every automatic flag. Storing the intent id
+  there would make a keyword-floor flag claim a graded rule as its source, which is
+  the §17 misrepresentation. The version travels as `INTENT_LEVEL_MAPPING_VERSION`
+  instead, through the audit meta and the detail response.
+- Severity is untouched: `severity` still drives the alert, `maxSeverity` still lifts
+  it from the model, and precedence in `intent-engine.service.ts` still picks the worst
+  matching intent. **A level changes no routing.** `ACUTE_PANIC` is the visible proof:
+  Level B under a TIER_3_ACUTE alert, both fields on the same screen.
+- The keyword floor, the vernacular packs, the escalation corpus expectations.
+
+### The row a reviewer must rule on
+
+`PROLONGED_LOW_MOOD` → B is the contested one and it is flagged in the file header
+rather than settled here. Its keyword pack contains *"everyone is better off without
+me"*, which is suicide-related language and therefore reads C-ish under §3. It is
+mapped B because §3's B row is that intent's own description, and because §4.1
+precedence already handles the C case: when a turn carries both hopeless language and
+a suicide keyword, the engine picks `SUICIDAL_IDEATION` and the flag is graded C. If
+the psychologist disagrees, the fix is one row of this table plus one migration
+statement.
+
+### Provenance on the staff surface
+
+`GET /v1/support-flags/:id` now returns `levelSource` (`INDICATOR_RULE` |
+`INTENT_MAPPING` | null) and `levelSourceVersion`, and the indicator detail dialog
+prints, under `Rule: No rule recorded`:
+
+> Level B came from the condition-to-level mapping
+> (intent-level-mapping-v1-2026-11-11-pending-psychology-signature), which no reviewer
+> has signed yet.
+
+Bumping that version string *is* the act of getting the table signed. The page caption
+above the chips was also corrected: it used to say Unclassified meant "a flag no rule
+with an approved level produced", which was written for a world where nothing was ever
+graded, and now it says plainly "a flag nothing has graded" plus "a level is not an
+alert".
+
+### The backfill
+
+`prisma/migrations/20261111120000_level_from_intent_mapping/migration.sql` — three
+idempotent `UPDATE`s over the same intent lists, each guarded by `level IS NULL` so a
+hand-set level is never overwritten, and deliberately **not** touching `updatedAt`
+because a backfill is not an edit. Expected result on prod: C 35, B 15, U 25,
+Unclassified 0.
+
+**Not yet run.** `prisma migrate dev` is unusable here (shadow DB has no pgvector), so
+this rides `natlas-deploy`'s `migrate deploy` step. Until that deploy happens, prod
+still reads A 0 / B 0 / C 0 / U 0 / Unclassified 75 and the new code is not serving.
+
+### Verification
+
+- `npx tsc --noEmit` (backend): 20 pre-existing spec-file type errors remain
+  (`chain.provider`, `auth.config`, `roles.guard`, `check-ins`, `ai-worker`,
+  `support-flag-alerts`); **zero** in the files touched here. `npx nest build` exit 0.
+- `npx vitest run` (backend, full): 1929 passed, 21 skipped. One file,
+  `support-flags.controller.spec.ts`, hit a 10 s `beforeAll` hook timeout under
+  whole-suite load; re-ran `src/support-flags/ src/ai/intents/` in isolation → 11 files
+  green, and `src/ai/intents/` alone → 715 passed. Not a regression.
+- New `indicator-levels.spec.ts` pins: every id in `INTENTS` is mapped (a new intent
+  cannot silently grade nothing), the six rows above, **no path to Level A**,
+  `MODEL_CANDIDATE` → U, an unknown intent → null, and the G1 test that passes all
+  three severities in and expects the level to refuse to move.
+- `indicator-uncertainty.spec.ts`: the old "is never written by the automatic path, so
+  no machine grades a student" is now "writes the mapping grade and nothing the tier
+  implies" — `level` is `U`, `severity` is still TIER_2, `ruleId` still undefined.
+- Frontend gates: `npx tsc --noEmit` exit 0, `npx vite build` exit 0.
+- Browser pass on the mock harness (`:5050`, COUNSELLOR, `.probe/levels.mjs`), read
+  from the PNGs and not just the probe text: chips render `All (8) Level A (0)
+  Level B (2) Level C (4) Level U (1) Unclassified (1)`; the Level B chip filters to
+  exactly 2 rows; the detail dialog shows Level B beside Tier 3 Acute beside the
+  unsigned-mapping sentence; 390 px wraps the six chips onto three rows with no
+  overflow. `.probe/shots/levels_chips_1440.png`, `levels_detail_acute_panic.png`,
+  `levels_chips_390.png`.
+
+### Open items after this session
+
+1. **The mapping is unsigned.** §14 says the development team does not independently
+   change safeguarding logic; this table is safeguarding logic, written by a developer,
+   on the owner's instruction. It needs Prof. Mgbenkemdi's initials — or the
+   safeguarding lead's, which §16 still leaves blank — before `level` can be described
+   to anyone as a clinical grade. Until then every level on screen says so itself.
+2. **The migration has not run anywhere.** Deploy to get both the writer and the
+   backfill; verify with
+   `select level, count(*) from support_flag group by level`.
+3. **The 25 U rows are only honest while `IND-U01` stays blocked.** §5 forbids
+   unvalidated confidence thresholds, and this mapping assigns U without a threshold —
+   it reads the engine's own refusal to bind a rule. If the reviewer wants U to require
+   an approved uncertainty policy instead, the U write is the line to delete.
+4. **No reviewer-set level path exists.** A counsellor still cannot correct a level;
+   the only writer is the mapping. If the reviewer decision surface should own the
+   level, that is a new endpoint, not a change to this table.
+5. Pre-existing and unrelated: the prod OpenAI key is expired; Hausa/Igbo ASR scoring
+   is still unmeasured; the frontend GitHub "VPS deploy" workflow has never completed a
+   run; `soulnurtureai.vercel.app` is still serving a pre-`91fa99d` build.
+
+## §0AF — 2026-11-12 session delta: the level chips get their values, and the app stops double-scrolling
+
+**What the owner asked.** Two screenshots of the live staff dashboard — Support indicators
+reading `Level A (0) B (0) C (0) U (0) Unclassified (62)` — and "the escalation
+classification is still not working yet… just like the ai tier classification already done
+use that as a form of ABC classification here". Earlier in the same session: "there is a
+rubbish scroll… the inner scroll is the normal in app scroll but the outer one moves the
+entire screen off; resolve this throughout the app", plus two annotated dark elements on
+`/history`.
+
+**Why the chips were empty — nothing was broken.** The read path (level filter, `levelCounts`,
+the chips) is on `main` and live; the *write* path was not. §0AE's mapping, its spec and its
+backfill migration were all still untracked on this branch, so `support_flag.level` had never
+been written by anything. Measured on prod, all 79 rows NULL:
+
+| intentId | severity | source | n |
+|---|---|---|---|
+| SUICIDAL_IDEATION | TIER_3_ACUTE | AI_CANDIDATE | 20 |
+| PROLONGED_LOW_MOOD | TIER_2_HIGH | AI_CANDIDATE | 16 |
+| *(null)* | TIER_1_MODERATE | AI_CANDIDATE | 15 |
+| ABUSE_DISCLOSURE | TIER_3_ACUTE | AI_CANDIDATE | 7 |
+| *(null)* | TIER_2_HIGH | AI_CANDIDATE | 6 |
+| SELF_HARM | TIER_3_ACUTE | AI_CANDIDATE | 5 |
+| *(null)* | TIER_3_ACUTE | AI_CANDIDATE | 5 |
+| SUICIDAL_IDEATION | TIER_3_ACUTE | SERVER_POLICY | 4 |
+| THREAT_OR_COERCION | TIER_3_ACUTE | SERVER_POLICY | 1 |
+
+**The decision the owner made here, against §0AE's.** §0AE graded an unbound model candidate
+as Level U and refused to let the alert tier touch the level (Doc A G1). The owner asked for
+the tier to be the ABC classification instead, so `levelForVerdict` is now two rules in a fixed
+order: the §3 condition table first, and `LEVEL_BY_SEVERITY`
+(`TIER_1_MODERATE`→A, `TIER_2_HIGH`→B, `TIER_3_ACUTE`→C) for whatever the table leaves.
+`INTENT_LEVEL_MAPPING_VERSION` is `intent-level-mapping-v2-2026-11-12-pending-psychology-signature`.
+
+Three consequences, all deliberate and all visible on the surface:
+
+1. **Level A finally has a writer** — 15 prod rows. §3's A row is "No alert by default", so an
+   A is now explicitly *the model's own urgency call*, never a condition grade.
+2. **Nothing writes U any more.** The uncertainty that U carried stays visible as
+   `Raised by: Ai Candidate` and as the new `levelSource: 'AI_TIER'`, but the U chip will read 0
+   on anything the engine raises. If the reviewer wants U back, the line to restore is the
+   `MODEL_CANDIDATE` early-return §0AE had.
+3. **`levelSource` gained `'AI_TIER'`** (`indicator-levels.ts` exports `levelOriginForFlag`,
+   re-derived from the row rather than stored, so a backfilled row and a fresh one report the
+   same origin). The detail dialog shows it as a warning line naming the tier it was read off,
+   because a tier-derived B is a weaker claim than a condition-derived one — and for an unbound
+   candidate the engine *defaults* the severity to TIER_2 when the model asserted none
+   (`intent-engine.service.ts` layer 3), so a B can be our default two deep. Nothing stored
+   distinguishes those today.
+
+**Files.** `src/ai/intents/indicator-levels.ts` (fallback + origin helper, v2 header),
+`intent-executors.ts` (passes `severity`, logs `levelOrigin` in the audit meta, notes string is
+unconditional now), `src/support-flags/support-flags.service.ts` (`levelSourceOf` takes
+`intentId`), `indicator-levels.spec.ts` (rewritten: the G1 "tier-blind" test became a
+**precedence** test — a tier may never override a graded condition — and "no path to Level A"
+became "A only through the tier"), `indicator-uncertainty.spec.ts` (the unbound candidate now
+grades B, not U), and `prisma/migrations/20261111120000_level_from_intent_mapping/migration.sql`
+rewritten: the two condition statements first, then three tier statements for the rows they
+leave, replacing §0AE's `intentId IS NULL AND source = 'AI_CANDIDATE'` → U statement.
+
+**Frontend.** `src/lib/indicators.ts` union gains `'AI_TIER'`; `indicators.index.tsx` gets the
+AI-tier provenance line and the long caption under the chips now says that a level may be a
+condition grade *or* a tier reading, and which one it is appears on the indicator.
+
+**Verification.**
+- `npx vitest run src/ai/intents src/support-flags` → exit 0, 11 files, **770 passed**.
+- `npm run build` (`nest build`) exit 0. `npx tsc --noEmit` exit 2 with **20 errors, all in
+  `*.spec.ts` files this session never touched** (`ai-worker`, `chain.provider`,
+  `auth.config`, `roles.guard`, `support-flag-alerts`, …) — `tsconfig.build.json` excludes
+  specs, so the gate is green. Pre-existing; §0AE reported the same suite green under vitest.
+- Frontend gates: `npm run build` exit 0, `npx tsc --noEmit` exit 0.
+- The backfill was **dry-run as a SELECT against prod**, not applied: predicted
+  `C 42 / B 22 / A 15`, zero Unclassified, and per school Miva University
+  `C 32 / B 20 / A 10` — the same 62 the screenshot counts.
+
+**The scroll fix, app-wide.** Root cause measured, not guessed: the shell scroll region had no
+positioning, so the 26 `sr-only` spans inside it resolved `top:auto` against the initial
+containing block and stretched `html.scrollHeight` to 4390. Adding `relative` to the one
+`overflow-y-auto` region in each layout — `src/routes/_app/route.tsx` (`MAIN#main-content`) and
+`src/routes/_dash/route.tsx` — gives `/signin` `docScrollH 735 = clientHeight`, outer scroll 0,
+inner still scrolling (820 > 611), and `/admin` the same (2005 > 735 inside, 0 outside).
+
+**The two dark elements.** `bg-brand-1` is `#020906` — the Open-Color brand scale runs dark→light,
+so token 1 is the *darkest*, and both annotated nodes computed `rgb(2, 9, 6)`. Seven spots in
+`src/routes/_app/history.index.tsx` now use `bg-panel` (`#E7F4EA`), the tint already used 161
+times elsewhere: the active tab, both date chips, the pill pair, the status block, the hover chip.
+Zero `bg-brand-1` left in the built chunks. Caveat: the mock harness session is PLATFORM_ADMIN, so
+`/history` bounces to `/admin` — the student colours are source- and token-verified and the
+scroll fix is measured live on both shells, but the recoloured `/history` itself was never seen
+rendered.
+
+**Open items after this session.**
+1. **Nothing here is deployed.** The backend commit is on `DASH_FEEDBACK_001`; `main` still has
+   no writer and no migration. Deploying needs the merge, the push (which starts the VPS lane)
+   and `prisma migrate deploy` — then verify with
+   `select level, count(*) from support_flag group by level` and expect `C 42 / B 22 / A 15`.
+2. **v2 is *more* unsigned than v1.** §0AE's open item 1 stands and now covers the tier mapping
+   too; the version string still says `pending-psychology-signature` and the UI still says so.
+3. **The frontend needs a Vercel rebuild** for the scroll and colour work — `VITE_*`-free, so a
+   normal redeploy is enough.
+4. §0AE's open items 4 and 5 are untouched: still no reviewer-set level path, and the expired
+   prod OpenAI key is unrelated but still live.

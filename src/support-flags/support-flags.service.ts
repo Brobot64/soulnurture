@@ -13,12 +13,42 @@ import { AuditService } from '../audit/audit.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { inSchool, schoolOf } from '../common/tenant/school-scope.js';
 import { indicatorRuleById } from '../ai/intents/indicators.config.js';
+import {
+  INTENT_LEVEL_MAPPING_VERSION,
+  levelOriginForFlag,
+} from '../ai/intents/indicator-levels.js';
 
 const LEVELS: string[] = Object.values(IndicatorLevel);
 
 /** The chip set is fixed: four levels plus the unclassified bucket. */
 function emptyLevelCounts(): Record<IndicatorLevel | 'UNCLASSIFIED', number> {
   return { A: 0, B: 0, C: 0, U: 0, UNCLASSIFIED: 0 };
+}
+
+/**
+ * What graded this flag. `INDICATOR_RULE` is unreachable today because every rule
+ * in `indicators.config.ts` is `configured: false` and so leaves `ruleId` null;
+ * the other two are the automatic writers, and telling them apart is the whole
+ * point — a level that came from the AI's own alert tier is not a §3 condition
+ * grade, and a reviewer has to be able to see which one they are looking at.
+ */
+function levelSourceOf(flag: {
+  level: IndicatorLevel | null;
+  ruleId: string | null;
+  intentId: string | null;
+}): 'INDICATOR_RULE' | 'INTENT_MAPPING' | 'AI_TIER' | null {
+  if (flag.level === null) return null;
+  if (flag.ruleId) return 'INDICATOR_RULE';
+  return levelOriginForFlag(flag);
+}
+
+function levelSourceVersionOf(flag: {
+  level: IndicatorLevel | null;
+  ruleId: string | null;
+  ruleVersion: string | null;
+}): string | null {
+  if (flag.level === null) return null;
+  return flag.ruleId ? flag.ruleVersion : INTENT_LEVEL_MAPPING_VERSION;
 }
 
 /**
@@ -180,6 +210,12 @@ export class SupportFlagsService {
         ruleLabel: rule?.label ?? null,
         ruleConfigured: rule ? rule.configured : null,
         ruleBlockedOn: rule?.blockedOn ?? null,
+        // §7.5 and §10: a level on a reviewer's screen has to say what produced
+        // it. No IND-* rule is switched on, so an automatic level came either from
+        // the §3 condition table or from the AI's own alert tier, and this reports
+        // which — so a provisional grade cannot read as a clinical one.
+        levelSource: levelSourceOf(flag),
+        levelSourceVersion: levelSourceVersionOf(flag),
       },
       aiSummary: flag.aiContextSummary,
       humanDecision: {
