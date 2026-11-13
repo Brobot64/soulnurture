@@ -8,6 +8,7 @@ import { RealtimeModule } from '../realtime/realtime.module.js';
 import { StudentsModule } from '../students/students.module.js';
 import { SupportFlagsModule } from '../support-flags/support-flags.module.js';
 import { AiController } from './ai.controller.js';
+import { AiAdminController } from './ai-admin.controller.js';
 import { AiService } from './ai.service.js';
 import { AiContextService } from './context/ai-context.service.js';
 import { AiDisclosureController } from './disclosure/disclosure.controller.js';
@@ -34,6 +35,7 @@ import { LanguageDetectorService } from './language/language-detector.service.js
 import { NatlasLlmProvider } from './providers/natlas/natlas-llm.provider.js';
 import { NatlasTranslationProvider } from './providers/natlas/natlas.provider.js';
 import { NAtlasAsrProvider } from './providers/natlas/natlas-asr.provider.js';
+import { NatlasEndpointsService } from './providers/natlas/natlas-endpoints.service.js';
 import { ReplyRendererService } from './language/reply-renderer.service.js';
 
 @Module({
@@ -47,7 +49,7 @@ import { ReplyRendererService } from './language/reply-renderer.service.js';
     SupportFlagsModule,
     RealtimeModule,
   ],
-  controllers: [AiController, AiDisclosureController],
+  controllers: [AiController, AiDisclosureController, AiAdminController],
   providers: [
     AiService,
     AiContextService,
@@ -63,6 +65,7 @@ import { ReplyRendererService } from './language/reply-renderer.service.js';
     NatlasLlmProvider,
     NatlasTranslationProvider,
     NAtlasAsrProvider,
+    NatlasEndpointsService,
     ReplyRendererService,
     {
       provide: AI_PROVIDER_CHAIN_MEMBERS,
